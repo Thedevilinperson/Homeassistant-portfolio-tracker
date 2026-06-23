@@ -1,3 +1,21 @@
-name: Portfolio Tracker add-ons
-url: https://github.com/Thedevilinperson/Homeassistant-portfolio-tracker
-maintainer: Thedevilinperson
+name: "Portfolio Tracker"
+version: "1.0.1"
+slug: "portfolio_tracker"
+description: "Streamlit app voor aandelen, ETF's en Belgische meerwaardebelasting met AI-advies"
+ingress: true
+ingress_port: 8501
+panel: true
+icon: "mdi:chart-line"
+ports:
+  8501/tcp: 8501
+map:
+  - share:rw
+arch:
+  - aarch64
+  - amd64
+  - armhf
+  - armv7
+startup: application
+boot: auto
+options: {}
+schema: {}
