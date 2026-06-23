@@ -1,0 +1,26 @@
+[server]
+headless          = true
+port              = 8501
+address           = "0.0.0.0"
+enableCORS        = false
+enableXsrfProtection = false
+# Geen bestandswatcher nodig in productie (bespaart resources op Pi 4)
+fileWatcherType   = "none"
+# Grotere upload limiet (voor toekomstige import-functie)
+maxUploadSize     = 10
+
+[browser]
+gatherUsageStats  = false
+serverAddress     = "0.0.0.0"
+serverPort        = 8501
+
+[theme]
+base              = "dark"
+primaryColor      = "#4fa3e0"
+backgroundColor   = "#0f1117"
+secondaryBackgroundColor = "#1a1d24"
+textColor         = "#e0e0e0"
+font              = "sans serif"
+
+[logger]
+level             = "warning"
