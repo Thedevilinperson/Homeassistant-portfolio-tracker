@@ -1,5 +1,11 @@
 """
 database.py — SQLite persistence layer voor Portfolio Tracker
+
+Uitbreidingen:
+  • account (rekening/oorsprong) per transactie
+  • costs / costs_currency / costs_eur (kosten per transactie, apart van TOB)
+  • total_amount_eur / fx_rate (alles wordt in EUR bijgehouden)
+  • beheerbare rekeningenlijst in settings
 """
 import sqlite3
 import os
@@ -8,6 +14,8 @@ from pathlib import Path
 
 DATA_DIR = os.environ.get("DATA_DIR", "/app/data")
 DB_PATH = os.path.join(DATA_DIR, "portfolio.db")
+
+DEFAULT_ACCOUNT = "Niet toegewezen"
 
 
 def _ensure_data_dir():
@@ -24,7 +32,7 @@ def get_connection() -> sqlite3.Connection:
 
 
 def init_db():
-    """Create all tables and seed default settings."""
+    """Create all tables, run migrations and seed default settings."""
     _ensure_data_dir()
     conn = get_connection()
     cur = conn.cursor()
@@ -34,8 +42,8 @@ def init_db():
             id          INTEGER PRIMARY KEY AUTOINCREMENT,
             ticker      TEXT    NOT NULL UNIQUE,
             name        TEXT,
-            asset_type  TEXT    DEFAULT 'stock',   -- stock | etf
-            etf_subtype TEXT    DEFAULT 'distributing', -- distributing | accumulating
+            asset_type  TEXT    DEFAULT 'stock',
+            etf_subtype TEXT    DEFAULT 'distributing',
             currency    TEXT    DEFAULT 'EUR',
             exchange    TEXT,
             created_at  TEXT    DEFAULT (datetime('now'))
@@ -78,8 +86,8 @@ def init_db():
 
         CREATE TABLE IF NOT EXISTS ai_evaluations (
             id              INTEGER PRIMARY KEY AUTOINCREMENT,
-            evaluation_type TEXT    NOT NULL,  -- market_evaluation | tax_optimization
-            timing          TEXT,              -- open | midday | close | daily | manual
+            evaluation_type TEXT    NOT NULL,
+            timing          TEXT,
             content         TEXT    NOT NULL,
             tickers         TEXT,
             created_at      TEXT    DEFAULT (datetime('now'))
@@ -102,11 +110,55 @@ def init_db():
             ('tob_max_etf_accumulating',    '4000'),
             ('withholding_tax_rate',        '0.30'),
             ('base_currency',               'EUR'),
-            ('anthropic_api_key',           '');
+            ('accounts',                    'Niet toegewezen'),
+            ('household_regime',            'single'),
+            ('anthropic_api_key',           ''),
+            ('openai_api_key',              '');
     """)
 
     conn.commit()
+    _migrate(conn)
     conn.close()
+
+
+# ── Migraties ────────────────────────────────────────────────────────────────
+
+def _column_exists(cur, table: str, col: str) -> bool:
+    cols = [r[1] for r in cur.execute(f"PRAGMA table_info({table})").fetchall()]
+    return col in cols
+
+
+def _migrate(conn):
+    """Voeg ontbrekende kolommen toe (idempotent)."""
+    cur = conn.cursor()
+
+    txn_cols = [
+        ("account",          f"TEXT DEFAULT '{DEFAULT_ACCOUNT}'"),
+        ("costs",            "REAL DEFAULT 0"),
+        ("costs_currency",   "TEXT DEFAULT 'EUR'"),
+        ("costs_eur",        "REAL DEFAULT 0"),
+        ("total_amount_eur", "REAL"),       # NULL bij oude rijen -> backfillen
+        ("fx_rate",          "REAL DEFAULT 1"),
+    ]
+    for col, ddl in txn_cols:
+        if not _column_exists(cur, "transactions", col):
+            cur.execute(f"ALTER TABLE transactions ADD COLUMN {col} {ddl}")
+
+    div_cols = [
+        ("fx_rate",          "REAL DEFAULT 1"),
+        ("gross_eur",        "REAL"),
+        ("withholding_eur",  "REAL"),
+    ]
+    for col, ddl in div_cols:
+        if not _column_exists(cur, "dividends", col):
+            cur.execute(f"ALTER TABLE dividends ADD COLUMN {col} {ddl}")
+
+    # Zorg dat oude rijen een rekening hebben
+    cur.execute(
+        "UPDATE transactions SET account=? WHERE account IS NULL OR account=''",
+        (DEFAULT_ACCOUNT,)
+    )
+    conn.commit()
 
 
 # ── Settings ────────────────────────────────────────────────────────────────
@@ -133,6 +185,34 @@ def get_all_settings() -> dict:
     rows = conn.execute("SELECT key,value FROM settings").fetchall()
     conn.close()
     return {r["key"]: r["value"] for r in rows}
+
+
+# ── Rekeningen ───────────────────────────────────────────────────────────────
+
+def get_accounts() -> list[str]:
+    """Lijst van rekeningnamen (oorsprong van de aandelen)."""
+    raw = get_setting("accounts", DEFAULT_ACCOUNT) or DEFAULT_ACCOUNT
+    accts = [a.strip() for a in raw.split("|") if a.strip()]
+    if DEFAULT_ACCOUNT not in accts:
+        accts.append(DEFAULT_ACCOUNT)
+    return accts
+
+
+def set_accounts(accounts: list[str]):
+    cleaned = [a.strip() for a in accounts if a.strip()]
+    if DEFAULT_ACCOUNT not in cleaned:
+        cleaned.append(DEFAULT_ACCOUNT)
+    set_setting("accounts", "|".join(dict.fromkeys(cleaned)))
+
+
+def get_used_accounts() -> list[str]:
+    """Rekeningen die daadwerkelijk in transacties voorkomen."""
+    conn = get_connection()
+    rows = conn.execute(
+        "SELECT DISTINCT account FROM transactions WHERE account IS NOT NULL ORDER BY account"
+    ).fetchall()
+    conn.close()
+    return [r["account"] for r in rows]
 
 
 # ── Assets ──────────────────────────────────────────────────────────────────
@@ -191,32 +271,59 @@ def delete_asset(ticker: str):
 # ── Transactions ─────────────────────────────────────────────────────────────
 
 def add_transaction(ticker, transaction_type, date, quantity, price_per_unit,
-                    total_amount, currency="EUR", tob_tax=0.0, notes=None):
+                    total_amount, currency="EUR", tob_tax=0.0, notes=None,
+                    account=DEFAULT_ACCOUNT, costs=0.0, costs_currency="EUR",
+                    fx_rate=1.0, total_amount_eur=None, costs_eur=None):
+    if total_amount_eur is None:
+        total_amount_eur = total_amount * (fx_rate or 1.0)
+    if costs_eur is None:
+        costs_eur = 0.0
     conn = get_connection()
     conn.execute(
         """INSERT INTO transactions
            (ticker,transaction_type,date,quantity,price_per_unit,total_amount,
-            currency,tob_tax,notes)
-           VALUES (?,?,?,?,?,?,?,?,?)""",
+            currency,tob_tax,notes,account,costs,costs_currency,costs_eur,
+            total_amount_eur,fx_rate)
+           VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
         (ticker.upper(), transaction_type, date, quantity, price_per_unit,
-         total_amount, currency, tob_tax, notes)
+         total_amount, currency, tob_tax, notes, account, costs, costs_currency,
+         costs_eur, total_amount_eur, fx_rate)
     )
     conn.commit()
     conn.close()
 
 
-def get_transactions(ticker=None, year=None, txn_type=None) -> list[dict]:
+def get_transactions(ticker=None, year=None, txn_type=None, account=None) -> list[dict]:
     conn = get_connection()
     q, p = "SELECT * FROM transactions", []
     conds = []
-    if ticker:   conds.append("ticker=?");                          p.append(ticker.upper())
-    if year:     conds.append("strftime('%Y',date)=?");             p.append(str(year))
-    if txn_type: conds.append("transaction_type=?");                p.append(txn_type)
+    if ticker:   conds.append("ticker=?");              p.append(ticker.upper())
+    if year:     conds.append("strftime('%Y',date)=?"); p.append(str(year))
+    if txn_type: conds.append("transaction_type=?");    p.append(txn_type)
+    if account:  conds.append("account=?");             p.append(account)
     if conds: q += " WHERE " + " AND ".join(conds)
     q += " ORDER BY date ASC"
     rows = conn.execute(q, p).fetchall()
     conn.close()
     return [dict(r) for r in rows]
+
+
+def update_transaction_account(txn_id: int, account: str):
+    conn = get_connection()
+    conn.execute("UPDATE transactions SET account=? WHERE id=?", (account, txn_id))
+    conn.commit()
+    conn.close()
+
+
+def set_transaction_eur(txn_id: int, fx_rate: float, total_amount_eur: float,
+                        costs_eur: float):
+    conn = get_connection()
+    conn.execute(
+        "UPDATE transactions SET fx_rate=?, total_amount_eur=?, costs_eur=? WHERE id=?",
+        (fx_rate, total_amount_eur, costs_eur, txn_id)
+    )
+    conn.commit()
+    conn.close()
 
 
 def delete_transaction(txn_id: int):
@@ -229,12 +336,20 @@ def delete_transaction(txn_id: int):
 # ── Dividends ────────────────────────────────────────────────────────────────
 
 def add_dividend(ticker, date, gross_amount, withholding_tax=0.0,
-                 currency="EUR", notes=None):
+                 currency="EUR", notes=None, fx_rate=1.0,
+                 gross_eur=None, withholding_eur=None):
+    if gross_eur is None:
+        gross_eur = gross_amount * (fx_rate or 1.0)
+    if withholding_eur is None:
+        withholding_eur = withholding_tax * (fx_rate or 1.0)
     conn = get_connection()
     conn.execute(
-        """INSERT INTO dividends (ticker,date,gross_amount,withholding_tax,currency,notes)
-           VALUES (?,?,?,?,?,?)""",
-        (ticker.upper(), date, gross_amount, withholding_tax, currency, notes)
+        """INSERT INTO dividends
+           (ticker,date,gross_amount,withholding_tax,currency,notes,
+            fx_rate,gross_eur,withholding_eur)
+           VALUES (?,?,?,?,?,?,?,?,?)""",
+        (ticker.upper(), date, gross_amount, withholding_tax, currency, notes,
+         fx_rate, gross_eur, withholding_eur)
     )
     conn.commit()
     conn.close()
@@ -256,6 +371,17 @@ def get_dividends(ticker=None, year=None) -> list[dict]:
 def delete_dividend(div_id: int):
     conn = get_connection()
     conn.execute("DELETE FROM dividends WHERE id=?", (div_id,))
+    conn.commit()
+    conn.close()
+
+
+def set_dividend_eur(div_id: int, fx_rate: float, gross_eur: float,
+                     withholding_eur: float):
+    conn = get_connection()
+    conn.execute(
+        "UPDATE dividends SET fx_rate=?, gross_eur=?, withholding_eur=? WHERE id=?",
+        (fx_rate, gross_eur, withholding_eur, div_id)
+    )
     conn.commit()
     conn.close()
 
@@ -322,7 +448,6 @@ def get_ai_evaluations(evaluation_type: str = None, limit: int = 10) -> list[dic
 
 
 def cleanup_old_prices(keep_days: int = 90):
-    """Remove price records older than keep_days to limit DB size."""
     conn = get_connection()
     conn.execute(
         "DELETE FROM price_history WHERE timestamp < datetime('now', ? || ' days')",

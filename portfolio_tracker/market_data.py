@@ -1,10 +1,10 @@
 """
 market_data.py — yfinance wrapper met in-memory cache
-Haalt koersen, wisselkoersen en basisbedrijfsinfo op.
+Haalt koersen, wisselkoersen (actueel + historisch) en basisbedrijfsinfo op.
 """
 import time
 import logging
-from datetime import datetime
+from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 
 import yfinance as yf
@@ -14,6 +14,10 @@ logger = logging.getLogger(__name__)
 # ── In-memory cache (5 minuten TTL) ─────────────────────────────────────────
 _CACHE: dict[str, tuple[float, float, str]] = {}  # ticker -> (epoch, price, currency)
 CACHE_TTL = 300  # seconden
+
+# Aparte cache voor historische reeksen (1 uur TTL)
+_HIST_CACHE: dict[str, tuple[float, object]] = {}
+HIST_TTL = 3600
 
 
 def _cached(ticker: str) -> tuple[float, str] | tuple[None, None]:
@@ -30,7 +34,6 @@ def _store(ticker: str, price: float, currency: str):
 # ── Publieke API ─────────────────────────────────────────────────────────────
 
 def get_stock_info(ticker: str) -> dict:
-    """Haal basisinfo op: naam, valuta, exchange, type."""
     try:
         info = yf.Ticker(ticker).info
         qt = info.get("quoteType", "").lower()
@@ -46,11 +49,9 @@ def get_stock_info(ticker: str) -> dict:
 
 
 def get_current_price(ticker: str) -> tuple[float | None, str | None]:
-    """Huidige prijs + valuta. Gebruikt cache tot 5 min."""
     cached_price, cached_cur = _cached(ticker)
     if cached_price is not None:
         return cached_price, cached_cur
-
     try:
         tkr = yf.Ticker(ticker)
         info = tkr.info
@@ -60,25 +61,20 @@ def get_current_price(ticker: str) -> tuple[float | None, str | None]:
             or info.get("previousClose")
         )
         currency = info.get("currency", "EUR")
-
         if price is None:
             hist = tkr.history(period="1d", auto_adjust=True)
             if not hist.empty:
                 price = float(hist["Close"].iloc[-1])
-
         if price is not None:
             price = float(price)
             _store(ticker, price, currency)
             return price, currency
-
     except Exception as e:
         logger.warning(f"get_current_price({ticker}): {e}")
-
     return None, None
 
 
 def get_prices_for_tickers(tickers: list[str]) -> dict[str, dict]:
-    """Haal meerdere koersen tegelijk op."""
     result = {}
     for ticker in tickers:
         price, currency = get_current_price(ticker)
@@ -87,7 +83,7 @@ def get_prices_for_tickers(tickers: list[str]) -> dict[str, dict]:
 
 
 def get_exchange_rate(from_currency: str, to_currency: str = "EUR") -> float | None:
-    """Wisselkoers from_currency → to_currency."""
+    """Actuele wisselkoers from_currency → to_currency."""
     if from_currency == to_currency:
         return 1.0
     pair = f"{from_currency}{to_currency}=X"
@@ -112,32 +108,83 @@ def get_exchange_rate(from_currency: str, to_currency: str = "EUR") -> float | N
 
 
 def convert_to_eur(amount: float, currency: str) -> float | None:
-    """Converteer bedrag naar EUR."""
     if currency == "EUR":
         return amount
     rate = get_exchange_rate(currency, "EUR")
     return amount * rate if rate else None
 
 
+# ── Historische data ─────────────────────────────────────────────────────────
+
+def get_historical_exchange_rate(from_currency: str, on_date: str,
+                                 to_currency: str = "EUR") -> float | None:
+    """
+    Wisselkoers from→to op (of vlak vóór) een specifieke datum 'YYYY-MM-DD'.
+    Gebruikt voor het correct omrekenen van transacties op hun eigen datum.
+    """
+    if from_currency == to_currency:
+        return 1.0
+    pair = f"{from_currency}{to_currency}=X"
+    try:
+        d = datetime.strptime(on_date[:10], "%Y-%m-%d")
+        start = (d - timedelta(days=7)).strftime("%Y-%m-%d")
+        end = (d + timedelta(days=1)).strftime("%Y-%m-%d")
+        hist = yf.Ticker(pair).history(start=start, end=end)
+        if not hist.empty:
+            return float(hist["Close"].iloc[-1])
+    except Exception as e:
+        logger.warning(f"get_historical_exchange_rate({pair},{on_date}): {e}")
+    # Val terug op de actuele koers als historisch niet lukt
+    return get_exchange_rate(from_currency, to_currency)
+
+
+def get_price_series(ticker: str, start: str, end: str | None = None):
+    """
+    Dagelijkse slotkoersen (native valuta) als pandas Series, geïndexeerd op datum.
+    Cache: 1 uur. Geeft None bij fout.
+    """
+    key = f"series:{ticker}:{start}:{end}"
+    entry = _HIST_CACHE.get(key)
+    if entry and (time.time() - entry[0]) < HIST_TTL:
+        return entry[1]
+    try:
+        end = end or (datetime.now() + timedelta(days=1)).strftime("%Y-%m-%d")
+        hist = yf.Ticker(ticker).history(start=start, end=end, auto_adjust=True)
+        if hist.empty:
+            return None
+        series = hist["Close"].copy()
+        series.index = series.index.tz_localize(None).normalize()
+        _HIST_CACHE[key] = (time.time(), series)
+        return series
+    except Exception as e:
+        logger.warning(f"get_price_series({ticker}): {e}")
+        return None
+
+
+def get_fx_series(from_currency: str, start: str, end: str | None = None):
+    """Dagelijkse wisselkoers from→EUR als pandas Series. None=1.0 (EUR)."""
+    if from_currency == "EUR":
+        return None
+    return get_price_series(f"{from_currency}EUR=X", start, end)
+
+
 # ── Beurstijden ──────────────────────────────────────────────────────────────
 
 EXCHANGE_HOURS = {
-    # exchange-code → (open_uur_CET, sluit_uur_CET, tz)
-    "ENX":   (9, 0,  17, 35, "Europe/Brussels"),   # Euronext Brussel
+    "ENX":   (9, 0,  17, 35, "Europe/Brussels"),
     "AMS":   (9, 0,  17, 35, "Europe/Amsterdam"),
     "EPA":   (9, 0,  17, 35, "Europe/Paris"),
     "EBR":   (9, 0,  17, 35, "Europe/Brussels"),
     "XETR":  (9, 0,  17, 35, "Europe/Berlin"),
-    "NMS":   (15, 30, 22, 0, "US/Eastern"),        # NASDAQ
-    "NYQ":   (15, 30, 22, 0, "US/Eastern"),        # NYSE
+    "NMS":   (15, 30, 22, 0, "US/Eastern"),
+    "NYQ":   (15, 30, 22, 0, "US/Eastern"),
     "NGM":   (15, 30, 22, 0, "US/Eastern"),
 }
 
 
 def is_market_open(exchange: str) -> bool:
-    """Check of de beurs op dit moment open is (ruwe benadering)."""
     now_brussels = datetime.now(ZoneInfo("Europe/Brussels"))
-    if now_brussels.weekday() >= 5:  # zaterdag/zondag
+    if now_brussels.weekday() >= 5:
         return False
     hours = EXCHANGE_HOURS.get(exchange)
     if not hours:
@@ -152,7 +199,6 @@ def is_market_open(exchange: str) -> bool:
 
 
 def get_market_state(ticker: str) -> str:
-    """'REGULAR', 'PRE', 'POST' of 'CLOSED'."""
     try:
         info = yf.Ticker(ticker).info
         return info.get("marketState", "CLOSED")

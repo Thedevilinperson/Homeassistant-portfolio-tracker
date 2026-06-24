@@ -1,5 +1,5 @@
 name: "Portfolio Tracker"
-version: "1.0.1"
+version: "1.1.0"
 slug: "portfolio_tracker"
 description: "Streamlit app voor aandelen, ETF's en Belgische meerwaardebelasting met AI-advies"
 ingress: true
