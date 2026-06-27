@@ -17,6 +17,7 @@ from __future__ import annotations
 import logging
 import os
 import sys
+from datetime import datetime
 from zoneinfo import ZoneInfo
 
 # ── Zorg dat de map van dit bestand altijd in het Python-pad staat,
@@ -94,6 +95,22 @@ def on_job_executed(event):
 
 # ── Main ──────────────────────────────────────────────────────────────────────
 
+def _next_run(job):
+    """Volgende runtijd van een job, ook als die nog 'pending' is.
+
+    Nieuwere APScheduler-versies zetten 'next_run_time' pas na scheduler.start().
+    Omdat de jobs hier (BlockingScheduler) vóór start() worden gelogd, valt dat
+    attribuut soms weg -> we berekenen de volgende runtijd dan uit de trigger.
+    """
+    nrt = getattr(job, "next_run_time", None)
+    if nrt is not None:
+        return nrt
+    try:
+        return job.trigger.get_next_fire_time(None, datetime.now(BRUSSELS))
+    except Exception:
+        return "n.t.b."
+
+
 def main():
     db.init_db()
 
@@ -150,7 +167,7 @@ def main():
 
     logger.info("🚀 Scheduler gestart. Geplande jobs:")
     for job in scheduler.get_jobs():
-        logger.info(f"   • {job.id:<15s} → volgende run: {job.next_run_time}")
+        logger.info(f"   • {job.id:<15s} → volgende run: {_next_run(job)}")
 
     # Initiële koerstracking bij opstart
     try:
