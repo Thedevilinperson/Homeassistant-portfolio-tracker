@@ -182,7 +182,7 @@ def page_dashboard():
             height=300, margin=dict(t=40, b=0, l=0, r=0),
             paper_bgcolor="rgba(0,0,0,0)", showlegend=False,
         )
-        st.plotly_chart(fig_pie, use_container_width=True)
+        st.plotly_chart(fig_pie, width='stretch')
 
         # Staafdiagram W/V per positie
         tickers_sorted = sorted(pv.keys(), key=lambda t: pv[t]["unrealized_gain_loss"] or 0)
@@ -201,7 +201,7 @@ def page_dashboard():
             margin=dict(t=40, b=30, l=20, r=20),
             plot_bgcolor="rgba(0,0,0,0)", paper_bgcolor="rgba(0,0,0,0)",
         )
-        st.plotly_chart(fig_bar, use_container_width=True)
+        st.plotly_chart(fig_bar, width='stretch')
 
     with col_r:
         # Belastingstatus
@@ -305,7 +305,7 @@ def page_portfolio():
         })
 
     df = pd.DataFrame(rows)
-    st.dataframe(df, use_container_width=True, hide_index=True, height=420)
+    st.dataframe(df, width='stretch', hide_index=True, height=420)
 
     # Totaalrij
     total_val  = overview["total_portfolio_value"]
@@ -367,7 +367,7 @@ def page_portfolio():
                 "Sterk verkopen": c["strong_sell"],
                 "Koersdoel":      f"{s['latest_target']:.2f} {s['currency']}" if s.get("latest_target") else "—",
             })
-        st.dataframe(pd.DataFrame(srows), use_container_width=True, hide_index=True)
+        st.dataframe(pd.DataFrame(srows), width='stretch', hide_index=True)
         st.caption("Telling van de ratings over de laatste (max 9) AI-adviesrondes per ticker. "
                    "Consensus = meest voorkomende rating. Afgestemd op je profiel per rekening en je investeringsvolume.")
     else:
@@ -399,7 +399,7 @@ def page_portfolio():
             height=340, plot_bgcolor="rgba(0,0,0,0)", paper_bgcolor="rgba(0,0,0,0)",
             margin=dict(t=40, b=30, l=20, r=20),
         )
-        st.plotly_chart(fig, use_container_width=True)
+        st.plotly_chart(fig, width='stretch')
     else:
         st.info("Nog geen prijsgeschiedenis. De scheduler slaat elke 5 minuten koersen op.")
 
@@ -770,18 +770,29 @@ def page_dividends():
                     d_date     = st.date_input("Datum *", value=date.today())
                     d_currency = st.selectbox("Munt", ["EUR", "USD", "GBP"])
                 with c2:
-                    gross  = st.number_input("Bruto dividend (€) *", min_value=0.01, step=0.01, format="%.2f")
-                    wh_pct = st.number_input("Roerende voorheffing (%)", min_value=0.0,
+                    gross  = st.number_input("Bruto dividend *", min_value=0.01, step=0.01, format="%.2f")
+                    wh_pct = st.number_input("Ingehouden voorheffing (%)", min_value=0.0,
                                               max_value=100.0, value=wh_default * 100, step=0.5)
                     wh_amt = gross * wh_pct / 100
                     net    = gross - wh_amt
-                    st.info(f"**Netto ontvangen:** {d_currency} {net:,.2f} (RV: {d_currency} {wh_amt:,.2f})")
+                    st.info(f"**Netto ontvangen:** {d_currency} {net:,.2f} (voorheffing: {d_currency} {wh_amt:,.2f})")
+                fc1, fc2 = st.columns(2)
+                with fc1:
+                    foreign_done = st.checkbox(
+                        "🌍 Bronbelasting al ingehouden",
+                        help="Buitenlandse roerende voorheffing die de uitkerende instantie al aan de bron inhield.")
+                with fc2:
+                    rv_done = st.checkbox(
+                        "🇧🇪 Roerende voorheffing al ingehouden",
+                        help="Belgische RV (30%) die je broker al inhield (bv. bij een Belgische broker). "
+                             "Zo niet, moet je die mogelijk nog aangeven.")
                 notes = st.text_area("Notities (optioneel)", height=60)
                 if st.form_submit_button("✅ Dividend toevoegen", type="primary"):
                     fx_rate, gross_eur = compute_eur(gross, d_currency, d_date)
                     _, wh_eur = compute_eur(wh_amt, d_currency, d_date)
                     db.add_dividend(d_ticker, str(d_date), gross, wh_amt, d_currency, notes or None,
-                                    fx_rate=fx_rate, gross_eur=gross_eur, withholding_eur=wh_eur)
+                                    fx_rate=fx_rate, gross_eur=gross_eur, withholding_eur=wh_eur,
+                                    foreign_wht_withheld=foreign_done, belgian_rv_withheld=rv_done)
                     clear_cache()
                     st.success(f"✅ Dividend {d_currency} {net:.2f} netto voor {d_ticker} toegevoegd!")
                     st.rerun()
@@ -801,8 +812,16 @@ def page_dividends():
 
         c1, c2, c3 = st.columns(3)
         c1.metric("Bruto", eur(total_gross))
-        c2.metric("Roerende voorheffing", eur(total_wh))
+        c2.metric("Voorheffing", eur(total_wh))
         c3.metric("Netto ontvangen", eur(total_net))
+
+        # Dividenden zonder ingehouden Belgische RV -> mogelijk nog aan te geven
+        te_geven = [d for d in divs if not d.get("belgian_rv_withheld")]
+        if te_geven:
+            som = sum((d.get("gross_eur") or d["gross_amount"]) -
+                      (d.get("withholding_eur") or d["withholding_tax"]) for d in te_geven)
+            st.warning(f"🇧🇪 {len(te_geven)} dividend(en) zonder ingehouden Belgische roerende voorheffing "
+                       f"(netto ± {eur(som)}). Mogelijk nog aan te geven in je belastingaangifte.")
         st.divider()
 
         for d in divs:
@@ -811,11 +830,14 @@ def page_dividends():
             with c_info:
                 st.markdown(f"🎁 **{d['ticker']}**")
                 st.caption(f"📅 {d['date']}")
+                f1 = "🌍 bronbelasting ✓" if d.get("foreign_wht_withheld") else "🌍 bronbelasting ✗"
+                f2 = "🇧🇪 RV ✓" if d.get("belgian_rv_withheld") else "🇧🇪 RV ✗"
+                st.caption(f"{f1} | {f2}")
                 if d.get("notes"):
                     st.caption(f"📝 {d['notes']}")
             with c_val:
                 st.markdown(f"Bruto: **{d['currency']} {d['gross_amount']:,.2f}**")
-                st.caption(f"RV: {d['currency']} {d['withholding_tax']:,.2f} | Netto: {d['currency']} {net:,.2f}")
+                st.caption(f"Voorheffing: {d['currency']} {d['withholding_tax']:,.2f} | Netto: {d['currency']} {net:,.2f}")
             with c_del:
                 if st.button("🗑️", key=f"del_d_{d['id']}"):
                     db.delete_dividend(d["id"])
@@ -931,7 +953,7 @@ def page_tax():
             "Verkoopwaarde": eur(g["sell_total"]),
             "Winst/Verlies": eur(g["gain_loss"]),
         } for g in sorted(year_gains, key=lambda x: x["date"], reverse=True)]
-        st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
+        st.dataframe(pd.DataFrame(rows), width='stretch', hide_index=True)
     else:
         st.info(f"Geen gerealiseerde transacties in {sel_year}.")
 
@@ -951,7 +973,7 @@ def page_tax():
         } for t in txns_year if t["tob_tax"]]
         if tob_rows:
             with st.expander("TOB-detail per transactie"):
-                st.dataframe(pd.DataFrame(tob_rows), use_container_width=True, hide_index=True)
+                st.dataframe(pd.DataFrame(tob_rows), width='stretch', hide_index=True)
 
 
 # ── PAGINA: AI Advisor ────────────────────────────────────────────────────────
@@ -963,6 +985,47 @@ def page_ai_advisor():
     if not api_key:
         st.warning("⚠️ Voeg uw OpenAI API-sleutel toe in **⚙️ Instellingen** om AI-functies te gebruiken.")
         return
+
+    # ── AI-kosten ─────────────────────────────────────────────────────────────
+    usage = db.get_ai_usage_summary()
+    if usage["total_calls"]:
+        try:
+            tot_eur = md.convert_to_eur(usage["total_cost_usd"], "USD")
+            mon_eur = md.convert_to_eur(usage["month_cost_usd"], "USD")
+        except Exception:
+            tot_eur = mon_eur = None
+        k1, k2, k3 = st.columns(3)
+        k1.metric("💵 AI-kosten totaal",
+                  f"${usage['total_cost_usd']:.4f}",
+                  help="Geschat op basis van tokengebruik en richtprijzen. De exacte factuur staat op je OpenAI-dashboard.")
+        k2.metric("📅 Deze maand", f"${usage['month_cost_usd']:.4f}",
+                  delta=f"{usage['month_calls']} oproep(en)", delta_color="off")
+        k3.metric("🔢 Totaal oproepen", str(usage["total_calls"]),
+                  delta=(f"≈ {eur(tot_eur)}" if tot_eur is not None else None), delta_color="off")
+        with st.expander("📊 Uitsplitsing AI-kosten"):
+            if usage["by_model"]:
+                st.caption("Per model")
+                st.dataframe(pd.DataFrame([{
+                    "Model": r["model"],
+                    "Oproepen": r["n"],
+                    "Input-tokens": f"{r['pt']:,}",
+                    "Output-tokens": f"{r['ct']:,}",
+                    "Kost (USD)": f"${r['c']:.4f}",
+                } for r in usage["by_model"]]), width='stretch', hide_index=True)
+            if usage["by_function"]:
+                st.caption("Per functie")
+                func_labels = {"tax_optimization": "Belastingadvies",
+                               "market_evaluation": "Marktevaluatie",
+                               "portfolio_ratings": "Portefeuille-ratings",
+                               "price_target": "Koersdoel", "chat": "Overig"}
+                st.dataframe(pd.DataFrame([{
+                    "Functie": func_labels.get(r["function"], r["function"]),
+                    "Oproepen": r["n"],
+                    "Kost (USD)": f"${r['c']:.4f}",
+                } for r in usage["by_function"]]), width='stretch', hide_index=True)
+            st.caption("ℹ️ Richtprijzen medio 2026; werkelijke kosten kunnen afwijken. "
+                       "Controleer je OpenAI-dashboard voor de exacte factuur.")
+        st.divider()
 
     tab_tax, tab_open, tab_mid, tab_close = st.tabs([
         "💡 Belastingoptimalisatie",
@@ -1290,7 +1353,7 @@ def page_evolution():
                           plot_bgcolor="rgba(0,0,0,0)", paper_bgcolor="rgba(0,0,0,0)",
                           legend=dict(orientation="h", y=-0.15), hovermode="x unified")
     fig_val.update_yaxes(tickprefix="€")
-    st.plotly_chart(fig_val, use_container_width=True)
+    st.plotly_chart(fig_val, width='stretch')
 
     # ── Grafiek 2: procentuele meer-/minwaarde t.o.v. aankoopprijs ────────────
     st.subheader("📊 Procentuele meer-/minwaarde t.o.v. aankoopprijs")
@@ -1309,7 +1372,7 @@ def page_evolution():
                           plot_bgcolor="rgba(0,0,0,0)", paper_bgcolor="rgba(0,0,0,0)",
                           legend=dict(orientation="h", y=-0.15), hovermode="x unified")
     fig_pct.update_yaxes(ticksuffix="%")
-    st.plotly_chart(fig_pct, use_container_width=True)
+    st.plotly_chart(fig_pct, width='stretch')
 
     # ── Huidige momentopname per rekening ─────────────────────────────────────
     st.divider()
@@ -1329,7 +1392,7 @@ def page_evolution():
             "W/V (%)":        pct(s["gain_loss_pct"]),
         })
     if rows:
-        st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
+        st.dataframe(pd.DataFrame(rows), width='stretch', hide_index=True)
         fig_cmp = go.Figure(go.Bar(
             x=[r["Rekening"] for r in rows],
             y=[summ[r["Rekening"]]["gain_loss_pct"] for r in rows],
@@ -1342,7 +1405,7 @@ def page_evolution():
                               margin=dict(t=40, b=30, l=20, r=20), showlegend=False,
                               plot_bgcolor="rgba(0,0,0,0)", paper_bgcolor="rgba(0,0,0,0)")
         fig_cmp.update_yaxes(ticksuffix="%")
-        st.plotly_chart(fig_cmp, use_container_width=True)
+        st.plotly_chart(fig_cmp, width='stretch')
 
 
 # ── Navigatie ─────────────────────────────────────────────────────────────────

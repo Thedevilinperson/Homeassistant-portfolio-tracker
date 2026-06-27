@@ -27,6 +27,23 @@ logger = logging.getLogger(__name__)
 
 MAX_TOKENS = 1800
 
+# Richtprijzen per 1M tokens (USD, input/output) — stand medio 2026.
+# Dit zijn schattingen voor kostenraming; de echte factuur staat op je
+# OpenAI-dashboard. Pas indien nodig aan bij prijswijzigingen.
+MODEL_PRICING = {
+    "gpt-4.1":      (2.00, 8.00),
+    "gpt-4.1-mini": (0.40, 1.60),
+    "gpt-4.1-nano": (0.10, 0.40),
+    "gpt-4o":       (2.50, 10.00),
+    "gpt-4o-mini":  (0.15, 0.60),
+}
+_DEFAULT_PRICE = (0.40, 1.60)  # fallback ~ gpt-4.1-mini
+
+
+def estimate_cost_usd(model: str, prompt_tokens: int, completion_tokens: int) -> float:
+    pin, pout = MODEL_PRICING.get(model, _DEFAULT_PRICE)
+    return (prompt_tokens / 1_000_000) * pin + (completion_tokens / 1_000_000) * pout
+
 AVAILABLE_MODELS = {
     "gpt-4.1-mini":  "GPT-4.1 Mini — aanbevolen (snel, kostenefficiënt, sterk)",
     "gpt-4.1":       "GPT-4.1 — hoogste kwaliteit, hogere kost",
@@ -168,7 +185,8 @@ ADVISOR_PERSONA = (
 
 
 def _chat(client: OpenAI, model: str, system_msg: str, user_msg: str,
-          max_tokens: int = MAX_TOKENS, temperature: float = 0.4) -> str:
+          max_tokens: int = MAX_TOKENS, temperature: float = 0.4,
+          track_as: str = "chat") -> str:
     response = client.chat.completions.create(
         model=model,
         messages=[
@@ -178,6 +196,15 @@ def _chat(client: OpenAI, model: str, system_msg: str, user_msg: str,
         max_tokens=max_tokens,
         temperature=temperature,
     )
+    # Tokengebruik + kost registreren (best effort — nooit de call laten falen)
+    try:
+        usage = getattr(response, "usage", None)
+        pt = getattr(usage, "prompt_tokens", 0) or 0
+        ct = getattr(usage, "completion_tokens", 0) or 0
+        cost = estimate_cost_usd(model, pt, ct)
+        db.record_ai_usage(track_as, model, pt, ct, cost)
+    except Exception as exc:
+        logger.warning(f"AI-gebruik registreren mislukt: {exc}")
     return response.choices[0].message.content or ""
 
 
@@ -245,7 +272,7 @@ Geef 4 concrete, actiegerichte aanbevelingen voor belastingoptimalisatie voor de
 Houd rekening met het profiel per rekening. Gebruik vetgedrukte koppen en verwijs naar tickers en bedragen.
 """
     try:
-        content = _chat(client, model, ADVISOR_PERSONA, user)
+        content = _chat(client, model, ADVISOR_PERSONA, user, track_as="tax_optimization")
         db.save_ai_evaluation("tax_optimization", content, timing="daily",
                               tickers=",".join(p["ticker"] for p in ctx["posities"]))
         return content
@@ -301,7 +328,7 @@ OPDRACHT — Geef een marktevaluatie in dit formaat:
 **📌 Conclusie** (1-2 zinnen)
 """
     try:
-        content = _chat(client, model, ADVISOR_PERSONA, user)
+        content = _chat(client, model, ADVISOR_PERSONA, user, track_as="market_evaluation")
         db.save_ai_evaluation("market_evaluation", content, timing=timing,
                               tickers=",".join(p["ticker"] for p in ctx["posities"]))
         return content
@@ -354,7 +381,7 @@ Antwoord UITSLUITEND met geldige JSON in exact dit formaat (geen markdown):
 }}
 """
     try:
-        raw = _chat(client, model, ADVISOR_PERSONA, user, temperature=0.3)
+        raw = _chat(client, model, ADVISOR_PERSONA, user, temperature=0.3, track_as="portfolio_ratings")
         data = _parse_json(raw)
         ratings = data.get("ratings", []) if isinstance(data, dict) else data
         batch_id = datetime.now().strftime("%Y%m%d%H%M%S")
@@ -419,7 +446,7 @@ en het beleggingsprofiel. Antwoord UITSLUITEND met geldige JSON (geen markdown):
         " Voor koersdoelen ben je nuchter en onderbouwd; je geeft een puntschatting "
         "maar erkent de onzekerheid.")
     try:
-        raw = _chat(client, model, system, user, max_tokens=600, temperature=0.3)
+        raw = _chat(client, model, system, user, max_tokens=600, temperature=0.3, track_as="price_target")
         data = _parse_json(raw)
         target = data.get("price_target")
         if target is None:

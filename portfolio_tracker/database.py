@@ -119,6 +119,17 @@ def init_db():
         CREATE INDEX IF NOT EXISTS idx_ai_ratings_batch ON ai_ratings(batch_id);
         CREATE INDEX IF NOT EXISTS idx_ai_ratings_ticker ON ai_ratings(ticker);
 
+        CREATE TABLE IF NOT EXISTS ai_usage (
+            id                INTEGER PRIMARY KEY AUTOINCREMENT,
+            function          TEXT,
+            model             TEXT,
+            prompt_tokens     INTEGER DEFAULT 0,
+            completion_tokens INTEGER DEFAULT 0,
+            cost_usd          REAL    DEFAULT 0,
+            created_at        TEXT    DEFAULT (datetime('now'))
+        );
+        CREATE INDEX IF NOT EXISTS idx_ai_usage_created ON ai_usage(created_at);
+
         CREATE TABLE IF NOT EXISTS settings (
             key        TEXT PRIMARY KEY,
             value      TEXT NOT NULL,
@@ -179,6 +190,8 @@ def _migrate(conn):
         ("fx_rate",          "REAL DEFAULT 1"),
         ("gross_eur",        "REAL"),
         ("withholding_eur",  "REAL"),
+        ("foreign_wht_withheld", "INTEGER DEFAULT 0"),  # bronbelasting al ingehouden?
+        ("belgian_rv_withheld",  "INTEGER DEFAULT 0"),  # roerende voorheffing al ingehouden?
     ]
     for col, ddl in div_cols:
         if not _column_exists(cur, "dividends", col):
@@ -363,6 +376,54 @@ def get_latest_price_target(ticker: str) -> dict | None:
     return dict(row) if row else None
 
 
+# ── AI-gebruik & kosten ───────────────────────────────────────────────────────
+
+def record_ai_usage(function, model, prompt_tokens, completion_tokens, cost_usd):
+    conn = get_connection()
+    conn.execute(
+        """INSERT INTO ai_usage
+           (function,model,prompt_tokens,completion_tokens,cost_usd)
+           VALUES (?,?,?,?,?)""",
+        (function, model, int(prompt_tokens or 0), int(completion_tokens or 0),
+         float(cost_usd or 0.0))
+    )
+    conn.commit()
+    conn.close()
+
+
+def get_ai_usage_summary() -> dict:
+    """Totale en maandelijkse AI-kosten + uitsplitsing per model."""
+    conn = get_connection()
+    total = conn.execute(
+        "SELECT COALESCE(SUM(cost_usd),0) c, COALESCE(SUM(prompt_tokens),0) pt, "
+        "COALESCE(SUM(completion_tokens),0) ct, COUNT(*) n FROM ai_usage"
+    ).fetchone()
+    month = conn.execute(
+        "SELECT COALESCE(SUM(cost_usd),0) c, COUNT(*) n FROM ai_usage "
+        "WHERE strftime('%Y-%m',created_at)=strftime('%Y-%m','now')"
+    ).fetchone()
+    by_model = conn.execute(
+        "SELECT model, COUNT(*) n, COALESCE(SUM(prompt_tokens),0) pt, "
+        "COALESCE(SUM(completion_tokens),0) ct, COALESCE(SUM(cost_usd),0) c "
+        "FROM ai_usage GROUP BY model ORDER BY c DESC"
+    ).fetchall()
+    by_func = conn.execute(
+        "SELECT function, COUNT(*) n, COALESCE(SUM(cost_usd),0) c "
+        "FROM ai_usage GROUP BY function ORDER BY c DESC"
+    ).fetchall()
+    conn.close()
+    return {
+        "total_cost_usd":  total["c"],
+        "total_calls":     total["n"],
+        "total_prompt_tokens":     total["pt"],
+        "total_completion_tokens": total["ct"],
+        "month_cost_usd":  month["c"],
+        "month_calls":     month["n"],
+        "by_model":        [dict(r) for r in by_model],
+        "by_function":     [dict(r) for r in by_func],
+    }
+
+
 # ── Assets ──────────────────────────────────────────────────────────────────
 
 def add_asset(ticker, name, asset_type="stock", etf_subtype="distributing",
@@ -506,7 +567,8 @@ def delete_transaction(txn_id: int):
 
 def add_dividend(ticker, date, gross_amount, withholding_tax=0.0,
                  currency="EUR", notes=None, fx_rate=1.0,
-                 gross_eur=None, withholding_eur=None):
+                 gross_eur=None, withholding_eur=None,
+                 foreign_wht_withheld=0, belgian_rv_withheld=0):
     if gross_eur is None:
         gross_eur = gross_amount * (fx_rate or 1.0)
     if withholding_eur is None:
@@ -515,10 +577,12 @@ def add_dividend(ticker, date, gross_amount, withholding_tax=0.0,
     conn.execute(
         """INSERT INTO dividends
            (ticker,date,gross_amount,withholding_tax,currency,notes,
-            fx_rate,gross_eur,withholding_eur)
-           VALUES (?,?,?,?,?,?,?,?,?)""",
+            fx_rate,gross_eur,withholding_eur,
+            foreign_wht_withheld,belgian_rv_withheld)
+           VALUES (?,?,?,?,?,?,?,?,?,?,?)""",
         (ticker.upper(), date, gross_amount, withholding_tax, currency, notes,
-         fx_rate, gross_eur, withholding_eur)
+         fx_rate, gross_eur, withholding_eur,
+         int(foreign_wht_withheld), int(belgian_rv_withheld))
     )
     conn.commit()
     conn.close()
