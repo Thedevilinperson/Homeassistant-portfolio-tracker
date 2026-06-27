@@ -3,6 +3,9 @@
 Alle noemenswaardige wijzigingen aan de Portfolio Tracker add-on.
 De bovenste versie hoort overeen te komen met `version:` in `config.yaml`.
 
+##1.3.2
+- verwijderen van deprecated ARM-arch values in config
+
 ## 1.3.1
 - fix van changelog
 
