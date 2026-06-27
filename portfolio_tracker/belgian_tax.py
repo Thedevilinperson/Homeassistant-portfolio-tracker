@@ -381,6 +381,11 @@ def calculate_tax_overview(year: int | None = None,
     costs_sel   = total_costs_eur(display_txns)
     costs_year  = total_costs_eur(db.get_transactions(year=year))
 
+    # Algemene rekeningkosten (beheerskosten e.d. — niet aandeel-gebonden)
+    acct_costs_total = db.total_account_costs_eur()
+    acct_costs_sel   = db.total_account_costs_eur(account=account) if account else acct_costs_total
+    acct_costs_year  = db.total_account_costs_eur(year=year)
+
     return {
         "year":                  year,
         "account_filter":        account,
@@ -405,6 +410,9 @@ def calculate_tax_overview(year: int | None = None,
         "total_costs":           costs_total,
         "selection_costs":       costs_sel,
         "year_costs":            costs_year,
+        "account_costs_total":     acct_costs_total,
+        "account_costs_selection": acct_costs_sel,
+        "account_costs_year":      acct_costs_year,
         "positions":             positions,
         "position_values":       pos_values,
     }

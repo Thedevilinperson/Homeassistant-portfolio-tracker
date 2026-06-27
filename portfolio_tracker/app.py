@@ -156,8 +156,10 @@ def page_dashboard():
               pct(unreal_gl / total_cost * 100 if total_cost else None),
               delta=eur(unreal_gl), delta_color=delta_color(unreal_gl))
     c4.metric("💰 Netto dividenden YTD", eur(overview["total_dividends_net"]))
-    c5.metric("🧾 Transactiekosten", eur(overview.get("selection_costs", 0)),
-              help="Aankoop-/verkoopkosten (excl. TOB). Apart gehouden, niet in de meerwaardeberekening.")
+    _kosten = overview.get("selection_costs", 0) + overview.get("account_costs_selection", 0)
+    c5.metric("🧾 Kosten (txn + rekening)", eur(_kosten),
+              help="Transactiekosten + algemene rekeningkosten (bv. beheerskosten). "
+                   "Apart gehouden, niet in de meerwaardeberekening.")
 
     st.divider()
 
@@ -258,26 +260,48 @@ def page_portfolio():
         divs_net[d["ticker"]] = divs_net.get(d["ticker"], 0) + (
             d["gross_amount"] - d["withholding_tax"])
 
+    # Koersdoelen (laatste per ticker uit transacties; anders AI-koersdoel)
+    price_targets = {}
+    for t in db.get_transactions():           # ASC op datum -> laatste wint
+        if t.get("price_target") is not None:
+            price_targets[t["ticker"]] = t["price_target"]
+    for tk in pv:
+        if tk not in price_targets:
+            pt = db.get_latest_price_target(tk)
+            if pt:
+                price_targets[tk] = pt["price_target"]
+
+    # AI-ratingsynthese (laatste 9 adviesrondes)
+    synth = ai_advisor.rating_synthesis(list(pv.keys()), n_batches=9)
+    badge = {"strong_buy": "🟢🟢 Sterk kopen", "buy": "🟢 Kopen",
+             "hold": "⚪ Behouden", "sell": "🔴 Verkopen",
+             "strong_sell": "🔴🔴 Sterk verkopen"}
+
     rows = []
     for ticker, pos in pv.items():
         asset = assets_map.get(ticker, {})
         div = divs_net.get(ticker, 0)
         total_return = (pos["unrealized_gain_loss"] or 0) + div
+        tgt = price_targets.get(ticker)
+        upside = None
+        if tgt and pos["current_price"]:
+            upside = (tgt - pos["current_price"]) / pos["current_price"] * 100
+        rec = synth.get(ticker, {}).get("consensus")
         rows.append({
             "":             sign_icon(pos["unrealized_gain_loss"]),
             "Ticker":       ticker,
-            "Naam":         (asset.get("name") or ticker)[:22],
-            "Type":         (asset.get("asset_type") or "—").upper(),
+            "Naam":         (asset.get("name") or ticker)[:20],
             "Munt":         pos["current_price_currency"] or "EUR",
             "Aantal":       f"{pos['quantity']:.4f}",
             "Gem.kostpr.(€)":  f"{pos['avg_cost']:.4f}",
             "Koers (native)":  f"{pos['current_price']:.4f}" if pos["current_price"] else "—",
-            "Geïnvesteerd": eur(pos["total_cost"]),
+            "Koersdoel":    f"{tgt:.2f}" if tgt else "—",
+            "Potentieel":   pct(upside) if upside is not None else "—",
             "Huidige waarde": eur(pos["current_value"]),
-            "W/V (€)":      eur(pos["unrealized_gain_loss"]),
             "W/V (%)":      pct(pos["unrealized_gain_loss_pct"]),
             "Dividend":     eur(div),
             "Tot. rendement": eur(total_return),
+            "AI-advies":    badge.get(rec, "—"),
         })
 
     df = pd.DataFrame(rows)
@@ -288,13 +312,66 @@ def page_portfolio():
     total_cost = overview["total_cost_basis"]
     tot_gl     = overview["unrealized_gl"]
     tot_div    = overview["total_dividends_net"]
-    c1, c2, c3, c4 = st.columns(4)
+    txn_costs  = overview.get("selection_costs", 0)
+    acct_costs = overview.get("account_costs_selection", 0)
+    all_costs  = txn_costs + acct_costs
+    net_return = tot_gl + tot_div - all_costs
+    c1, c2, c3, c4, c5 = st.columns(5)
     c1.metric("Totaal geïnvesteerd", eur(total_cost))
     c2.metric("Totale waarde",       eur(total_val))
     c3.metric("Ongerealiseerde W/V", eur(tot_gl),
               delta=pct(tot_gl / total_cost * 100 if total_cost else 0),
               delta_color=delta_color(tot_gl))
     c4.metric("Netto dividenden",    eur(tot_div))
+    c5.metric("Kosten (txn + rekening)", eur(all_costs),
+              help="Transactiekosten + algemene rekeningkosten (bv. beheerskosten). "
+                   "Drukken het nettorendement, los van de meerwaardeberekening.")
+    st.caption(f"💡 Nettorendement na kosten: **{eur(net_return)}**  "
+               f"(ongerealiseerde W/V + dividenden − kosten). "
+               f"Waarvan transactiekosten {eur(txn_costs)} en rekeningkosten {eur(acct_costs)}.")
+
+    # ── AI-ratingsynthese (laatste 9 adviezen) ────────────────────────────────
+    st.divider()
+    sc1, sc2 = st.columns([3, 1])
+    sc1.subheader("🤖 AI-advies — synthese laatste 9 rondes")
+    with sc2:
+        if st.button("🔄 Genereer AI-advies", key="gen_ratings"):
+            if not db.get_setting("openai_api_key", ""):
+                st.warning("Geen OpenAI-sleutel — stel die in via ⚙️ Instellingen.")
+            else:
+                with st.spinner("AI beoordeelt je portefeuille..."):
+                    res = ai_advisor.generate_portfolio_ratings()
+                if res.get("error"):
+                    st.error(res["error"])
+                else:
+                    st.success(f"✅ {res['stored']} ratings gegenereerd.")
+                    st.rerun()
+    if synth:
+        srows = []
+        for tk in pv:
+            s = synth.get(tk)
+            if not s:
+                srows.append({"Ticker": tk, "Consensus": "—", "Laatste": "—",
+                              "Sterk kopen": 0, "Kopen": 0, "Behouden": 0,
+                              "Verkopen": 0, "Sterk verkopen": 0, "Koersdoel": "—"})
+                continue
+            c = s["counts"]
+            srows.append({
+                "Ticker":         tk,
+                "Consensus":      badge.get(s["consensus"], "—"),
+                "Laatste":        ai_advisor.RATING_LABELS.get(s["latest"], "—"),
+                "Sterk kopen":    c["strong_buy"],
+                "Kopen":          c["buy"],
+                "Behouden":       c["hold"],
+                "Verkopen":       c["sell"],
+                "Sterk verkopen": c["strong_sell"],
+                "Koersdoel":      f"{s['latest_target']:.2f} {s['currency']}" if s.get("latest_target") else "—",
+            })
+        st.dataframe(pd.DataFrame(srows), use_container_width=True, hide_index=True)
+        st.caption("Telling van de ratings over de laatste (max 9) AI-adviesrondes per ticker. "
+                   "Consensus = meest voorkomende rating. Afgestemd op je profiel per rekening en je investeringsvolume.")
+    else:
+        st.info("Nog geen AI-adviezen. Klik op '🔄 Genereer AI-advies' om de eerste ronde te maken.")
 
     st.divider()
     st.subheader("📈 Prijsgeschiedenis")
@@ -413,87 +490,160 @@ def page_transactions():
     asset_tickers = [a["ticker"] for a in assets]
     assets_map    = {a["ticker"]: a for a in assets}
 
-    tab_add, tab_view = st.tabs(["📝 Nieuwe transactie", "📋 Overzicht"])
+    tab_add, tab_view, tab_costs = st.tabs(
+        ["📝 Nieuwe transactie", "📋 Overzicht", "🏦 Rekeningkosten"])
+
+    CUR = ["EUR", "USD", "GBP", "CHF"]
 
     with tab_add:
-        with st.form("txn_form", clear_on_submit=True):
-            c1, c2 = st.columns(2)
-            with c1:
-                ticker   = st.selectbox("Activum *", asset_tickers)
-                txn_date = st.date_input("Datum *", value=date.today())
-                txn_type = st.radio("Type *", ["buy", "sell"],
-                                    format_func=lambda x: "🟢 Aankoop" if x == "buy" else "🔴 Verkoop",
-                                    horizontal=True)
-                account  = st.selectbox("Rekening *", db.get_accounts(),
-                                        help="Beheer rekeningen via ⚙️ Instellingen → Rekeningen")
-            with c2:
-                quantity    = st.number_input("Aantal *", min_value=0.0001, step=0.001,
-                                               format="%.4f", value=1.0)
-                price_unit  = st.number_input("Prijs per stuk *", min_value=0.0001,
-                                               step=0.01, format="%.4f", value=1.0)
-                currency    = st.selectbox("Munt", ["EUR", "USD", "GBP", "CHF"],
-                                           index=["EUR", "USD", "GBP", "CHF"].index(
-                                               assets_map.get(ticker, {}).get("currency", "EUR")))
+        c1, c2 = st.columns(2)
+        with c1:
+            ticker   = st.selectbox("Activum *", asset_tickers, key="add_ticker")
+            txn_date = st.date_input("Datum *", value=date.today(), key="add_date")
+            txn_type = st.radio("Type *", ["buy", "sell"],
+                                format_func=lambda x: "🟢 Aankoop" if x == "buy" else "🔴 Verkoop",
+                                horizontal=True, key="add_type")
+            account  = st.selectbox("Rekening *", db.get_accounts(), key="add_acct",
+                                    help="Beheer rekeningen via ⚙️ Instellingen → Rekeningen")
+        with c2:
+            quantity   = st.number_input("Aantal *", min_value=0.0001, step=0.001,
+                                         format="%.4f", value=1.0, key="add_qty")
+            price_unit = st.number_input("Prijs per stuk *", min_value=0.0001,
+                                         step=0.01, format="%.4f", value=1.0, key="add_price")
+            currency   = st.selectbox("Munt", CUR, key="add_cur",
+                                      index=CUR.index(assets_map.get(ticker, {}).get("currency", "EUR"))
+                                      if assets_map.get(ticker, {}).get("currency", "EUR") in CUR else 0)
 
-            total_amount = quantity * price_unit
+        total_amount = quantity * price_unit
 
-            # Kosten (in munt naar keuze, los van TOB)
-            ck1, ck2 = st.columns([2, 1])
-            with ck1:
-                costs = st.number_input("Transactiekosten (optioneel)", min_value=0.0,
-                                        step=0.01, format="%.2f", value=0.0,
-                                        help="Broker-/beurskosten e.d. — apart gehouden, niet in de meerwaardeberekening.")
-            with ck2:
-                costs_currency = st.selectbox("Kostenmunt", ["EUR", "USD", "GBP", "CHF"],
-                                              key="costs_cur")
-
-            # TOB auto-berekening
-            asset_info  = assets_map.get(ticker, {})
-            tob_amount  = tax_mod.calculate_tob(
-                asset_info.get("asset_type", "stock"),
-                asset_info.get("etf_subtype", "distributing"),
-                total_amount,
-            )
-            # EUR-voorbeeld tonen
-            _fx_prev, _eur_prev = compute_eur(total_amount, currency, txn_date)
-            eur_hint = "" if currency == "EUR" else f" ≈ **€{_eur_prev:,.2f}** (koers {_fx_prev:.4f})"
-            st.info(f"**Totaalwaarde:** {currency} {total_amount:,.4f}{eur_hint} | **TOB:** {currency} {tob_amount:,.2f}")
-
-            manual_tob = st.checkbox("TOB manueel aanpassen")
-            if manual_tob:
-                tob_amount = st.number_input("TOB (€)", min_value=0.0, value=tob_amount,
-                                              step=0.01, format="%.2f")
-
-            notes = st.text_area("Notities (optioneel)", height=60)
-            submitted = st.form_submit_button("✅ Transactie toevoegen", type="primary")
-
-            if submitted:
-                if quantity <= 0 or price_unit <= 0:
-                    st.error("Aantal en prijs moeten positief zijn.")
+        # Koersdoel + AI-bepaling
+        if "pt_input" not in st.session_state:
+            st.session_state["pt_input"] = 0.0
+        pc1, pc2 = st.columns([2, 1])
+        with pc1:
+            price_target = st.number_input("Koersdoel (optioneel, native munt)",
+                                           min_value=0.0, step=0.01, format="%.2f",
+                                           key="pt_input")
+        with pc2:
+            st.write("")
+            st.write("")
+            if st.button("🤖 Bepaal via AI", key="ai_pt"):
+                if not db.get_setting("openai_api_key", ""):
+                    st.warning("Geen OpenAI-sleutel — stel die in via ⚙️ Instellingen.")
                 else:
-                    fx_rate, tot_eur = compute_eur(total_amount, currency, txn_date)
-                    _, costs_eur = compute_eur(costs, costs_currency, txn_date)
-                    proceed = True
-                    if txn_type == "sell":
-                        # Beschikbaarheid controleren BINNEN de gekozen rekening
-                        acct_txns = db.get_transactions(ticker=ticker, account=account)
-                        positions, _ = tax_mod.build_fifo_positions(acct_txns)
-                        available = positions.get(ticker, {}).get("total_quantity", 0)
-                        if quantity > available + 1e-9:
-                            st.error(f"Onvoldoende positie op rekening '{account}'. Beschikbaar: {available:.4f}")
-                            proceed = False
-                    if proceed:
-                        db.add_transaction(ticker, txn_type, str(txn_date), quantity,
-                                           price_unit, total_amount, currency, tob_amount,
-                                           notes or None, account=account, costs=costs,
-                                           costs_currency=costs_currency, fx_rate=fx_rate,
-                                           total_amount_eur=tot_eur, costs_eur=costs_eur)
-                        clear_cache()
-                        st.success(f"✅ {'Aankoop' if txn_type == 'buy' else 'Verkoop'} van "
-                                   f"{quantity:.4f} × {ticker} op {account} toegevoegd!")
+                    with st.spinner("AI bepaalt koersdoel..."):
+                        res = ai_advisor.suggest_price_target(ticker, account)
+                    if res.get("error"):
+                        st.error(res["error"])
+                    else:
+                        st.session_state["pt_input"] = float(res["price_target"])
+                        st.session_state["pt_info"] = (
+                            f"🎯 AI-koersdoel {res['price_target']:.2f} {res['currency']} "
+                            f"(model {res.get('model','?')}). {res.get('rationale','')} {res.get('scenario','')}")
                         st.rerun()
+        if st.session_state.get("pt_info"):
+            st.caption(st.session_state["pt_info"])
+
+        # Kosten (in munt naar keuze, los van TOB)
+        ck1, ck2 = st.columns([2, 1])
+        with ck1:
+            costs = st.number_input("Transactiekosten (optioneel)", min_value=0.0,
+                                    step=0.01, format="%.2f", value=0.0, key="add_costs",
+                                    help="Broker-/beurskosten — apart gehouden, niet in de meerwaardeberekening.")
+        with ck2:
+            costs_currency = st.selectbox("Kostenmunt", CUR, key="add_costs_cur")
+
+        asset_info = assets_map.get(ticker, {})
+        tob_amount = tax_mod.calculate_tob(asset_info.get("asset_type", "stock"),
+                                           asset_info.get("etf_subtype", "distributing"),
+                                           total_amount)
+        _fx_prev, _eur_prev = compute_eur(total_amount, currency, txn_date)
+        eur_hint = "" if currency == "EUR" else f" ≈ **€{_eur_prev:,.2f}** (koers {_fx_prev:.4f})"
+        st.info(f"**Totaalwaarde:** {currency} {total_amount:,.4f}{eur_hint} | **TOB:** {currency} {tob_amount:,.2f}")
+
+        if st.checkbox("TOB manueel aanpassen", key="add_tob_man"):
+            tob_amount = st.number_input("TOB (€)", min_value=0.0, value=tob_amount,
+                                         step=0.01, format="%.2f", key="add_tob_val")
+        notes = st.text_area("Notities (optioneel)", height=60, key="add_notes")
+
+        if st.button("✅ Transactie toevoegen", type="primary", key="add_submit"):
+            if quantity <= 0 or price_unit <= 0:
+                st.error("Aantal en prijs moeten positief zijn.")
+            else:
+                fx_rate, tot_eur = compute_eur(total_amount, currency, txn_date)
+                _, costs_eur = compute_eur(costs, costs_currency, txn_date)
+                proceed = True
+                if txn_type == "sell":
+                    acct_txns = db.get_transactions(ticker=ticker, account=account)
+                    positions, _ = tax_mod.build_fifo_positions(acct_txns)
+                    available = positions.get(ticker, {}).get("total_quantity", 0)
+                    if quantity > available + 1e-9:
+                        st.error(f"Onvoldoende positie op rekening '{account}'. Beschikbaar: {available:.4f}")
+                        proceed = False
+                if proceed:
+                    db.add_transaction(ticker, txn_type, str(txn_date), quantity,
+                                       price_unit, total_amount, currency, tob_amount,
+                                       notes or None, account=account, costs=costs,
+                                       costs_currency=costs_currency, fx_rate=fx_rate,
+                                       total_amount_eur=tot_eur, costs_eur=costs_eur,
+                                       price_target=(price_target or None))
+                    clear_cache()
+                    st.session_state["pt_input"] = 0.0
+                    st.session_state.pop("pt_info", None)
+                    st.success(f"✅ {'Aankoop' if txn_type == 'buy' else 'Verkoop'} van "
+                               f"{quantity:.4f} × {ticker} op {account} toegevoegd!")
+                    st.rerun()
 
     with tab_view:
+        # ── Bewerkformulier (verschijnt bij klik op ✏️) ───────────────────────
+        edit_id = st.session_state.get("edit_txn")
+        if edit_id:
+            et = next((x for x in db.get_transactions() if x["id"] == edit_id), None)
+            if et:
+                st.markdown(f"### ✏️ Transactie #{edit_id} bewerken")
+                with st.form("edit_txn_form"):
+                    e1, e2, e3 = st.columns(3)
+                    with e1:
+                        e_ticker = st.selectbox("Activum", asset_tickers,
+                                                index=asset_tickers.index(et["ticker"]) if et["ticker"] in asset_tickers else 0)
+                        e_type = st.selectbox("Type", ["buy", "sell"],
+                                              index=0 if et["transaction_type"] == "buy" else 1)
+                        e_date = st.date_input("Datum", value=datetime.strptime(et["date"][:10], "%Y-%m-%d").date())
+                        e_acct = st.selectbox("Rekening", db.get_accounts(),
+                                              index=db.get_accounts().index(et.get("account")) if et.get("account") in db.get_accounts() else 0)
+                    with e2:
+                        e_qty   = st.number_input("Aantal", min_value=0.0001, value=float(et["quantity"]), step=0.001, format="%.4f")
+                        e_price = st.number_input("Prijs per stuk", min_value=0.0001, value=float(et["price_per_unit"]), step=0.01, format="%.4f")
+                        e_cur   = st.selectbox("Munt", CUR, index=CUR.index(et["currency"]) if et["currency"] in CUR else 0)
+                        e_tgt   = st.number_input("Koersdoel", min_value=0.0, value=float(et.get("price_target") or 0.0), step=0.01, format="%.2f")
+                    with e3:
+                        e_tob   = st.number_input("TOB (€)", min_value=0.0, value=float(et.get("tob_tax") or 0.0), step=0.01, format="%.2f")
+                        e_costs = st.number_input("Kosten", min_value=0.0, value=float(et.get("costs") or 0.0), step=0.01, format="%.2f")
+                        e_costs_cur = st.selectbox("Kostenmunt", CUR, index=CUR.index(et.get("costs_currency") or "EUR") if (et.get("costs_currency") or "EUR") in CUR else 0)
+                    e_notes = st.text_area("Notities", value=et.get("notes") or "", height=60)
+                    s1, s2 = st.columns(2)
+                    save = s1.form_submit_button("💾 Opslaan", type="primary")
+                    cancel = s2.form_submit_button("✖️ Annuleren")
+                    if save:
+                        e_total = e_qty * e_price
+                        fx, tot_eur = compute_eur(e_total, e_cur, e_date)
+                        _, ce = compute_eur(e_costs, e_costs_cur, e_date)
+                        db.update_transaction(edit_id, ticker=e_ticker, transaction_type=e_type,
+                                              date=str(e_date), quantity=e_qty, price_per_unit=e_price,
+                                              total_amount=e_total, currency=e_cur, tob_tax=e_tob,
+                                              notes=e_notes or None, account=e_acct, costs=e_costs,
+                                              costs_currency=e_costs_cur, fx_rate=fx,
+                                              total_amount_eur=tot_eur, costs_eur=ce,
+                                              price_target=(e_tgt or None))
+                        clear_cache()
+                        st.session_state.pop("edit_txn", None)
+                        st.success("✅ Transactie bijgewerkt!")
+                        st.rerun()
+                    if cancel:
+                        st.session_state.pop("edit_txn", None)
+                        st.rerun()
+                st.divider()
+
         c1, c2, c3, c4 = st.columns(4)
         f_tick = c1.text_input("Filter ticker")
         f_type = c2.selectbox("Type", ["Alle", "Aankoop", "Verkoop"])
@@ -506,24 +656,25 @@ def page_transactions():
             txn_type=("buy" if f_type == "Aankoop" else "sell" if f_type == "Verkoop" else None),
             account=(f_acct if f_acct != "Alle" else None),
         )
-
         if not txns:
             st.info("Geen transacties gevonden.")
             return
 
-        # Totalen
         total_tob   = sum(t["tob_tax"] or 0 for t in txns)
         total_costs = sum(t.get("costs_eur") or 0 for t in txns)
         st.caption(f"{len(txns)} transactie(s) | Totale TOB: {eur(total_tob)} | Kosten: {eur(total_costs)}")
 
         accounts = db.get_accounts()
-        for t in reversed(txns):  # Nieuwste eerst
+        for t in reversed(txns):
             icon  = "🟢" if t["transaction_type"] == "buy" else "🔴"
             label = "Aankoop" if t["transaction_type"] == "buy" else "Verkoop"
-            c_info, c_val, c_acct, c_del = st.columns([4, 3, 2, 1])
+            c_info, c_val, c_acct, c_edit, c_del = st.columns([4, 3, 2, 1, 1])
             with c_info:
                 st.markdown(f"{icon} **{t['ticker']}** — {label}")
                 st.caption(f"📅 {t['date']}")
+                tgt = t.get("price_target")
+                if tgt:
+                    st.caption(f"🎯 Koersdoel: {tgt:.2f} {t['currency']}")
                 if t.get("notes"):
                     st.caption(f"📝 {t['notes']}")
             with c_val:
@@ -541,12 +692,60 @@ def page_transactions():
                     db.update_transaction_account(t["id"], new_acct)
                     clear_cache()
                     st.rerun()
+            with c_edit:
+                if st.button("✏️", key=f"edit_t_{t['id']}"):
+                    st.session_state["edit_txn"] = t["id"]
+                    st.rerun()
             with c_del:
                 if st.button("🗑️", key=f"del_t_{t['id']}"):
                     db.delete_transaction(t["id"])
                     clear_cache()
                     st.rerun()
             st.divider()
+
+    with tab_costs:
+        st.subheader("🏦 Algemene rekeningkosten")
+        st.caption("Kosten die niet aan een specifiek aandeel hangen (bv. beheerskosten, bewaarloon). "
+                   "Ze drukken het totale rendement van de rekening, maar niet de individuele posities of de meerwaardeberekening.")
+        with st.form("acct_cost_form", clear_on_submit=True):
+            a1, a2, a3 = st.columns(3)
+            with a1:
+                ac_acct = st.selectbox("Rekening *", db.get_accounts())
+                ac_date = st.date_input("Datum *", value=date.today())
+            with a2:
+                ac_amount = st.number_input("Bedrag *", min_value=0.0, step=0.01, format="%.2f")
+                ac_cur    = st.selectbox("Munt", CUR)
+            with a3:
+                ac_desc = st.text_input("Omschrijving", placeholder="bv. jaarlijks bewaarloon")
+            if st.form_submit_button("✅ Kost toevoegen", type="primary"):
+                if ac_amount <= 0:
+                    st.error("Bedrag moet positief zijn.")
+                else:
+                    fx, amt_eur = compute_eur(ac_amount, ac_cur, ac_date)
+                    db.add_account_cost(ac_acct, str(ac_date), ac_amount, ac_cur,
+                                        ac_desc or None, fx_rate=fx, amount_eur=amt_eur)
+                    clear_cache()
+                    st.success("✅ Rekeningkost toegevoegd!")
+                    st.rerun()
+
+        costs = db.get_account_costs()
+        if costs:
+            st.divider()
+            st.caption(f"Totaal rekeningkosten: {eur(db.total_account_costs_eur())}")
+            for c in costs:
+                cc1, cc2, cc3 = st.columns([4, 2, 1])
+                with cc1:
+                    st.markdown(f"🏦 **{c['account']}** — {c.get('description') or 'kost'}")
+                    st.caption(f"📅 {c['date']}")
+                with cc2:
+                    eur_str = f" (€{c['amount_eur']:,.2f})" if c["currency"] != "EUR" else ""
+                    st.markdown(f"{c['currency']} {c['amount']:,.2f}{eur_str}")
+                with cc3:
+                    if st.button("🗑️", key=f"del_ac_{c['id']}"):
+                        db.delete_account_cost(c["id"])
+                        clear_cache()
+                        st.rerun()
+                st.divider()
 
 
 # ── PAGINA: Dividenden ────────────────────────────────────────────────────────
@@ -843,17 +1042,44 @@ def page_settings():
         ["🔑 API-sleutel", "🏦 Rekeningen", "🧾 Meerwaardebelasting", "🏛️ TOB-tarieven", "🗃️ Data"])
 
     with tab_api:
-        st.subheader("OpenAI API")
+        st.subheader("OpenAI API & AI-instellingen")
         current = db.get_setting("openai_api_key", "")
         new_key = st.text_input("API-sleutel", value=current, type="password",
                                 help="Beschikbaar via platform.openai.com/api-keys")
-        model = st.selectbox("Model", ["gpt-4.1-mini", "gpt-4.1", "gpt-4.1-nano"],
-                             index=["gpt-4.1-mini", "gpt-4.1", "gpt-4.1-nano"].index(
-                                 db.get_setting("openai_model", "gpt-4.1-mini")))
+
+        model_keys = list(ai_advisor.AVAILABLE_MODELS.keys())
+        def _model_idx(setting, default):
+            cur = db.get_setting(setting, default) or default
+            return model_keys.index(cur) if cur in model_keys else 0
+
+        m1, m2 = st.columns(2)
+        with m1:
+            model = st.selectbox("Model voor regulier advies", model_keys,
+                                 index=_model_idx("openai_model", "gpt-4.1-mini"),
+                                 format_func=lambda k: ai_advisor.AVAILABLE_MODELS[k])
+        with m2:
+            pt_model = st.selectbox("Model voor koersdoelbepaling", model_keys,
+                                    index=_model_idx("openai_price_target_model", "gpt-4.1"),
+                                    format_func=lambda k: ai_advisor.AVAILABLE_MODELS[k],
+                                    help="Mag een sterker (duurder) model zijn dan voor het reguliere advies.")
+
+        st.markdown("**Investeringsvolume (particuliere belegger)**")
+        st.caption("Helpt de AI realistische, op jouw budget afgestemde koopvoorstellen te doen.")
+        v1, v2 = st.columns(2)
+        with v1:
+            vol_m = st.number_input("Geschat bedrag per maand (€)", min_value=0.0, step=50.0,
+                                    value=float(db.get_setting("investment_volume_month", "0") or 0))
+        with v2:
+            vol_y = st.number_input("Geschat bedrag per jaar (€)", min_value=0.0, step=500.0,
+                                    value=float(db.get_setting("investment_volume_year", "0") or 0))
+
         if st.button("💾 Opslaan", key="save_api"):
             db.set_setting("openai_api_key", new_key.strip())
             db.set_setting("openai_model", model)
-            st.success("✅ API-sleutel opgeslagen!")
+            db.set_setting("openai_price_target_model", pt_model)
+            db.set_setting("investment_volume_month", str(vol_m))
+            db.set_setting("investment_volume_year", str(vol_y))
+            st.success("✅ Instellingen opgeslagen!")
         if current:
             st.success("✅ API-sleutel is geconfigureerd.")
         else:
@@ -872,6 +1098,25 @@ def page_settings():
         used = db.get_used_accounts()
         if used:
             st.caption("Momenteel in gebruik: " + ", ".join(used))
+
+        st.divider()
+        st.markdown("**Beleggingsprofiel per rekening**")
+        st.caption("Bepaalt hoe de AI-adviseur de aanbevelingen per rekening afstemt.")
+        prof_keys = list(ai_advisor.PROFILE_LABELS.keys())
+        profiles = db.get_account_profiles()
+        accts_now = [a for a in db.get_accounts() if a != db.DEFAULT_ACCOUNT]
+        if not accts_now:
+            st.info("Voeg eerst rekeningen toe om een profiel in te stellen.")
+        for acct in accts_now:
+            cur_prof = profiles.get(acct, "neutral")
+            sel = st.selectbox(
+                f"🏦 {acct}", prof_keys,
+                index=prof_keys.index(cur_prof) if cur_prof in prof_keys else prof_keys.index("neutral"),
+                format_func=lambda k: ai_advisor.PROFILE_LABELS[k],
+                key=f"profile_{acct}")
+            if sel != cur_prof:
+                db.set_account_profile(acct, sel)
+                st.toast(f"Profiel '{acct}' bijgewerkt", icon="✅")
 
     with tab_tax:
         st.subheader("Meerwaardebelasting (opt-out stelsel)")

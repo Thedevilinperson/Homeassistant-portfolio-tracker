@@ -93,6 +93,32 @@ def init_db():
             created_at      TEXT    DEFAULT (datetime('now'))
         );
 
+        CREATE TABLE IF NOT EXISTS account_costs (
+            id          INTEGER PRIMARY KEY AUTOINCREMENT,
+            account     TEXT    NOT NULL,
+            date        TEXT    NOT NULL,
+            description TEXT,
+            amount      REAL    NOT NULL,
+            currency    TEXT    DEFAULT 'EUR',
+            amount_eur  REAL,
+            fx_rate     REAL    DEFAULT 1,
+            created_at  TEXT    DEFAULT (datetime('now'))
+        );
+
+        CREATE TABLE IF NOT EXISTS ai_ratings (
+            id           INTEGER PRIMARY KEY AUTOINCREMENT,
+            batch_id     TEXT    NOT NULL,
+            ticker       TEXT    NOT NULL,
+            rating       TEXT    NOT NULL,
+            price_target REAL,
+            currency     TEXT    DEFAULT 'EUR',
+            rationale    TEXT,
+            model        TEXT,
+            created_at   TEXT    DEFAULT (datetime('now'))
+        );
+        CREATE INDEX IF NOT EXISTS idx_ai_ratings_batch ON ai_ratings(batch_id);
+        CREATE INDEX IF NOT EXISTS idx_ai_ratings_ticker ON ai_ratings(ticker);
+
         CREATE TABLE IF NOT EXISTS settings (
             key        TEXT PRIMARY KEY,
             value      TEXT NOT NULL,
@@ -112,6 +138,10 @@ def init_db():
             ('base_currency',               'EUR'),
             ('accounts',                    'Niet toegewezen'),
             ('household_regime',            'single'),
+            ('account_profiles',            '{}'),
+            ('investment_volume_month',     '0'),
+            ('investment_volume_year',      '0'),
+            ('openai_price_target_model',   ''),
             ('anthropic_api_key',           ''),
             ('openai_api_key',              '');
     """)
@@ -139,6 +169,7 @@ def _migrate(conn):
         ("costs_eur",        "REAL DEFAULT 0"),
         ("total_amount_eur", "REAL"),       # NULL bij oude rijen -> backfillen
         ("fx_rate",          "REAL DEFAULT 1"),
+        ("price_target",     "REAL"),       # koersdoel (native munt), optioneel
     ]
     for col, ddl in txn_cols:
         if not _column_exists(cur, "transactions", col):
@@ -215,6 +246,123 @@ def get_used_accounts() -> list[str]:
     return [r["account"] for r in rows]
 
 
+# ── Rekeningprofielen (beleggingsprofiel per rekening) ───────────────────────
+
+import json as _json
+
+def get_account_profiles() -> dict:
+    """{rekening: profielsleutel}."""
+    raw = get_setting("account_profiles", "{}") or "{}"
+    try:
+        return _json.loads(raw)
+    except Exception:
+        return {}
+
+
+def set_account_profile(account: str, profile: str):
+    profiles = get_account_profiles()
+    profiles[account] = profile
+    set_setting("account_profiles", _json.dumps(profiles))
+
+
+def get_account_profile(account: str, default: str = "neutral") -> str:
+    return get_account_profiles().get(account, default)
+
+
+# ── Rekeningkosten (algemene kosten, niet gelinkt aan een aandeel) ───────────
+
+def add_account_cost(account, date, amount, currency="EUR", description=None,
+                     fx_rate=1.0, amount_eur=None):
+    if amount_eur is None:
+        amount_eur = amount * (fx_rate or 1.0)
+    conn = get_connection()
+    conn.execute(
+        """INSERT INTO account_costs
+           (account,date,description,amount,currency,amount_eur,fx_rate)
+           VALUES (?,?,?,?,?,?,?)""",
+        (account, date, description, amount, currency, amount_eur, fx_rate)
+    )
+    conn.commit()
+    conn.close()
+
+
+def get_account_costs(account=None, year=None) -> list[dict]:
+    conn = get_connection()
+    q, p, conds = "SELECT * FROM account_costs", [], []
+    if account: conds.append("account=?");             p.append(account)
+    if year:    conds.append("strftime('%Y',date)=?"); p.append(str(year))
+    if conds: q += " WHERE " + " AND ".join(conds)
+    q += " ORDER BY date DESC"
+    rows = conn.execute(q, p).fetchall()
+    conn.close()
+    return [dict(r) for r in rows]
+
+
+def total_account_costs_eur(account=None, year=None) -> float:
+    return sum(c.get("amount_eur") or 0.0 for c in get_account_costs(account, year))
+
+
+def delete_account_cost(cost_id: int):
+    conn = get_connection()
+    conn.execute("DELETE FROM account_costs WHERE id=?", (cost_id,))
+    conn.commit()
+    conn.close()
+
+
+# ── AI-ratings (gestructureerde adviezen per ticker) ─────────────────────────
+
+def save_ai_rating(batch_id, ticker, rating, price_target=None,
+                   currency="EUR", rationale=None, model=None):
+    conn = get_connection()
+    conn.execute(
+        """INSERT INTO ai_ratings
+           (batch_id,ticker,rating,price_target,currency,rationale,model)
+           VALUES (?,?,?,?,?,?,?)""",
+        (batch_id, ticker.upper(), rating, price_target, currency, rationale, model)
+    )
+    conn.commit()
+    conn.close()
+
+
+def get_recent_rating_batches(limit: int = 9) -> list[str]:
+    """De meest recente batch-id's (1 batch = 1 AI-advies-ronde)."""
+    conn = get_connection()
+    rows = conn.execute(
+        "SELECT batch_id, MAX(created_at) AS ts, MAX(id) AS mid FROM ai_ratings "
+        "GROUP BY batch_id ORDER BY ts DESC, mid DESC LIMIT ?", (limit,)
+    ).fetchall()
+    conn.close()
+    return [r["batch_id"] for r in rows]
+
+
+def get_ai_ratings(batch_ids: list[str] | None = None,
+                   ticker: str | None = None) -> list[dict]:
+    conn = get_connection()
+    q, p, conds = "SELECT * FROM ai_ratings", [], []
+    if batch_ids:
+        conds.append(f"batch_id IN ({','.join('?'*len(batch_ids))})")
+        p.extend(batch_ids)
+    if ticker:
+        conds.append("ticker=?"); p.append(ticker.upper())
+    if conds: q += " WHERE " + " AND ".join(conds)
+    q += " ORDER BY created_at DESC, id DESC"
+    rows = conn.execute(q, p).fetchall()
+    conn.close()
+    return [dict(r) for r in rows]
+
+
+def get_latest_price_target(ticker: str) -> dict | None:
+    """Meest recente AI-koersdoel voor een ticker (uit ai_ratings)."""
+    conn = get_connection()
+    row = conn.execute(
+        "SELECT price_target,currency,created_at FROM ai_ratings "
+        "WHERE ticker=? AND price_target IS NOT NULL ORDER BY created_at DESC, id DESC LIMIT 1",
+        (ticker.upper(),)
+    ).fetchone()
+    conn.close()
+    return dict(row) if row else None
+
+
 # ── Assets ──────────────────────────────────────────────────────────────────
 
 def add_asset(ticker, name, asset_type="stock", etf_subtype="distributing",
@@ -273,7 +421,8 @@ def delete_asset(ticker: str):
 def add_transaction(ticker, transaction_type, date, quantity, price_per_unit,
                     total_amount, currency="EUR", tob_tax=0.0, notes=None,
                     account=DEFAULT_ACCOUNT, costs=0.0, costs_currency="EUR",
-                    fx_rate=1.0, total_amount_eur=None, costs_eur=None):
+                    fx_rate=1.0, total_amount_eur=None, costs_eur=None,
+                    price_target=None):
     if total_amount_eur is None:
         total_amount_eur = total_amount * (fx_rate or 1.0)
     if costs_eur is None:
@@ -283,12 +432,32 @@ def add_transaction(ticker, transaction_type, date, quantity, price_per_unit,
         """INSERT INTO transactions
            (ticker,transaction_type,date,quantity,price_per_unit,total_amount,
             currency,tob_tax,notes,account,costs,costs_currency,costs_eur,
-            total_amount_eur,fx_rate)
-           VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+            total_amount_eur,fx_rate,price_target)
+           VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
         (ticker.upper(), transaction_type, date, quantity, price_per_unit,
          total_amount, currency, tob_tax, notes, account, costs, costs_currency,
-         costs_eur, total_amount_eur, fx_rate)
+         costs_eur, total_amount_eur, fx_rate, price_target)
     )
+    conn.commit()
+    conn.close()
+
+
+def update_transaction(txn_id: int, **fields):
+    """Werk willekeurige velden van een transactie bij (voor correcties)."""
+    allowed = {"ticker", "transaction_type", "date", "quantity", "price_per_unit",
+               "total_amount", "currency", "tob_tax", "notes", "account", "costs",
+               "costs_currency", "costs_eur", "total_amount_eur", "fx_rate",
+               "price_target"}
+    sets, vals = [], []
+    for k, v in fields.items():
+        if k in allowed:
+            sets.append(f"{k}=?")
+            vals.append(v.upper() if k == "ticker" and isinstance(v, str) else v)
+    if not sets:
+        return
+    vals.append(txn_id)
+    conn = get_connection()
+    conn.execute(f"UPDATE transactions SET {', '.join(sets)} WHERE id=?", vals)
     conn.commit()
     conn.close()
 
