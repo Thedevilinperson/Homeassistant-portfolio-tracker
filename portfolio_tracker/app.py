@@ -409,58 +409,116 @@ def page_portfolio():
 def page_assets():
     st.title("🏢 Activa beheren")
 
+    CUR = ["EUR", "USD", "GBP", "CHF"]
     tab_add, tab_list = st.tabs(["➕ Activum toevoegen", "📋 Overzicht"])
 
     with tab_add:
-        with st.form("asset_form", clear_on_submit=True):
-            c1, c2 = st.columns(2)
-            with c1:
-                ticker = st.text_input("Ticker *", placeholder="bv. AAPL, VWCE.AS")
-                name   = st.text_input("Naam (optioneel)", placeholder="bv. Vanguard FTSE All-World")
-                currency = st.selectbox("Munt", ["EUR", "USD", "GBP", "CHF"])
-            with c2:
-                asset_type  = st.radio("Type", ["stock", "etf"],
-                                       format_func=lambda x: "📊 Aandeel" if x == "stock" else "🧺 ETF")
-                etf_subtype = "distributing"
-                if asset_type == "etf":
-                    etf_subtype = st.radio("ETF-type", ["distributing", "accumulating"],
-                                           format_func=lambda x: "📤 Distribuerend" if x == "distributing" else "📦 Kapitaliseerend",
-                                           help="Bepaalt de TOB-berekening (0,12% / 1,32%)")
-                exchange = st.text_input("Beurs (optioneel)", placeholder="bv. Euronext, NYSE")
+        n = st.session_state.get("as_nonce", 0)
+        def k(name): return f"as_{name}_{n}"
 
-            auto_fill = st.checkbox("✨ Info automatisch ophalen via Yahoo Finance", value=True)
-            submitted = st.form_submit_button("✅ Activum toevoegen", type="primary")
-
-            if submitted:
+        st.caption("Tip: vul de ticker in en klik op **🔍 Info ophalen** — naam, munt, type, beurs en ISIN "
+                   "worden dan ingevuld in het formulier, zodat je ze kunt nakijken vóór je opslaat.")
+        c1, c2 = st.columns(2)
+        with c1:
+            ticker = st.text_input("Ticker *", placeholder="bv. AAPL, VWCE.AS", key=k("ticker"))
+            if st.button("🔍 Info ophalen via Yahoo Finance", key=k("fetch")):
                 if not ticker.strip():
-                    st.error("Vul een ticker in.")
+                    st.warning("Vul eerst een ticker in.")
                 else:
-                    t = ticker.strip().upper()
-                    n = name.strip()
-                    if auto_fill and not n:
-                        with st.spinner("Info ophalen via Yahoo Finance..."):
-                            info = md.get_stock_info(t)
-                            n        = info.get("name", t)
-                            currency = info.get("currency", currency)
-                            detected = info.get("type", asset_type)
-                            if detected == "etf" and asset_type == "stock":
-                                asset_type = "etf"
-                    db.add_asset(t, n or t, asset_type, etf_subtype, currency, exchange or None)
-                    clear_cache()
-                    st.success(f"✅ {t} — {n} toegevoegd!")
+                    with st.spinner("Info ophalen via Yahoo Finance..."):
+                        info = md.get_stock_info(ticker.strip().upper())
+                    st.session_state[k("name")] = info.get("name", "") or ""
+                    st.session_state[k("cur")]  = info.get("currency", "EUR") or "EUR"
+                    st.session_state[k("type")] = info.get("type", "stock") or "stock"
+                    st.session_state[k("exch")] = info.get("exchange", "") or ""
+                    st.session_state[k("isin")] = info.get("isin", "") or ""
+                    st.session_state[k("fetched")] = True
                     st.rerun()
+            name = st.text_input("Naam", key=k("name"),
+                                 placeholder="bv. Vanguard FTSE All-World")
+            cur_val  = st.session_state.get(k("cur"), "EUR")
+            cur_opts = CUR if cur_val in CUR else CUR + [cur_val]
+            currency = st.selectbox("Munt", cur_opts, key=k("cur"))
+        with c2:
+            asset_type = st.radio("Type", ["stock", "etf"],
+                                  format_func=lambda x: "📊 Aandeel" if x == "stock" else "🧺 ETF",
+                                  key=k("type"))
+            etf_subtype = "distributing"
+            if asset_type == "etf":
+                etf_subtype = st.radio("ETF-type", ["distributing", "accumulating"],
+                                       format_func=lambda x: "📤 Distribuerend" if x == "distributing" else "📦 Kapitaliseerend",
+                                       help="Bepaalt de TOB-berekening (0,12% / 1,32%)", key=k("sub"))
+            exchange = st.text_input("Beurs", key=k("exch"), placeholder="bv. NMS, AMS")
+            isin     = st.text_input("ISIN", key=k("isin"), placeholder="bv. IE00BK5BQT80")
+
+        if st.session_state.get(k("fetched")):
+            st.success("✨ Velden ingevuld via Yahoo Finance — controleer en pas aan waar nodig, en klik daarna op Toevoegen.")
+
+        if st.button("✅ Activum toevoegen", type="primary", key=k("save")):
+            if not ticker.strip():
+                st.error("Vul een ticker in.")
+            else:
+                t = ticker.strip().upper()
+                db.add_asset(t, name.strip() or t, asset_type, etf_subtype,
+                             currency, exchange.strip() or None, isin.strip() or None)
+                clear_cache()
+                st.session_state["as_nonce"] = n + 1   # formulier leegmaken
+                st.success(f"✅ {t} — {name.strip() or t} toegevoegd!")
+                st.rerun()
 
     with tab_list:
+        # ── Bewerkformulier (bij klik op ✏️) ──────────────────────────────────
+        edit_tk = st.session_state.get("edit_asset")
+        if edit_tk:
+            ea = db.get_asset(edit_tk)
+            if ea:
+                st.markdown(f"### ✏️ {edit_tk} bewerken")
+                with st.form("edit_asset_form"):
+                    e1, e2 = st.columns(2)
+                    with e1:
+                        e_name = st.text_input("Naam", value=ea.get("name") or "")
+                        e_cur_val = ea.get("currency") or "EUR"
+                        e_cur_opts = CUR if e_cur_val in CUR else CUR + [e_cur_val]
+                        e_cur = st.selectbox("Munt", e_cur_opts,
+                                             index=e_cur_opts.index(e_cur_val))
+                        e_isin = st.text_input("ISIN", value=ea.get("isin") or "")
+                    with e2:
+                        e_type = st.radio("Type", ["stock", "etf"],
+                                          index=0 if ea.get("asset_type") == "stock" else 1,
+                                          format_func=lambda x: "📊 Aandeel" if x == "stock" else "🧺 ETF")
+                        e_sub = ea.get("etf_subtype") or "distributing"
+                        if e_type == "etf":
+                            e_sub = st.radio("ETF-type", ["distributing", "accumulating"],
+                                             index=0 if e_sub == "distributing" else 1,
+                                             format_func=lambda x: "📤 Distribuerend" if x == "distributing" else "📦 Kapitaliseerend")
+                        e_exch = st.text_input("Beurs", value=ea.get("exchange") or "")
+                    s1, s2 = st.columns(2)
+                    if s1.form_submit_button("💾 Opslaan", type="primary"):
+                        db.update_asset(edit_tk, name=e_name.strip() or edit_tk,
+                                        asset_type=e_type, etf_subtype=e_sub,
+                                        currency=e_cur, exchange=e_exch.strip() or "",
+                                        isin=e_isin.strip() or "")
+                        clear_cache()
+                        st.session_state.pop("edit_asset", None)
+                        st.success("✅ Activum bijgewerkt!")
+                        st.rerun()
+                    if s2.form_submit_button("✖️ Annuleren"):
+                        st.session_state.pop("edit_asset", None)
+                        st.rerun()
+                st.divider()
+
         assets = db.get_assets()
         if not assets:
             st.info("Nog geen activa geregistreerd.")
             return
         for a in assets:
-            c1, c2, c3 = st.columns([5, 2, 1])
+            c1, c2, c3, c4 = st.columns([5, 2, 1, 1])
             with c1:
                 subtype_lbl = f" ({a['etf_subtype']})" if a["asset_type"] == "etf" else ""
                 st.markdown(f"**{a['ticker']}** — {a.get('name') or '—'}")
-                st.caption(f"{a['asset_type'].upper()}{subtype_lbl} | {a['currency']} | {a.get('exchange') or '—'}")
+                st.caption(f"{a['asset_type'].upper()}{subtype_lbl} | {a['currency']} | "
+                           f"{a.get('exchange') or '—'}")
+                st.caption(f"ISIN: {a.get('isin') or '—'}")
             with c2:
                 lp = db.get_latest_price(a["ticker"])
                 if lp:
@@ -469,6 +527,11 @@ def page_assets():
                 else:
                     st.caption("Geen koers")
             with c3:
+                if st.button("✏️", key=f"edit_asset_{a['ticker']}",
+                             help=f"Bewerk {a['ticker']}"):
+                    st.session_state["edit_asset"] = a["ticker"]
+                    st.rerun()
+            with c4:
                 if st.button("🗑️", key=f"del_asset_{a['ticker']}",
                              help=f"Verwijder {a['ticker']} (inclusief alle transacties)"):
                     db.delete_asset(a["ticker"])

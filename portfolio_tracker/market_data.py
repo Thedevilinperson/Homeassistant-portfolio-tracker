@@ -35,17 +35,26 @@ def _store(ticker: str, price: float, currency: str):
 
 def get_stock_info(ticker: str) -> dict:
     try:
-        info = yf.Ticker(ticker).info
+        tkr  = yf.Ticker(ticker)
+        info = tkr.info
         qt = info.get("quoteType", "").lower()
+        isin = ""
+        try:
+            raw = tkr.isin
+            if raw and raw not in ("-", "0", "None"):
+                isin = raw
+        except Exception:
+            pass
         return {
             "name":     info.get("longName") or info.get("shortName") or ticker,
             "currency": info.get("currency", "EUR"),
             "exchange": info.get("exchange", ""),
             "type":     "etf" if qt == "etf" else "stock",
+            "isin":     isin,
         }
     except Exception as e:
         logger.warning(f"get_stock_info({ticker}): {e}")
-        return {"name": ticker, "currency": "EUR", "exchange": "", "type": "stock"}
+        return {"name": ticker, "currency": "EUR", "exchange": "", "type": "stock", "isin": ""}
 
 
 def get_current_price(ticker: str) -> tuple[float | None, str | None]:

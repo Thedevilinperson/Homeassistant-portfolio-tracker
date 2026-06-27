@@ -197,6 +197,10 @@ def _migrate(conn):
         if not _column_exists(cur, "dividends", col):
             cur.execute(f"ALTER TABLE dividends ADD COLUMN {col} {ddl}")
 
+    # Assets: ISIN-kolom
+    if not _column_exists(cur, "assets", "isin"):
+        cur.execute("ALTER TABLE assets ADD COLUMN isin TEXT")
+
     # Zorg dat oude rijen een rekening hebben
     cur.execute(
         "UPDATE transactions SET account=? WHERE account IS NULL OR account=''",
@@ -427,24 +431,28 @@ def get_ai_usage_summary() -> dict:
 # ── Assets ──────────────────────────────────────────────────────────────────
 
 def add_asset(ticker, name, asset_type="stock", etf_subtype="distributing",
-              currency="EUR", exchange=None):
+              currency="EUR", exchange=None, isin=None):
     conn = get_connection()
     conn.execute(
-        """INSERT OR IGNORE INTO assets (ticker,name,asset_type,etf_subtype,currency,exchange)
-           VALUES (?,?,?,?,?,?)""",
-        (ticker.upper(), name, asset_type, etf_subtype, currency, exchange)
+        """INSERT OR IGNORE INTO assets
+           (ticker,name,asset_type,etf_subtype,currency,exchange,isin)
+           VALUES (?,?,?,?,?,?,?)""",
+        (ticker.upper(), name, asset_type, etf_subtype, currency, exchange, isin)
     )
     conn.commit()
     conn.close()
 
 
-def update_asset(ticker, name=None, asset_type=None, etf_subtype=None, currency=None):
+def update_asset(ticker, name=None, asset_type=None, etf_subtype=None,
+                 currency=None, exchange=None, isin=None):
     conn = get_connection()
     fields, vals = [], []
     if name        is not None: fields.append("name=?");        vals.append(name)
     if asset_type  is not None: fields.append("asset_type=?");  vals.append(asset_type)
     if etf_subtype is not None: fields.append("etf_subtype=?"); vals.append(etf_subtype)
-    if currency    is not None: fields.append("currency=?");     vals.append(currency)
+    if currency    is not None: fields.append("currency=?");    vals.append(currency)
+    if exchange    is not None: fields.append("exchange=?");    vals.append(exchange)
+    if isin        is not None: fields.append("isin=?");        vals.append(isin)
     if fields:
         vals.append(ticker.upper())
         conn.execute(f"UPDATE assets SET {','.join(fields)} WHERE ticker=?", vals)

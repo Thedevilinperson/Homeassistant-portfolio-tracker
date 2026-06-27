@@ -3,7 +3,18 @@
 Alle noemenswaardige wijzigingen aan de Portfolio Tracker add-on.
 De bovenste versie hoort overeen te komen met `version:` in `config.yaml`.
 
-##1.3.2
+## 1.4.0
+- Activa bewerken: bestaande activa kunnen aangepast worden (✏️ in het
+overzicht): naam, type, ETF-subtype, munt, beurs en ISIN.
+ISIN: activa hebben nu een ISIN-veld; het wordt mee opgehaald en getoond.
+- Beurs wordt nu effectief bewaard: voorheen werd de opgehaalde beurs niet
+opgeslagen bij automatisch invullen; dat is nu gecorrigeerd.
+- Info ophalen vóór opslaan: in het activumformulier vult de knop
+"🔍 Info ophalen via Yahoo Finance" naam, munt, type, beurs en ISIN direct in
+het formulier in, zodat je ze kunt nakijken en aanpassen vóór je bewaart
+(i.p.v. pas achteraf te zien of het juist liep).
+
+## 1.3.2
 - verwijderen van deprecated ARM-arch values in config
 
 ## 1.3.1
