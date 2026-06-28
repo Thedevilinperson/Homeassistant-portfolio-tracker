@@ -2,6 +2,14 @@
 
 Alle noemenswaardige wijzigingen aan de Portfolio Tracker add-on.
 
+## 1.7.0
+- Aandelensplitsingen: nieuwe tab "🔀 Splitsingen" op de Activa-pagina om een
+(omgekeerde) splitsing te registreren (bv. NVIDIA 1→10). Transacties van vóór de
+splitsdatum worden automatisch omgerekend (aantal × ratio, prijs ÷ ratio); de
+kostbasis blijft gelijk en posities/waarde blijven consistent met de
+split-gecorrigeerde Yahoo-koersen. Het transactie-overzicht toont nog steeds je
+oorspronkelijk ingevoerde waarden.
+
 ## 1.6.0
 - TOB correcter berekend: het tarief houdt nu rekening met of een ETF/fonds
 in België is aangeboden/geregistreerd (FSMA). Een kapitaliserende ETF die niet

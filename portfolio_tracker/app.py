@@ -428,7 +428,8 @@ def page_assets():
     st.title("🏢 Activa beheren")
 
     CUR = ["EUR", "USD", "GBP", "CHF"]
-    tab_add, tab_list = st.tabs(["➕ Activum toevoegen", "📋 Overzicht"])
+    tab_add, tab_list, tab_splits = st.tabs(
+        ["➕ Activum toevoegen", "📋 Overzicht", "🔀 Splitsingen"])
 
     with tab_add:
         n = st.session_state.get("as_nonce", 0)
@@ -608,6 +609,57 @@ def page_assets():
                     st.rerun()
             st.divider()
 
+    with tab_splits:
+        st.subheader("🔀 Aandelensplitsingen")
+        st.caption("Registreer een splitsing (bv. NVIDIA 1 → 10) of een omgekeerde splitsing "
+                   "(bv. 10 → 1). Transacties van vóór de splitsdatum worden automatisch omgerekend "
+                   "(aantal × ratio, prijs ÷ ratio); je kostbasis blijft gelijk. Yahoo-koersen zijn al "
+                   "split-gecorrigeerd, zodat je posities en waarde correct blijven.")
+        all_assets = db.get_assets()
+        if not all_assets:
+            st.info("Voeg eerst activa toe.")
+        else:
+            s_tickers = [a["ticker"] for a in all_assets]
+            s_names = {a["ticker"]: (a.get("name") or a["ticker"]) for a in all_assets}
+            with st.form("split_form", clear_on_submit=True):
+                sc1, sc2, sc3, sc4 = st.columns(4)
+                with sc1:
+                    s_tk = st.selectbox("Activum", s_tickers,
+                                        format_func=lambda t: asset_label(t, s_names))
+                with sc2:
+                    s_date = st.date_input("Splitsdatum", value=date.today())
+                with sc3:
+                    s_from = st.number_input("Van (oude aandelen)", min_value=1, value=1, step=1)
+                with sc4:
+                    s_to = st.number_input("Naar (nieuwe aandelen)", min_value=1, value=2, step=1)
+                ratio = s_to / s_from if s_from else 1
+                st.caption(f"Ratio = {s_to}/{s_from} = **{ratio:g}** "
+                           f"(1 aandeel wordt {ratio:g} aandelen; prijs gedeeld door {ratio:g})")
+                if st.form_submit_button("✅ Splitsing registreren", type="primary"):
+                    db.add_split(s_tk, str(s_date), ratio)
+                    clear_cache()
+                    st.success(f"✅ Splitsing {s_from}→{s_to} voor {s_tk} op {s_date} geregistreerd!")
+                    st.rerun()
+
+            splits = db.get_splits()
+            if splits:
+                st.divider()
+                for sp in splits:
+                    cc1, cc2, cc3 = st.columns([4, 2, 1])
+                    with cc1:
+                        st.markdown(f"🔀 **{sp['ticker']}** — {s_names.get(sp['ticker'], sp['ticker'])}")
+                        st.caption(f"📅 {sp['split_date']}")
+                    with cc2:
+                        st.markdown(f"Ratio **{sp['ratio']:g}**")
+                    with cc3:
+                        if st.button("🗑️", key=f"del_split_{sp['id']}"):
+                            db.delete_split(sp["id"])
+                            clear_cache()
+                            st.rerun()
+                    st.divider()
+            else:
+                st.info("Nog geen splitsingen geregistreerd.")
+
 
 # ── PAGINA: Transacties ───────────────────────────────────────────────────────
 
@@ -766,7 +818,7 @@ def page_transactions():
                         || doc.scrollingElement;
                 if (el) { el.scrollTo({top: 0, behavior: 'smooth'}); }
                 </script>""", height=0)
-            et = next((x for x in db.get_transactions() if x["id"] == edit_id), None)
+            et = next((x for x in db.get_transactions(adjusted=False) if x["id"] == edit_id), None)
             if et:
                 st.markdown(f"### ✏️ Transactie #{edit_id} bewerken")
                 with st.form("edit_txn_form"):
@@ -825,6 +877,7 @@ def page_transactions():
             year=int(f_year) if f_year != "Alle" else None,
             txn_type=("buy" if f_type == "Aankoop" else "sell" if f_type == "Verkoop" else None),
             account=(f_acct if f_acct != "Alle" else None),
+            adjusted=False,
         )
         if not txns:
             st.info("Geen transacties gevonden.")

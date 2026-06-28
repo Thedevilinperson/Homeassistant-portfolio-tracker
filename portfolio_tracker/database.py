@@ -130,6 +130,15 @@ def init_db():
         );
         CREATE INDEX IF NOT EXISTS idx_ai_usage_created ON ai_usage(created_at);
 
+        CREATE TABLE IF NOT EXISTS splits (
+            id         INTEGER PRIMARY KEY AUTOINCREMENT,
+            ticker     TEXT    NOT NULL,
+            split_date TEXT    NOT NULL,
+            ratio      REAL    NOT NULL,
+            created_at TEXT    DEFAULT (datetime('now'))
+        );
+        CREATE INDEX IF NOT EXISTS idx_splits_ticker ON splits(ticker);
+
         CREATE TABLE IF NOT EXISTS settings (
             key        TEXT PRIMARY KEY,
             value      TEXT NOT NULL,
@@ -556,7 +565,8 @@ def update_transaction(txn_id: int, **fields):
     conn.close()
 
 
-def get_transactions(ticker=None, year=None, txn_type=None, account=None) -> list[dict]:
+def get_transactions(ticker=None, year=None, txn_type=None, account=None,
+                     adjusted=True) -> list[dict]:
     conn = get_connection()
     q, p = "SELECT * FROM transactions", []
     conds = []
@@ -568,7 +578,71 @@ def get_transactions(ticker=None, year=None, txn_type=None, account=None) -> lis
     q += " ORDER BY date ASC"
     rows = conn.execute(q, p).fetchall()
     conn.close()
+    txns = [dict(r) for r in rows]
+    return _apply_splits(txns) if adjusted else txns
+
+
+# ── Aandelensplitsingen ───────────────────────────────────────────────────────
+
+def add_split(ticker, split_date, ratio):
+    conn = get_connection()
+    conn.execute("INSERT INTO splits (ticker,split_date,ratio) VALUES (?,?,?)",
+                 (ticker.upper(), split_date, float(ratio)))
+    conn.commit()
+    conn.close()
+
+
+def get_splits(ticker=None) -> list[dict]:
+    conn = get_connection()
+    if ticker:
+        rows = conn.execute("SELECT * FROM splits WHERE ticker=? ORDER BY split_date",
+                            (ticker.upper(),)).fetchall()
+    else:
+        rows = conn.execute("SELECT * FROM splits ORDER BY ticker, split_date").fetchall()
+    conn.close()
     return [dict(r) for r in rows]
+
+
+def delete_split(split_id: int):
+    conn = get_connection()
+    conn.execute("DELETE FROM splits WHERE id=?", (split_id,))
+    conn.commit()
+    conn.close()
+
+
+def _all_splits_map() -> dict:
+    """{ticker: [(split_date, ratio), ...]} — leeg als er geen splits zijn."""
+    out: dict[str, list] = {}
+    for s in get_splits():
+        out.setdefault(s["ticker"], []).append((s["split_date"], float(s["ratio"])))
+    return out
+
+
+def _apply_splits(txns: list[dict]) -> list[dict]:
+    """Pas geregistreerde splitsingen toe op transacties die vóór de splitsdatum
+    vallen: aantal × ratio, prijs ÷ ratio (kostbasis blijft gelijk). Yahoo-koersen
+    zijn al split-gecorrigeerd, dus zo blijven posities en waarde consistent."""
+    smap = _all_splits_map()
+    if not smap:
+        return txns
+    for t in txns:
+        splits = smap.get(t["ticker"])
+        if not splits:
+            continue
+        factor = 1.0
+        tdate = (t.get("date") or "")[:10]
+        for sdate, ratio in splits:
+            if tdate < sdate[:10] and ratio:      # gekocht/verkocht vóór de splitsing
+                factor *= ratio
+        if factor != 1.0:
+            if t.get("quantity") is not None:
+                t["quantity"] = t["quantity"] * factor
+            if t.get("price_per_unit") is not None:
+                t["price_per_unit"] = t["price_per_unit"] / factor
+            if t.get("price_target"):
+                t["price_target"] = t["price_target"] / factor
+            t["_split_factor"] = factor          # markering voor weergave
+    return txns
 
 
 def update_transaction_account(txn_id: int, account: str):
