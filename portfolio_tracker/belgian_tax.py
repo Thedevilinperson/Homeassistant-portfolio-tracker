@@ -372,6 +372,12 @@ def calculate_tax_overview(year: int | None = None,
     taxable       = max(0.0, total_real_gl - exemption) if total_real_gl > 0 else 0.0
     tax_due       = round(taxable * tax_rate, 2)
 
+    # Gerealiseerde W/V voor weergave: alle jaren, rekening-bewust.
+    # (De fiscale berekening hierboven blijft globaal + per boekjaar.)
+    sel_realized      = [g for g in all_gains if (account is None or g["account"] == account)]
+    sel_real_total    = sum(g["gain_loss"] for g in sel_realized)
+    sel_real_year     = sum(g["gain_loss"] for g in sel_realized if g["year"] == year)
+
     # Dividenden dit boekjaar (EUR)
     divs      = db.get_dividends(year=year)
     gross_div = sum((d.get("gross_eur") if d.get("gross_eur") is not None
@@ -410,6 +416,11 @@ def calculate_tax_overview(year: int | None = None,
         "account_filter":        account,
         "realized_gains":        year_gains,
         "total_realized_gl":     total_real_gl,
+        "all_realized_gains":      all_gains,
+        "realized_all_total":      sum(g["gain_loss"] for g in all_gains),
+        "selection_realized_gains": sel_realized,
+        "selection_realized_total": sel_real_total,
+        "selection_realized_year":  sel_real_year,
         "annual_exemption":      exemption,
         "base_exemption":        base_exemption,
         "base_exemption_effective": exm["base_effective"],

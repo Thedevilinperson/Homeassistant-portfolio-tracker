@@ -6,6 +6,4 @@
 - Als ik in het dashboard de rekening met netto 0 positie selecteer moet ik nog steeds de historiek en de gerealiseerde meer- en minwaarden moeten zien.
 - als ik in mijn portefeuille 'alle rekeningen' selecteer, dan moet ik voor een bepaald activum de gehele historiek kunnen zien. Een cocnreet voorbeeld: ik kocht in 2023 5 aandelen G2XJ (een goud ETF aan). Die verkocht ik met winst in 2026 op dezelfde rekening. Daarna kocht ik diezelfde 5 aandelen aan op een andere rekening. De reden is dat dat ik de eerste rekening wou afsluiten door te hoge kosten
 
-4) op een gegeven moment kiezen bedrijven er voor om hun aandelen te splitsen. Bv. Nvidia door van 1 aandeel 10 te maken. Hoe kan dit best geïntegreerd worden in de applicatie?
-
 5) dividenden worden momenteel niet gebonden aan een rekening, maar aan een activum. Hoe zal dit lopen als er op een bepaald moment op verschillende rekeningen een dividend wordt uitgekeerd? Kan je dit scenario bekijken en voorstellen hoe dit best aangepakt wordt?

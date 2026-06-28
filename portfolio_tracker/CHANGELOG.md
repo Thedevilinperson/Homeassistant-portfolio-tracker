@@ -2,6 +2,21 @@
 
 Alle noemenswaardige wijzigingen aan de Portfolio Tracker add-on.
 
+## 1.8.0
+Meer-/minwaarden over rekeningen heen:
+- Het dashboard toont nu een totale meer-/minwaarde (gerealiseerd over alle
+jaren + ongerealiseerd), zodat winst uit een verkoop en latere heraankoop
+zichtbaar is.
+- Selecteer je een rekening met netto-0-positie (bv. een afgesloten rekening),
+dan blijven de historiek en gerealiseerde meer-/minwaarden van die rekening
+zichtbaar in plaats van een leeg scherm.
+- Nieuwe sectie "Gerealiseerde meer-/minwaarden (historiek)" op zowel het
+dashboard als de portefeuille, rekening-bewust en over alle jaren. Bij "alle
+rekeningen" zie je zo de volledige historiek van een activum, ook wanneer het
+op de ene rekening verkocht en op een andere heraangekocht is.
+- De fiscale berekening (gerealiseerde W/V per boekjaar, vrijstelling) blijft
+zoals het hoort globaal per persoon.
+
 ## 1.7.0
 - Aandelensplitsingen: nieuwe tab "🔀 Splitsingen" op de Activa-pagina om een
 (omgekeerde) splitsing te registreren (bv. NVIDIA 1→10). Transacties van vóór de

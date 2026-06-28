@@ -95,6 +95,29 @@ def asset_label(ticker: str, names: dict | None = None) -> str:
     return f"{nm} ({ticker})" if nm and nm != ticker else ticker
 
 
+def render_realized_history(realized_list, names=None, empty_msg="Nog geen gerealiseerde meer-/minwaarden."):
+    """Tabel met gerealiseerde meer-/minwaarden (verkopen), over alle jaren/rekeningen
+    heen zoals meegegeven. Toont ook posities die intussen netto 0 zijn."""
+    names = names if names is not None else asset_name_map()
+    if not realized_list:
+        st.info(empty_msg)
+        return
+    rows = []
+    for g in sorted(realized_list, key=lambda x: x["date"], reverse=True):
+        rows.append({
+            "Datum":         g["date"][:10],
+            "Activum":       asset_label(g["ticker"], names),
+            "Rekening":      g.get("account") or "—",
+            "Aantal":        f"{g['quantity']:.4f}",
+            "Opbrengst (€)": eur(g["sell_total"]),
+            "Kostbasis (€)": eur(g["cost_basis"]),
+            "W/V (€)":       eur(g["gain_loss"]),
+        })
+    st.dataframe(pd.DataFrame(rows), width='stretch', hide_index=True)
+    tot = sum(g["gain_loss"] for g in realized_list)
+    st.caption(f"Totaal gerealiseerde W/V (deze selectie, alle jaren): **{eur(tot)}**")
+
+
 def compute_eur(amount: float, currency: str, date_str: str) -> tuple[float, float]:
     """(fx_rate, eur_bedrag) op transactiedatum. Valt terug op 1.0 bij EUR/fout."""
     if not amount or currency == "EUR":
@@ -147,10 +170,14 @@ def page_dashboard():
     year = datetime.now().year
     overview, assets, prices = get_overview(year, acct)
     pv = overview["position_values"]
+    sel_realized = overview.get("selection_realized_gains", [])
 
-    if not pv:
+    if not pv and not sel_realized:
         st.info("👋 Welkom! Voeg activa toe via **🏢 Activa** en daarna transacties via **➕ Transacties**.")
         return
+    if not pv and sel_realized:
+        st.info("ℹ️ Geen open posities voor deze selectie, maar er is wel een gerealiseerde historiek "
+                "(bv. een rekening die je hebt afgesloten). Die zie je hieronder.")
 
     total_val  = overview["total_portfolio_value"]
     total_cost = overview["total_cost_basis"]
@@ -174,11 +201,22 @@ def page_dashboard():
               help="Transactiekosten + algemene rekeningkosten (bv. beheerskosten). "
                    "Apart gehouden, niet in de meerwaardeberekening.")
 
+    # Totale meer-/minwaarde over de volledige historiek: gerealiseerd (alle jaren,
+    # rekening-bewust) + ongerealiseerd. Zo is een verkoop+heraankoop ook zichtbaar.
+    sel_real_total = overview.get("selection_realized_total", 0.0)
+    totale_wv = sel_real_total + (unreal_gl or 0)
+    st.caption(
+        f"📊 **Totale meer-/minwaarde:** {eur(totale_wv)}  —  waarvan gerealiseerd "
+        f"(alle jaren) {eur(sel_real_total)} en ongerealiseerd {eur(unreal_gl)}."
+        + ("  Inclusief winst/verlies uit verkochte posities die intussen netto 0 zijn." if sel_real_total else ""))
+
     st.divider()
 
     col_l, col_r = st.columns([3, 2])
 
     with col_l:
+        if not pv:
+            st.caption("Geen open posities om grafisch te tonen voor deze selectie.")
         # Taarttaart samenstelling
         labels = list(pv.keys())
         values = [pv[t]["current_value"] or 0 for t in labels]
@@ -248,6 +286,16 @@ def page_dashboard():
         else:
             st.caption("Nog geen advies. Genereer het via 🤖 AI Advisor.")
 
+    st.divider()
+    st.subheader("📊 Gerealiseerde meer-/minwaarden (historiek)")
+    if acct:
+        st.caption(f"Rekening **{acct}** — ook zichtbaar wanneer de huidige positie 0 is "
+                   "(bv. een afgesloten rekening).")
+    else:
+        st.caption("Over alle rekeningen heen, alle jaren — inclusief winst/verlies uit "
+                   "verkochte en elders heraangekochte posities.")
+    render_realized_history(overview.get("selection_realized_gains", []), asset_name_map())
+
 
 # ── PAGINA: Portefeuille ───────────────────────────────────────────────────────
 
@@ -267,7 +315,13 @@ def page_portfolio():
     pv = overview["position_values"]
 
     if not pv:
-        st.info("Geen open posities. Voeg transacties toe via ➕ Transacties.")
+        if overview.get("selection_realized_gains"):
+            st.info("Geen open posities voor deze selectie, maar er is wel een gerealiseerde "
+                    "historiek (bv. verkocht en elders heraangekocht). Die zie je hieronder.")
+            st.subheader("📊 Gerealiseerde meer-/minwaarden (historiek)")
+            render_realized_history(overview["selection_realized_gains"], asset_name_map())
+        else:
+            st.info("Geen open posities. Voeg transacties toe via ➕ Transacties.")
         return
 
     assets_map = {a["ticker"]: a for a in assets}
@@ -420,6 +474,15 @@ def page_portfolio():
         st.plotly_chart(fig, width='stretch')
     else:
         st.info("Nog geen prijsgeschiedenis. De scheduler slaat elke 5 minuten koersen op.")
+
+    st.divider()
+    st.subheader("📊 Gerealiseerde meer-/minwaarden (historiek)")
+    if acct:
+        st.caption(f"Rekening **{acct}**.")
+    else:
+        st.caption("Alle rekeningen, alle jaren — zo zie je de volledige historiek van een "
+                   "activum, ook als het op de ene rekening verkocht en op een andere heraangekocht is.")
+    render_realized_history(overview.get("selection_realized_gains", []), asset_name_map())
 
 
 # ── PAGINA: Activa ────────────────────────────────────────────────────────────
