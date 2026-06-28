@@ -476,6 +476,9 @@ def page_assets():
                 with st.form("edit_asset_form"):
                     e1, e2 = st.columns(2)
                     with e1:
+                        e_ticker = st.text_input("Ticker", value=edit_tk,
+                                                 help="Pas aan als de ticker fout is (bv. STMPA → STMPA.PA). "
+                                                      "Transacties, dividenden en koershistoriek verhuizen mee.")
                         e_name = st.text_input("Naam", value=ea.get("name") or "")
                         e_cur_val = ea.get("currency") or "EUR"
                         e_cur_opts = CUR if e_cur_val in CUR else CUR + [e_cur_val]
@@ -492,16 +495,28 @@ def page_assets():
                                              index=0 if e_sub == "distributing" else 1,
                                              format_func=lambda x: "📤 Distribuerend" if x == "distributing" else "📦 Kapitaliseerend")
                         e_exch = st.text_input("Beurs", value=ea.get("exchange") or "")
+                    st.caption("💡 Na het corrigeren van een ticker: klik op '🔄 Ververs prijzen' "
+                               "op de Portefeuille-pagina om de koers op te halen.")
                     s1, s2 = st.columns(2)
                     if s1.form_submit_button("💾 Opslaan", type="primary"):
-                        db.update_asset(edit_tk, name=e_name.strip() or edit_tk,
-                                        asset_type=e_type, etf_subtype=e_sub,
-                                        currency=e_cur, exchange=e_exch.strip() or "",
-                                        isin=e_isin.strip() or "")
-                        clear_cache()
-                        st.session_state.pop("edit_asset", None)
-                        st.success("✅ Activum bijgewerkt!")
-                        st.rerun()
+                        target = edit_tk
+                        new_tk = e_ticker.strip().upper()
+                        ok = True
+                        if new_tk and new_tk != edit_tk:
+                            if db.rename_ticker(edit_tk, new_tk):
+                                target = new_tk
+                            else:
+                                ok = False
+                                st.error(f"Ticker '{new_tk}' bestaat al — kies een andere of voeg ze samen handmatig.")
+                        if ok:
+                            db.update_asset(target, name=e_name.strip() or target,
+                                            asset_type=e_type, etf_subtype=e_sub,
+                                            currency=e_cur, exchange=e_exch.strip() or "",
+                                            isin=e_isin.strip() or "")
+                            clear_cache()
+                            st.session_state.pop("edit_asset", None)
+                            st.success(f"✅ {target} bijgewerkt!")
+                            st.rerun()
                     if s2.form_submit_button("✖️ Annuleren"):
                         st.session_state.pop("edit_asset", None)
                         st.rerun()
@@ -579,14 +594,20 @@ def page_transactions():
 
         total_amount = quantity * price_unit
 
-        # Koersdoel + AI-bepaling
-        if "pt_input" not in st.session_state:
-            st.session_state["pt_input"] = 0.0
+        # Koersdoel + AI-bepaling.
+        # Een widget-key mag na instantiatie niet meer gewijzigd worden. Daarom
+        # zetten we de waarde via een aparte staging-variabele (pt_staged) en
+        # geven we de number_input een wisselende key (pt_nonce). Zo kan zowel de
+        # AI-knop als de reset na opslaan de waarde veilig aanpassen.
+        st.session_state.setdefault("pt_staged", 0.0)
+        st.session_state.setdefault("pt_nonce", 0)
+        ptn = st.session_state["pt_nonce"]
         pc1, pc2 = st.columns([2, 1])
         with pc1:
             price_target = st.number_input("Koersdoel (optioneel, native munt)",
                                            min_value=0.0, step=0.01, format="%.2f",
-                                           key="pt_input")
+                                           value=float(st.session_state["pt_staged"]),
+                                           key=f"pt_input_{ptn}")
         with pc2:
             st.write("")
             st.write("")
@@ -599,7 +620,8 @@ def page_transactions():
                     if res.get("error"):
                         st.error(res["error"])
                     else:
-                        st.session_state["pt_input"] = float(res["price_target"])
+                        st.session_state["pt_staged"] = float(res["price_target"])
+                        st.session_state["pt_nonce"]  = ptn + 1   # verse widget -> value wordt gehonoreerd
                         st.session_state["pt_info"] = (
                             f"🎯 AI-koersdoel {res['price_target']:.2f} {res['currency']} "
                             f"(model {res.get('model','?')}). {res.get('rationale','')} {res.get('scenario','')}")
@@ -651,7 +673,9 @@ def page_transactions():
                                        total_amount_eur=tot_eur, costs_eur=costs_eur,
                                        price_target=(price_target or None))
                     clear_cache()
-                    st.session_state["pt_input"] = 0.0
+                    # Koersdoelveld leegmaken: verse widget op de volgende run.
+                    st.session_state["pt_staged"] = 0.0
+                    st.session_state["pt_nonce"] = st.session_state.get("pt_nonce", 0) + 1
                     st.session_state.pop("pt_info", None)
                     st.success(f"✅ {'Aankoop' if txn_type == 'buy' else 'Verkoop'} van "
                                f"{quantity:.4f} × {ticker} op {account} toegevoegd!")
