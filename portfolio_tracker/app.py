@@ -82,6 +82,18 @@ def clear_cache():
     get_overview.clear()
 
 
+def asset_name_map() -> dict:
+    """{ticker: naam} voor alle geregistreerde activa."""
+    return {a["ticker"]: (a.get("name") or a["ticker"]) for a in db.get_assets()}
+
+
+def asset_label(ticker: str, names: dict | None = None) -> str:
+    """Toon 'Naam (TICKER)'; valt terug op enkel de ticker als er geen naam is."""
+    names = names if names is not None else asset_name_map()
+    nm = names.get(ticker, ticker)
+    return f"{nm} ({ticker})" if nm and nm != ticker else ticker
+
+
 def compute_eur(amount: float, currency: str, date_str: str) -> tuple[float, float]:
     """(fx_rate, eur_bedrag) op transactiedatum. Valt terug op 1.0 bij EUR/fout."""
     if not amount or currency == "EUR":
@@ -185,14 +197,17 @@ def page_dashboard():
         st.plotly_chart(fig_pie, width='stretch')
 
         # Staafdiagram W/V per positie
+        names = asset_name_map()
         tickers_sorted = sorted(pv.keys(), key=lambda t: pv[t]["unrealized_gain_loss"] or 0)
         gl_vals = [pv[t]["unrealized_gain_loss"] or 0 for t in tickers_sorted]
         colors  = ["#00b894" if v >= 0 else "#d63031" for v in gl_vals]
+        labels  = [names.get(t, t) for t in tickers_sorted]
 
         fig_bar = go.Figure(go.Bar(
-            x=tickers_sorted, y=gl_vals, marker_color=colors,
+            x=labels, y=gl_vals, marker_color=colors,
+            customdata=tickers_sorted,
             text=[f"€{v:,.0f}" for v in gl_vals], textposition="outside",
-            hovertemplate="<b>%{x}</b><br>€%{y:,.2f}<extra></extra>",
+            hovertemplate="<b>%{x}</b> (%{customdata})<br>€%{y:,.2f}<extra></extra>",
         ))
         fig_bar.add_hline(y=0, line_dash="dot", line_color="rgba(200,200,200,0.3)")
         fig_bar.update_layout(
@@ -376,7 +391,9 @@ def page_portfolio():
     st.divider()
     st.subheader("📈 Prijsgeschiedenis")
     tickers = list(pv.keys())
-    sel = st.selectbox("Selecteer positie:", tickers)
+    names = asset_name_map()
+    sel = st.selectbox("Selecteer positie:", tickers,
+                       format_func=lambda t: asset_label(t, names))
     days = st.slider("Aantal dagen:", 1, 90, 14)
 
     hist = db.get_price_history(sel, days=days)
@@ -390,12 +407,12 @@ def page_portfolio():
             x=df_h["timestamp"], y=df_h["price"],
             mode="lines", line=dict(color="#74b9ff", width=2),
             fill="tozeroy", fillcolor="rgba(116,185,255,0.08)",
-            name=sel,
+            name=names.get(sel, sel),
         ))
         fig.add_hline(y=avg_cost, line_dash="dash", line_color="#fdcb6e",
                       annotation_text=f"Gem. kostprijs {avg_cost:.4f}")
         fig.update_layout(
-            title=f"{sel} — {days} dagen",
+            title=f"{asset_label(sel, names)} — {days} dagen",
             height=340, plot_bgcolor="rgba(0,0,0,0)", paper_bgcolor="rgba(0,0,0,0)",
             margin=dict(t=40, b=30, l=20, r=20),
         )
@@ -440,7 +457,7 @@ def page_assets():
                         st.session_state[k("isin")] = info.get("isin", "") or ""
                         st.session_state[k("fetched")] = True
                         st.rerun()
-            name = st.text_input("Naam", key=k("name"),
+            name = st.text_input("Naam *", key=k("name"),
                                  placeholder="bv. Vanguard FTSE All-World")
             cur_val  = st.session_state.get(k("cur"), "EUR")
             cur_opts = CUR if cur_val in CUR else CUR + [cur_val]
@@ -463,13 +480,15 @@ def page_assets():
         if st.button("✅ Activum toevoegen", type="primary", key=k("save")):
             if not ticker.strip():
                 st.error("Vul een ticker in.")
+            elif not name.strip():
+                st.error("Vul een naam in (verplicht). Gebruik eventueel '🔍 Info ophalen' om die automatisch in te vullen.")
             else:
                 t = ticker.strip().upper()
-                db.add_asset(t, name.strip() or t, asset_type, etf_subtype,
+                db.add_asset(t, name.strip(), asset_type, etf_subtype,
                              currency, exchange.strip() or None, isin.strip() or None)
                 clear_cache()
                 st.session_state["as_nonce"] = n + 1   # formulier leegmaken
-                st.success(f"✅ {t} — {name.strip() or t} toegevoegd!")
+                st.success(f"✅ {t} — {name.strip()} toegevoegd!")
                 st.rerun()
 
     with tab_list:
@@ -532,6 +551,17 @@ def page_assets():
         if not assets:
             st.info("Nog geen activa geregistreerd.")
             return
+
+        f_asset = st.text_input("🔎 Filter op naam of ticker", key="asset_filter",
+                                placeholder="bv. Apple, VWCE, STMPA.PA")
+        if f_asset.strip():
+            q = f_asset.strip().lower()
+            assets = [a for a in assets
+                      if q in (a.get("name") or "").lower() or q in a["ticker"].lower()]
+        if not assets:
+            st.info("Geen activa gevonden voor deze filter.")
+            return
+        st.caption(f"{len(assets)} activum/activa")
         for a in assets:
             c1, c2, c3, c4 = st.columns([5, 2, 1, 1])
             with c1:
@@ -573,6 +603,8 @@ def page_transactions():
 
     asset_tickers = [a["ticker"] for a in assets]
     assets_map    = {a["ticker"]: a for a in assets}
+    names         = {a["ticker"]: (a.get("name") or a["ticker"]) for a in assets}
+    fmt           = lambda t: asset_label(t, names)
 
     tab_add, tab_view, tab_costs = st.tabs(
         ["📝 Nieuwe transactie", "📋 Overzicht", "🏦 Rekeningkosten"])
@@ -582,7 +614,8 @@ def page_transactions():
     with tab_add:
         c1, c2 = st.columns(2)
         with c1:
-            ticker   = st.selectbox("Activum *", asset_tickers, key="add_ticker")
+            ticker   = st.selectbox("Activum *", asset_tickers, key="add_ticker",
+                                     format_func=fmt)
             txn_date = st.date_input("Datum *", value=date.today(), key="add_date")
             txn_type = st.radio("Type *", ["buy", "sell"],
                                 format_func=lambda x: "🟢 Aankoop" if x == "buy" else "🔴 Verkoop",
@@ -698,7 +731,8 @@ def page_transactions():
                     e1, e2, e3 = st.columns(3)
                     with e1:
                         e_ticker = st.selectbox("Activum", asset_tickers,
-                                                index=asset_tickers.index(et["ticker"]) if et["ticker"] in asset_tickers else 0)
+                                                index=asset_tickers.index(et["ticker"]) if et["ticker"] in asset_tickers else 0,
+                                                format_func=fmt)
                         e_type = st.selectbox("Type", ["buy", "sell"],
                                               index=0 if et["transaction_type"] == "buy" else 1)
                         e_date = st.date_input("Datum", value=datetime.strptime(et["date"][:10], "%Y-%m-%d").date())
@@ -738,13 +772,14 @@ def page_transactions():
                 st.divider()
 
         c1, c2, c3, c4 = st.columns(4)
-        f_tick = c1.text_input("Filter ticker")
+        f_asset = c1.selectbox("Activum", ["Alle"] + asset_tickers,
+                               format_func=lambda t: "Alle" if t == "Alle" else fmt(t))
         f_type = c2.selectbox("Type", ["Alle", "Aankoop", "Verkoop"])
         f_year = c3.selectbox("Jaar", ["Alle"] + [str(y) for y in range(datetime.now().year, 2019, -1)])
         f_acct = c4.selectbox("Rekening", ["Alle"] + db.get_accounts())
 
         txns = db.get_transactions(
-            ticker=f_tick.upper() if f_tick else None,
+            ticker=(f_asset if f_asset != "Alle" else None),
             year=int(f_year) if f_year != "Alle" else None,
             txn_type=("buy" if f_type == "Aankoop" else "sell" if f_type == "Verkoop" else None),
             account=(f_acct if f_acct != "Alle" else None),
@@ -761,9 +796,11 @@ def page_transactions():
         for t in reversed(txns):
             icon  = "🟢" if t["transaction_type"] == "buy" else "🔴"
             label = "Aankoop" if t["transaction_type"] == "buy" else "Verkoop"
+            nm = names.get(t["ticker"], "")
+            name_part = f"{nm} — " if nm and nm != t["ticker"] else ""
             c_info, c_val, c_acct, c_edit, c_del = st.columns([4, 3, 2, 1, 1])
             with c_info:
-                st.markdown(f"{icon} **{t['ticker']}** — {label}")
+                st.markdown(f"{icon} **{t['ticker']}** — {name_part}{label}")
                 st.caption(f"📅 {t['date']}")
                 tgt = t.get("price_target")
                 if tgt:
@@ -852,6 +889,7 @@ def page_dividends():
 
     with tab_add:
         tickers = [a["ticker"] for a in assets]
+        div_names = {a["ticker"]: (a.get("name") or a["ticker"]) for a in assets}
         if not tickers:
             st.warning("Voeg eerst activa toe via 🏢 Activa.")
         else:
@@ -859,7 +897,8 @@ def page_dividends():
             with st.form("div_form", clear_on_submit=True):
                 c1, c2 = st.columns(2)
                 with c1:
-                    d_ticker   = st.selectbox("Activum *", tickers)
+                    d_ticker   = st.selectbox("Activum *", tickers,
+                                              format_func=lambda t: asset_label(t, div_names))
                     d_date     = st.date_input("Datum *", value=date.today())
                     d_currency = st.selectbox("Munt", ["EUR", "USD", "GBP"])
                 with c2:

@@ -2,6 +2,18 @@
 
 Alle noemenswaardige wijzigingen aan de Portfolio Tracker add-on.
 
+## 1.5.0
+- Activumnaam i.p.v. ticker op meer plaatsen, makkelijker te herkennen:
+- Dashboard: staafdiagram "Ongerealiseerde winst/verlies per positie" toont de naam.
+- Portefeuille: de keuzelijst en titel bij "Prijsgeschiedenis" tonen de naam.
+- Transacties: keuzelijst bij "Nieuwe transactie" en de naam in elke regel van het overzicht.
+- Dividenden: keuzelijst bij "Dividend toevoegen" toont de naam.
+Overal in de vorm "Naam (TICKER)".
+- Activa: de naam is nu een verplicht veld; in het overzicht is een filter op
+naam of ticker bijgekomen.
+- Transacties: in het overzicht is de tekstfilter op ticker vervangen door een
+keuzelijst "Activum" (op naam), wat tegelijk de naam- en tickerfilter dekt.
+
 ## 1.4.2
 Foutmelding bij onbekende ticker: als "🔍 Info ophalen via Yahoo Finance" niets vindt, toont de app nu een duidelijke fout (met hint over het beurssuffix) i.p.v. stilletjes standaardwaarden in te vullen.
 Ticker corrigeren: in het activum-bewerkformulier kan je nu ook de ticker zelf aanpassen (bv. STMPA → STMPA.PA). De bijbehorende transacties, dividenden, koershistoriek en AI-ratings verhuizen mee, zodat een verkeerde ticker zonder dataverlies te herstellen is.
