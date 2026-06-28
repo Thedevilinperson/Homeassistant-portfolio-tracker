@@ -2,6 +2,17 @@
 
 Alle noemenswaardige wijzigingen aan de Portfolio Tracker add-on.
 
+## 0.11.0
+Dividenden — gedetailleerde invoer van de volledige voorheffingsketen. Naast de
+bestaande eenvoudige invoer kun je nu ingeven: ① bruto dividend vóór buitenlandse
+bronbelasting, ② buitenlandse bronbelasting, ③ bruto na bronbelasting / vóór Belgische
+roerende voorheffing, en ④ netto na alle voorheffingen. De Belgische RV wordt afgeleid
+(③ − ④). Elk veld heeft een eigen muntkeuze, en lege velden worden waar mogelijk
+automatisch berekend uit de ingevulde velden (zelfde munt). Zo is duidelijk over welk
+brutobedrag het gaat en wordt het netto niet langer automatisch verondersteld.
+De waarschuwing over niet-ingehouden Belgische roerende voorheffing is verwijderd.
+Totalen en het netto per rekening rekenen nu met het werkelijk ontvangen netto (EUR).
+
 ## 0.10.0
 - Fotomoment (referentiewaarde 31/12/2025) voor de meerwaardebelasting. Voor
 stukken die je vóór 2026 kocht, vertrekt de belastbare meerwaarde niet langer van

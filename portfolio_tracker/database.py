@@ -202,6 +202,17 @@ def _migrate(conn):
         ("foreign_wht_withheld", "INTEGER DEFAULT 0"),  # bronbelasting al ingehouden?
         ("belgian_rv_withheld",  "INTEGER DEFAULT 0"),  # roerende voorheffing al ingehouden?
         ("account",          "TEXT"),                   # rekening waarop het dividend is uitgekeerd
+        # Gedetailleerde keten (elk veld optioneel, met eigen munt); netto in EUR
+        ("gross_before_wht",     "REAL"),  # A: bruto vóór buitenlandse bronbelasting
+        ("gross_before_wht_cur", "TEXT"),
+        ("foreign_wht_amt",      "REAL"),  # B: buitenlandse bronbelasting
+        ("foreign_wht_cur",      "TEXT"),
+        ("gross_after_wht",      "REAL"),  # C: bruto na bronbelasting / vóór Belgische RV
+        ("gross_after_wht_cur",  "TEXT"),
+        ("belgian_rv_amt",       "REAL"),  # Belgische roerende voorheffing (= C - D)
+        ("net_received",         "REAL"),  # D: netto na alle voorheffingen
+        ("net_received_cur",     "TEXT"),
+        ("net_eur",              "REAL"),  # D in EUR (authoritatief voor totalen)
     ]
     new_div_cols = []
     for col, ddl in div_cols:
@@ -698,24 +709,33 @@ def add_dividend(ticker, date, gross_amount, withholding_tax=0.0,
                  currency="EUR", notes=None, fx_rate=1.0,
                  gross_eur=None, withholding_eur=None,
                  foreign_wht_withheld=0, belgian_rv_withheld=0,
-                 account=None):
+                 account=None, details=None):
     if gross_eur is None:
         gross_eur = gross_amount * (fx_rate or 1.0)
     if withholding_eur is None:
         withholding_eur = withholding_tax * (fx_rate or 1.0)
     if not account:
         account = DEFAULT_ACCOUNT
+    d = details or {}
+    if d.get("net_eur") is None:
+        d["net_eur"] = gross_eur - withholding_eur
+    cols = ["ticker", "date", "gross_amount", "withholding_tax", "currency", "notes",
+            "fx_rate", "gross_eur", "withholding_eur",
+            "foreign_wht_withheld", "belgian_rv_withheld", "account",
+            "gross_before_wht", "gross_before_wht_cur", "foreign_wht_amt",
+            "foreign_wht_cur", "gross_after_wht", "gross_after_wht_cur",
+            "belgian_rv_amt", "net_received", "net_received_cur", "net_eur"]
+    vals = [ticker.upper(), date, gross_amount, withholding_tax, currency, notes,
+            fx_rate, gross_eur, withholding_eur,
+            int(foreign_wht_withheld), int(belgian_rv_withheld), account,
+            d.get("gross_before_wht"), d.get("gross_before_wht_cur"),
+            d.get("foreign_wht_amt"), d.get("foreign_wht_cur"),
+            d.get("gross_after_wht"), d.get("gross_after_wht_cur"),
+            d.get("belgian_rv_amt"), d.get("net_received"),
+            d.get("net_received_cur"), d.get("net_eur")]
     conn = get_connection()
-    conn.execute(
-        """INSERT INTO dividends
-           (ticker,date,gross_amount,withholding_tax,currency,notes,
-            fx_rate,gross_eur,withholding_eur,
-            foreign_wht_withheld,belgian_rv_withheld,account)
-           VALUES (?,?,?,?,?,?,?,?,?,?,?,?)""",
-        (ticker.upper(), date, gross_amount, withholding_tax, currency, notes,
-         fx_rate, gross_eur, withholding_eur,
-         int(foreign_wht_withheld), int(belgian_rv_withheld), account)
-    )
+    conn.execute(f"INSERT INTO dividends ({','.join(cols)}) VALUES ({','.join('?'*len(cols))})",
+                 vals)
     conn.commit()
     conn.close()
 

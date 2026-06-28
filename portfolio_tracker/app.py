@@ -331,8 +331,13 @@ def page_portfolio():
     assets_map = {a["ticker"]: a for a in assets}
     divs_net = {}
     for d in db.get_dividends():
-        divs_net[d["ticker"]] = divs_net.get(d["ticker"], 0) + (
-            d["gross_amount"] - d["withholding_tax"])
+        if d.get("net_eur") is not None:
+            n = d["net_eur"]
+        else:
+            g = d.get("gross_eur") if d.get("gross_eur") is not None else d["gross_amount"]
+            w = d.get("withholding_eur") if d.get("withholding_eur") is not None else d["withholding_tax"]
+            n = g - w
+        divs_net[d["ticker"]] = divs_net.get(d["ticker"], 0) + n
 
     # Koersdoelen (laatste per ticker uit transacties; anders AI-koersdoel)
     price_targets = {}
@@ -1112,48 +1117,125 @@ def page_dividends():
     with tab_add:
         tickers = [a["ticker"] for a in assets]
         div_names = {a["ticker"]: (a.get("name") or a["ticker"]) for a in assets}
+        amap = {a["ticker"]: a for a in assets}
         if not tickers:
             st.warning("Voeg eerst activa toe via 🏢 Activa.")
         else:
-            wh_default = float(db.get_setting("withholding_tax_rate", "0.30"))
-            with st.form("div_form", clear_on_submit=True):
-                c1, c2 = st.columns(2)
-                with c1:
-                    d_ticker   = st.selectbox("Activum *", tickers,
-                                              format_func=lambda t: asset_label(t, div_names))
-                    d_date     = st.date_input("Datum *", value=date.today())
-                    d_account  = st.selectbox("Rekening *", db.get_accounts(),
-                                              help="De rekening waarop dit dividend is uitgekeerd. "
-                                                   "Hetzelfde dividend op een andere rekening voer je als een aparte lijn in.")
-                    d_currency = st.selectbox("Munt", ["EUR", "USD", "GBP"])
-                with c2:
-                    gross  = st.number_input("Bruto dividend *", min_value=0.01, step=0.01, format="%.2f")
-                    wh_pct = st.number_input("Ingehouden voorheffing (%)", min_value=0.0,
-                                              max_value=100.0, value=wh_default * 100, step=0.5)
-                    wh_amt = gross * wh_pct / 100
-                    net    = gross - wh_amt
-                    st.info(f"**Netto ontvangen:** {d_currency} {net:,.2f} (voorheffing: {d_currency} {wh_amt:,.2f})")
-                fc1, fc2 = st.columns(2)
-                with fc1:
-                    foreign_done = st.checkbox(
-                        "🌍 Bronbelasting al ingehouden",
-                        help="Buitenlandse roerende voorheffing die de uitkerende instantie al aan de bron inhield.")
-                with fc2:
-                    rv_done = st.checkbox(
-                        "🇧🇪 Roerende voorheffing al ingehouden",
-                        help="Belgische RV (30%) die je broker al inhield (bv. bij een Belgische broker). "
-                             "Zo niet, moet je die mogelijk nog aangeven.")
-                notes = st.text_area("Notities (optioneel)", height=60)
-                if st.form_submit_button("✅ Dividend toevoegen", type="primary"):
-                    fx_rate, gross_eur = compute_eur(gross, d_currency, d_date)
-                    _, wh_eur = compute_eur(wh_amt, d_currency, d_date)
-                    db.add_dividend(d_ticker, str(d_date), gross, wh_amt, d_currency, notes or None,
-                                    fx_rate=fx_rate, gross_eur=gross_eur, withholding_eur=wh_eur,
-                                    foreign_wht_withheld=foreign_done, belgian_rv_withheld=rv_done,
-                                    account=d_account)
-                    clear_cache()
-                    st.success(f"✅ Dividend {d_currency} {net:.2f} netto voor {d_ticker} op {d_account} toegevoegd!")
-                    st.rerun()
+            if st.session_state.get("div_added_msg"):
+                st.success(st.session_state.pop("div_added_msg"))
+            dn = st.session_state.get("div_amt_nonce", 0)
+            dk = lambda s: f"div_{s}_{dn}"
+            CURS = ["EUR", "USD", "GBP", "CHF"]
+
+            cc1, cc2, cc3 = st.columns(3)
+            d_ticker  = cc1.selectbox("Activum *", tickers, key=dk("tkr"),
+                                      format_func=lambda t: asset_label(t, div_names))
+            d_date    = cc2.date_input("Datum *", value=date.today(), key=dk("date"))
+            d_account = cc3.selectbox("Rekening *", db.get_accounts(), key=dk("acct"),
+                                      help="De rekening waarop dit dividend is uitgekeerd. "
+                                           "Hetzelfde dividend op een andere rekening voer je als een aparte lijn in.")
+            asset_cur = amap.get(d_ticker, {}).get("currency", "EUR")
+            cur_opts  = CURS if asset_cur in CURS else CURS + [asset_cur]
+            def cur_box(col, keyname):
+                return col.selectbox("Munt", cur_opts, index=cur_opts.index(asset_cur),
+                                     key=dk(keyname), label_visibility="collapsed")
+
+            mode = st.radio("Invoerwijze", ["Eenvoudig", "Gedetailleerd (bronbelasting + RV)"],
+                            horizontal=True, key="div_mode")
+
+            if mode == "Eenvoudig":
+                sc1, sc2 = st.columns(2)
+                with sc1:
+                    gross    = st.number_input("Bruto dividend *", min_value=0.0, step=0.01,
+                                               format="%.2f", value=None, key=dk("s_gross"))
+                    currency = st.selectbox("Munt", cur_opts, index=cur_opts.index(asset_cur), key=dk("s_cur"))
+                with sc2:
+                    wh_amt = st.number_input("Ingehouden voorheffing (bedrag)", min_value=0.0,
+                                             step=0.01, format="%.2f", value=None, key=dk("s_wh"))
+                notes = st.text_area("Notities (optioneel)", height=60, key=dk("s_notes"))
+                g = gross or 0.0
+                w = wh_amt or 0.0
+                st.info(f"**Netto:** {currency} {g - w:,.2f}")
+                if st.button("✅ Dividend toevoegen", type="primary", key=dk("s_submit")):
+                    if not gross or gross <= 0:
+                        st.error("Vul een bruto dividend in.")
+                    else:
+                        fx_rate, gross_eur = compute_eur(g, currency, d_date)
+                        _, wh_eur = compute_eur(w, currency, d_date)
+                        db.add_dividend(d_ticker, str(d_date), g, w, currency, notes or None,
+                                        fx_rate=fx_rate, gross_eur=gross_eur, withholding_eur=wh_eur,
+                                        belgian_rv_withheld=1 if w > 0 else 0, account=d_account)
+                        clear_cache()
+                        st.session_state["div_amt_nonce"] = dn + 1
+                        st.session_state["div_added_msg"] = (
+                            f"✅ Dividend {currency} {g - w:.2f} netto voor {d_ticker} op {d_account} toegevoegd!")
+                        st.rerun()
+
+            else:  # Gedetailleerd
+                st.caption("Vul in wat je weet; lege velden worden waar mogelijk automatisch berekend "
+                           "(zelfde munt verondersteld voor de berekening).")
+                r1a, r1b = st.columns([3, 1])
+                A = r1a.number_input("① Bruto dividend (vóór buitenlandse bronbelasting)",
+                                     min_value=0.0, step=0.01, format="%.4f", value=None, key=dk("A"))
+                A_cur = cur_box(r1b, "Acur")
+                r2a, r2b = st.columns([3, 1])
+                B = r2a.number_input("② Buitenlandse bronbelasting",
+                                     min_value=0.0, step=0.01, format="%.4f", value=None, key=dk("B"))
+                B_cur = cur_box(r2b, "Bcur")
+                r3a, r3b = st.columns([3, 1])
+                C = r3a.number_input("③ Bruto na bronbelasting / vóór Belgische RV",
+                                     min_value=0.0, step=0.01, format="%.4f", value=None, key=dk("C"))
+                C_cur = cur_box(r3b, "Ccur")
+                r4a, r4b = st.columns([3, 1])
+                D = r4a.number_input("④ Netto dividend (na alle voorheffingen)",
+                                     min_value=0.0, step=0.01, format="%.4f", value=None, key=dk("D"))
+                D_cur = cur_box(r4b, "Dcur")
+                notes = st.text_area("Notities (optioneel)", height=60, key=dk("d_notes"))
+
+                res = tax_mod.resolve_dividend_chain(A, B, C, D)
+                rA, rB, rC, rD, rRV = res["a"], res["b"], res["c"], res["d"], res["rv"]
+                def _f(v, cur): return "—" if v is None else f"{cur} {v:,.2f}"
+                st.markdown(
+                    f"**Afgeleide keten:** ① {_f(rA, A_cur)}  →  ② bronbelasting {_f(rB, B_cur)}  →  "
+                    f"③ {_f(rC, C_cur)}  →  🇧🇪 RV {_f(rRV, C_cur)}  →  ④ netto {_f(rD, D_cur)}")
+
+                if st.button("✅ Dividend toevoegen", type="primary", key=dk("d_submit")):
+                    # EUR per veld (elk in zijn eigen munt op de dividenddatum)
+                    def to_eur(v, cur):
+                        if v is None: return None
+                        return compute_eur(v, cur, d_date)[1]
+                    a_eur = to_eur(rA, A_cur); b_eur = to_eur(rB, B_cur)
+                    c_eur = to_eur(rC, C_cur); d_eur = to_eur(rD, D_cur)
+                    gross_eur = a_eur if a_eur is not None else (c_eur if c_eur is not None else d_eur)
+                    net_eur   = d_eur if d_eur is not None else (c_eur if c_eur is not None else
+                                (a_eur - b_eur if (a_eur is not None and b_eur is not None) else None))
+                    if gross_eur is None or net_eur is None:
+                        st.error("Geef minstens een bruto- én een nettowaarde in (of voldoende velden om ze te berekenen).")
+                    else:
+                        wh_eur = max(0.0, gross_eur - net_eur)
+                        # Native rollup (voor weergave/compat): primair veld = ① of ③ of ④
+                        prim_v, prim_cur = ((rA, A_cur) if rA is not None else
+                                            (rC, C_cur) if rC is not None else (rD, D_cur))
+                        fx_prim = compute_eur(prim_v, prim_cur, d_date)[0] or 1.0
+                        wh_native = round(wh_eur / fx_prim, 2)
+                        details = {
+                            "gross_before_wht": rA, "gross_before_wht_cur": A_cur if rA is not None else None,
+                            "foreign_wht_amt":  rB, "foreign_wht_cur":      B_cur if rB is not None else None,
+                            "gross_after_wht":  rC, "gross_after_wht_cur":  C_cur if rC is not None else None,
+                            "belgian_rv_amt":   rRV,
+                            "net_received":     rD, "net_received_cur":     D_cur if rD is not None else None,
+                            "net_eur":          net_eur,
+                        }
+                        db.add_dividend(d_ticker, str(d_date), prim_v, wh_native, prim_cur, notes or None,
+                                        fx_rate=fx_prim, gross_eur=gross_eur, withholding_eur=wh_eur,
+                                        foreign_wht_withheld=1 if (rB and rB > 0) else 0,
+                                        belgian_rv_withheld=1 if (rRV and rRV > 0) else 0,
+                                        account=d_account, details=details)
+                        clear_cache()
+                        st.session_state["div_amt_nonce"] = dn + 1
+                        st.session_state["div_added_msg"] = (
+                            f"✅ Dividend voor {d_ticker} op {d_account} toegevoegd (netto ≈ {eur(net_eur)}).")
+                        st.rerun()
 
     with tab_view:
         fcol1, fcol2 = st.columns(2)
@@ -1168,13 +1250,17 @@ def page_dividends():
             st.info("Geen dividenden gevonden.")
             return
 
-        total_gross = sum(d["gross_amount"] for d in divs)
-        total_wh    = sum(d["withholding_tax"] for d in divs)
-        total_net   = total_gross - total_wh
+        def _geur(d): return d.get("gross_eur") if d.get("gross_eur") is not None else d["gross_amount"]
+        def _neur(d):
+            if d.get("net_eur") is not None: return d["net_eur"]
+            return _geur(d) - (d.get("withholding_eur") if d.get("withholding_eur") is not None else d["withholding_tax"])
+        total_gross = sum(_geur(d) for d in divs)
+        total_net   = sum(_neur(d) for d in divs)
+        total_wh    = total_gross - total_net
 
         c1, c2, c3 = st.columns(3)
-        c1.metric("Bruto", eur(total_gross))
-        c2.metric("Voorheffing", eur(total_wh))
+        c1.metric("Bruto (EUR)", eur(total_gross))
+        c2.metric("Ingehouden voorheffingen", eur(total_wh))
         c3.metric("Netto ontvangen", eur(total_net))
 
         # Netto per rekening (EUR) — handig wanneer eenzelfde activum op meerdere rekeningen uitkeert
@@ -1182,36 +1268,41 @@ def page_dividends():
             per_acct = {}
             for d in divs:
                 a = d.get("account") or db.DEFAULT_ACCOUNT
-                net_eur = (d.get("gross_eur") or d["gross_amount"]) - (d.get("withholding_eur") or d["withholding_tax"])
-                per_acct[a] = per_acct.get(a, 0.0) + net_eur
+                per_acct[a] = per_acct.get(a, 0.0) + _neur(d)
             if len(per_acct) > 1:
                 st.caption("**Netto per rekening:** " +
                            "  ·  ".join(f"{a}: {eur(v)}" for a, v in sorted(per_acct.items())))
-
-        # Dividenden zonder ingehouden Belgische RV -> mogelijk nog aan te geven
-        te_geven = [d for d in divs if not d.get("belgian_rv_withheld")]
-        if te_geven:
-            som = sum((d.get("gross_eur") or d["gross_amount"]) -
-                      (d.get("withholding_eur") or d["withholding_tax"]) for d in te_geven)
-            st.warning(f"🇧🇪 {len(te_geven)} dividend(en) zonder ingehouden Belgische roerende voorheffing "
-                       f"(netto ± {eur(som)}). Mogelijk nog aan te geven in je belastingaangifte.")
         st.divider()
 
         div_accts = db.get_accounts()
         for d in divs:
-            net = d["gross_amount"] - d["withholding_tax"]
             c_info, c_val, c_acct, c_del = st.columns([4, 3, 2, 1])
             with c_info:
                 st.markdown(f"🎁 **{d['ticker']}**")
                 st.caption(f"📅 {d['date']}")
-                f1 = "🌍 bronbelasting ✓" if d.get("foreign_wht_withheld") else "🌍 bronbelasting ✗"
-                f2 = "🇧🇪 RV ✓" if d.get("belgian_rv_withheld") else "🇧🇪 RV ✗"
-                st.caption(f"{f1} | {f2}")
                 if d.get("notes"):
                     st.caption(f"📝 {d['notes']}")
             with c_val:
-                st.markdown(f"Bruto: **{d['currency']} {d['gross_amount']:,.2f}**")
-                st.caption(f"Voorheffing: {d['currency']} {d['withholding_tax']:,.2f} | Netto: {d['currency']} {net:,.2f}")
+                if d.get("net_received") is not None or d.get("gross_before_wht") is not None:
+                    # Gedetailleerd ingevoerd: toon de keten
+                    def _ff(v, cur):
+                        return "—" if v is None else f"{cur or d['currency']} {v:,.2f}"
+                    if d.get("gross_before_wht") is not None:
+                        st.markdown(f"① Bruto: **{_ff(d['gross_before_wht'], d.get('gross_before_wht_cur'))}**")
+                    if d.get("foreign_wht_amt") is not None:
+                        st.caption(f"② Bronbelasting: {_ff(d['foreign_wht_amt'], d.get('foreign_wht_cur'))}")
+                    if d.get("gross_after_wht") is not None:
+                        st.caption(f"③ Na bronbelasting: {_ff(d['gross_after_wht'], d.get('gross_after_wht_cur'))}")
+                    if d.get("belgian_rv_amt") is not None:
+                        st.caption(f"🇧🇪 RV: {_ff(d['belgian_rv_amt'], d.get('gross_after_wht_cur'))}")
+                    if d.get("net_received") is not None:
+                        st.markdown(f"④ Netto: **{_ff(d['net_received'], d.get('net_received_cur'))}**")
+                    st.caption(f"≈ netto {eur(_neur(d))}")
+                else:
+                    net = d["gross_amount"] - d["withholding_tax"]
+                    st.markdown(f"Bruto: **{d['currency']} {d['gross_amount']:,.2f}**")
+                    st.caption(f"Voorheffing: {d['currency']} {d['withholding_tax']:,.2f} | "
+                               f"Netto: {d['currency']} {net:,.2f}  (≈ {eur(_neur(d))})")
             with c_acct:
                 cur_acct = d.get("account") or db.DEFAULT_ACCOUNT
                 idx = div_accts.index(cur_acct) if cur_acct in div_accts else 0

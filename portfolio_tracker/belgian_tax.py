@@ -48,6 +48,25 @@ def fotomoment_taxable(sell_proceeds: float, cost_basis: float,
     return gain_vs_f
 
 
+def resolve_dividend_chain(a, b, c, d):
+    """Leid ontbrekende waarden af in de dividendketen (zelfde munt verondersteld).
+
+      A = bruto vóór buitenlandse bronbelasting
+      B = buitenlandse bronbelasting
+      C = bruto na bronbelasting / vóór Belgische RV   (= A - B)
+      D = netto na alle voorheffingen
+      RV = Belgische roerende voorheffing               (= C - D)
+
+    None = leeg. Vult de A/B/C-driehoek aan (twee gekend -> derde) en berekent RV.
+    """
+    for _ in range(2):
+        if c is None and a is not None and b is not None: c = a - b
+        if a is None and b is not None and c is not None: a = b + c
+        if b is None and a is not None and c is not None: b = a - c
+    rv = (c - d) if (c is not None and d is not None) else None
+    return {"a": a, "b": b, "c": c, "d": d, "rv": rv}
+
+
 # ── TOB berekening ────────────────────────────────────────────────────────────
 
 def calculate_tob(asset_type: str, etf_subtype: str, total_amount: float,
