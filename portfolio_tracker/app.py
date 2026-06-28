@@ -1058,6 +1058,9 @@ def page_dividends():
                     d_ticker   = st.selectbox("Activum *", tickers,
                                               format_func=lambda t: asset_label(t, div_names))
                     d_date     = st.date_input("Datum *", value=date.today())
+                    d_account  = st.selectbox("Rekening *", db.get_accounts(),
+                                              help="De rekening waarop dit dividend is uitgekeerd. "
+                                                   "Hetzelfde dividend op een andere rekening voer je als een aparte lijn in.")
                     d_currency = st.selectbox("Munt", ["EUR", "USD", "GBP"])
                 with c2:
                     gross  = st.number_input("Bruto dividend *", min_value=0.01, step=0.01, format="%.2f")
@@ -1082,15 +1085,20 @@ def page_dividends():
                     _, wh_eur = compute_eur(wh_amt, d_currency, d_date)
                     db.add_dividend(d_ticker, str(d_date), gross, wh_amt, d_currency, notes or None,
                                     fx_rate=fx_rate, gross_eur=gross_eur, withholding_eur=wh_eur,
-                                    foreign_wht_withheld=foreign_done, belgian_rv_withheld=rv_done)
+                                    foreign_wht_withheld=foreign_done, belgian_rv_withheld=rv_done,
+                                    account=d_account)
                     clear_cache()
-                    st.success(f"✅ Dividend {d_currency} {net:.2f} netto voor {d_ticker} toegevoegd!")
+                    st.success(f"✅ Dividend {d_currency} {net:.2f} netto voor {d_ticker} op {d_account} toegevoegd!")
                     st.rerun()
 
     with tab_view:
-        f_year = st.selectbox("Jaar:", ["Alle"] + [str(y) for y in range(datetime.now().year, 2019, -1)],
-                              key="div_year")
-        divs = db.get_dividends(year=int(f_year) if f_year != "Alle" else None)
+        fcol1, fcol2 = st.columns(2)
+        f_year = fcol1.selectbox("Jaar:", ["Alle"] + [str(y) for y in range(datetime.now().year, 2019, -1)],
+                                 key="div_year")
+        f_acct = fcol2.selectbox("Rekening:", ["Alle rekeningen"] + db.get_accounts(), key="div_acct")
+        divs = db.get_dividends(
+            year=int(f_year) if f_year != "Alle" else None,
+            account=(f_acct if f_acct != "Alle rekeningen" else None))
 
         if not divs:
             st.info("Geen dividenden gevonden.")
@@ -1105,6 +1113,17 @@ def page_dividends():
         c2.metric("Voorheffing", eur(total_wh))
         c3.metric("Netto ontvangen", eur(total_net))
 
+        # Netto per rekening (EUR) — handig wanneer eenzelfde activum op meerdere rekeningen uitkeert
+        if f_acct == "Alle rekeningen":
+            per_acct = {}
+            for d in divs:
+                a = d.get("account") or db.DEFAULT_ACCOUNT
+                net_eur = (d.get("gross_eur") or d["gross_amount"]) - (d.get("withholding_eur") or d["withholding_tax"])
+                per_acct[a] = per_acct.get(a, 0.0) + net_eur
+            if len(per_acct) > 1:
+                st.caption("**Netto per rekening:** " +
+                           "  ·  ".join(f"{a}: {eur(v)}" for a, v in sorted(per_acct.items())))
+
         # Dividenden zonder ingehouden Belgische RV -> mogelijk nog aan te geven
         te_geven = [d for d in divs if not d.get("belgian_rv_withheld")]
         if te_geven:
@@ -1114,9 +1133,10 @@ def page_dividends():
                        f"(netto ± {eur(som)}). Mogelijk nog aan te geven in je belastingaangifte.")
         st.divider()
 
+        div_accts = db.get_accounts()
         for d in divs:
             net = d["gross_amount"] - d["withholding_tax"]
-            c_info, c_val, c_del = st.columns([5, 3, 1])
+            c_info, c_val, c_acct, c_del = st.columns([4, 3, 2, 1])
             with c_info:
                 st.markdown(f"🎁 **{d['ticker']}**")
                 st.caption(f"📅 {d['date']}")
@@ -1128,6 +1148,15 @@ def page_dividends():
             with c_val:
                 st.markdown(f"Bruto: **{d['currency']} {d['gross_amount']:,.2f}**")
                 st.caption(f"Voorheffing: {d['currency']} {d['withholding_tax']:,.2f} | Netto: {d['currency']} {net:,.2f}")
+            with c_acct:
+                cur_acct = d.get("account") or db.DEFAULT_ACCOUNT
+                idx = div_accts.index(cur_acct) if cur_acct in div_accts else 0
+                new_acct = st.selectbox("Rekening", div_accts, index=idx,
+                                        key=f"div_acct_{d['id']}", label_visibility="collapsed")
+                if new_acct != cur_acct:
+                    db.set_dividend_account(d["id"], new_acct)
+                    clear_cache()
+                    st.rerun()
             with c_del:
                 if st.button("🗑️", key=f"del_d_{d['id']}"):
                     db.delete_dividend(d["id"])

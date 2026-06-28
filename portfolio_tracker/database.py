@@ -201,10 +201,17 @@ def _migrate(conn):
         ("withholding_eur",  "REAL"),
         ("foreign_wht_withheld", "INTEGER DEFAULT 0"),  # bronbelasting al ingehouden?
         ("belgian_rv_withheld",  "INTEGER DEFAULT 0"),  # roerende voorheffing al ingehouden?
+        ("account",          "TEXT"),                   # rekening waarop het dividend is uitgekeerd
     ]
+    new_div_cols = []
     for col, ddl in div_cols:
         if not _column_exists(cur, "dividends", col):
             cur.execute(f"ALTER TABLE dividends ADD COLUMN {col} {ddl}")
+            new_div_cols.append(col)
+    # Bestaande dividenden zonder rekening toewijzen aan de standaardrekening
+    if "account" in new_div_cols:
+        cur.execute("UPDATE dividends SET account=? WHERE account IS NULL OR account=''",
+                    (DEFAULT_ACCOUNT,))
 
     # Assets: ISIN-kolom
     if not _column_exists(cur, "assets", "isin"):
@@ -675,37 +682,48 @@ def delete_transaction(txn_id: int):
 def add_dividend(ticker, date, gross_amount, withholding_tax=0.0,
                  currency="EUR", notes=None, fx_rate=1.0,
                  gross_eur=None, withholding_eur=None,
-                 foreign_wht_withheld=0, belgian_rv_withheld=0):
+                 foreign_wht_withheld=0, belgian_rv_withheld=0,
+                 account=None):
     if gross_eur is None:
         gross_eur = gross_amount * (fx_rate or 1.0)
     if withholding_eur is None:
         withholding_eur = withholding_tax * (fx_rate or 1.0)
+    if not account:
+        account = DEFAULT_ACCOUNT
     conn = get_connection()
     conn.execute(
         """INSERT INTO dividends
            (ticker,date,gross_amount,withholding_tax,currency,notes,
             fx_rate,gross_eur,withholding_eur,
-            foreign_wht_withheld,belgian_rv_withheld)
-           VALUES (?,?,?,?,?,?,?,?,?,?,?)""",
+            foreign_wht_withheld,belgian_rv_withheld,account)
+           VALUES (?,?,?,?,?,?,?,?,?,?,?,?)""",
         (ticker.upper(), date, gross_amount, withholding_tax, currency, notes,
          fx_rate, gross_eur, withholding_eur,
-         int(foreign_wht_withheld), int(belgian_rv_withheld))
+         int(foreign_wht_withheld), int(belgian_rv_withheld), account)
     )
     conn.commit()
     conn.close()
 
 
-def get_dividends(ticker=None, year=None) -> list[dict]:
+def get_dividends(ticker=None, year=None, account=None) -> list[dict]:
     conn = get_connection()
     q, p = "SELECT * FROM dividends", []
     conds = []
-    if ticker: conds.append("ticker=?");             p.append(ticker.upper())
-    if year:   conds.append("strftime('%Y',date)=?"); p.append(str(year))
+    if ticker:  conds.append("ticker=?");             p.append(ticker.upper())
+    if year:    conds.append("strftime('%Y',date)=?"); p.append(str(year))
+    if account: conds.append("account=?");            p.append(account)
     if conds: q += " WHERE " + " AND ".join(conds)
     q += " ORDER BY date DESC"
     rows = conn.execute(q, p).fetchall()
     conn.close()
     return [dict(r) for r in rows]
+
+
+def set_dividend_account(div_id: int, account: str):
+    conn = get_connection()
+    conn.execute("UPDATE dividends SET account=? WHERE id=?", (account, div_id))
+    conn.commit()
+    conn.close()
 
 
 def delete_dividend(div_id: int):

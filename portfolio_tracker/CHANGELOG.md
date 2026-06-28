@@ -2,6 +2,18 @@
 
 Alle noemenswaardige wijzigingen aan de Portfolio Tracker add-on.
 
+## 1.9.0
+Dividenden per rekening: een dividend wordt nu aan een rekening gekoppeld,
+niet enkel aan een activum.
+- Het toevoegformulier heeft een rekeningselector.
+- In het overzicht kun je filteren per rekening, de rekening per dividend
+aanpassen, en bij "alle rekeningen" zie je een netto-uitsplitsing per rekening.
+- Keert eenzelfde activum op meerdere rekeningen een dividend uit, dan voer je
+dat als aparte lijnen in (het bedrag verschilt toch per aantal aandelen op die
+rekening); de globale totalen en de belastingcijfers blijven kloppen.
+- Bestaande dividenden krijgen bij de upgrade automatisch de standaardrekening
+toegewezen; je kunt ze nadien per stuk herschikken.
+
 ## 1.8.0
 Meer-/minwaarden over rekeningen heen:
 - Het dashboard toont nu een totale meer-/minwaarde (gerealiseerd over alle
