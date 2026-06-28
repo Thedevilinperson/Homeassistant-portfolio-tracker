@@ -2,6 +2,22 @@
 
 Alle noemenswaardige wijzigingen aan de Portfolio Tracker add-on.
 
+## 1.6.0
+- TOB correcter berekend: het tarief houdt nu rekening met of een ETF/fonds
+in België is aangeboden/geregistreerd (FSMA). Een kapitaliserende ETF die niet
+in België is aangeboden (bv. een ETC zoals G2XJ.DE) valt nu onder 0,35% i.p.v.
+1,32%. Per activum is er een duidelijke aanvinkoptie "In België aangeboden",
+en het toepasselijke TOB-tarief wordt in het activumformulier getoond. Ook
+obligaties (0,12%) zijn toegevoegd. De plafonds (€1.300 / €1.600 / €4.000)
+blijven gelden.
+- Transactieformulier:
+  - De munt wordt automatisch ingevuld op basis van het gekozen activum.
+  - Aantal en prijs starten leeg in plaats van met "1".
+  - Na het toevoegen wordt het volledige formulier leeggemaakt en verschijnt een
+    bevestiging dat de transactie is toegevoegd.
+- Transactie-overzicht: bij het bewerken springt de pagina automatisch naar
+boven, naar het bewerkformulier.
+
 ## 1.5.0
 - Activumnaam i.p.v. ticker op meer plaatsen, makkelijker te herkennen:
 - Dashboard: staafdiagram "Ongerealiseerde winst/verlies per positie" toont de naam.

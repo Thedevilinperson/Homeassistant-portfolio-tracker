@@ -20,19 +20,38 @@ import market_data
 
 # ── TOB berekening ────────────────────────────────────────────────────────────
 
-def calculate_tob(asset_type: str, etf_subtype: str, total_amount: float) -> float:
+def calculate_tob(asset_type: str, etf_subtype: str, total_amount: float,
+                  belgian_registered: bool = True) -> float:
+    """Belgische beurstaks (TOB).
+
+    Tarieven (met plafond per verrichting):
+      0,12% (max €1.300): obligaties; in België aangeboden UITKERENDE ETF's/fondsen
+      1,32% (max €4.000): in België aangeboden KAPITALISERENDE ETF's/fondsen
+      0,35% (max €1.600): aandelen; alle overige effecten, waaronder ETF's/fondsen
+                          die NIET in België zijn aangeboden/geregistreerd (bv. een
+                          buitenlandse tracker of ETC zoals een goud-ETC)
+    """
     s = db.get_all_settings()
-    if asset_type == "etf":
-        if etf_subtype == "accumulating":
-            rate    = float(s.get("tob_rate_etf_accumulating", "0.0132"))
-            max_tob = float(s.get("tob_max_etf_accumulating", "4000"))
+    rate012 = float(s.get("tob_rate_etf_distributing", "0.0012"))
+    cap012  = float(s.get("tob_max_etf_distributing",  "1300"))
+    rate132 = float(s.get("tob_rate_etf_accumulating", "0.0132"))
+    cap132  = float(s.get("tob_max_etf_accumulating",  "4000"))
+    rate035 = float(s.get("tob_rate_stocks",           "0.0035"))
+    cap035  = float(s.get("tob_max_stocks",            "1600"))
+
+    if asset_type == "bond":
+        rate, cap = rate012, cap012
+    elif asset_type == "etf":
+        if not belgian_registered:
+            rate, cap = rate035, cap035          # niet in België aangeboden -> "andere effecten"
+        elif etf_subtype == "accumulating":
+            rate, cap = rate132, cap132
         else:
-            rate    = float(s.get("tob_rate_etf_distributing", "0.0012"))
-            max_tob = float(s.get("tob_max_etf_distributing", "1300"))
-    else:
-        rate    = float(s.get("tob_rate_stocks", "0.0035"))
-        max_tob = float(s.get("tob_max_stocks", "1600"))
-    return round(min(total_amount * rate, max_tob), 2)
+            rate, cap = rate012, cap012
+    else:  # stock / overige
+        rate, cap = rate035, cap035
+
+    return round(min(total_amount * rate, cap), 2)
 
 
 # ── Helpers ───────────────────────────────────────────────────────────────────

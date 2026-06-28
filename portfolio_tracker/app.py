@@ -10,6 +10,7 @@ import pandas as pd
 import plotly.express as px
 import plotly.graph_objects as go
 import streamlit as st
+import streamlit.components.v1 as components
 
 import ai_advisor
 import belgian_tax as tax_mod
@@ -463,16 +464,25 @@ def page_assets():
             cur_opts = CUR if cur_val in CUR else CUR + [cur_val]
             currency = st.selectbox("Munt", cur_opts, key=k("cur"))
         with c2:
-            asset_type = st.radio("Type", ["stock", "etf"],
-                                  format_func=lambda x: "📊 Aandeel" if x == "stock" else "🧺 ETF",
+            asset_type = st.radio("Type", ["stock", "etf", "bond"],
+                                  format_func=lambda x: {"stock": "📊 Aandeel", "etf": "🧺 ETF/fonds", "bond": "📈 Obligatie"}[x],
                                   key=k("type"))
             etf_subtype = "distributing"
+            belg_reg = True
             if asset_type == "etf":
                 etf_subtype = st.radio("ETF-type", ["distributing", "accumulating"],
-                                       format_func=lambda x: "📤 Distribuerend" if x == "distributing" else "📦 Kapitaliseerend",
-                                       help="Bepaalt de TOB-berekening (0,12% / 1,32%)", key=k("sub"))
+                                       format_func=lambda x: "📤 Uitkerend (distributie)" if x == "distributing" else "📦 Kapitaliserend",
+                                       help="Samen met de registratie bepaalt dit de TOB.", key=k("sub"))
+                belg_reg = st.checkbox("🇧🇪 In België aangeboden / geregistreerd (FSMA)",
+                                       value=st.session_state.get(k("breg"), True), key=k("breg"),
+                                       help="Vink AAN voor in België aangeboden fondsen (TOB 0,12% uitkerend / 1,32% kapitaliserend). "
+                                            "Vink UIT voor niet in België aangeboden trackers/ETC's (bv. G2XJ.DE): dan geldt 0,35%.")
             exchange = st.text_input("Beurs", key=k("exch"), placeholder="bv. NMS, AMS")
             isin     = st.text_input("ISIN", key=k("isin"), placeholder="bv. IE00BK5BQT80")
+
+        # TOB-indicatie tonen
+        _tob_rate = tax_mod.calculate_tob(asset_type, etf_subtype, 10000, belg_reg) / 10000 * 100
+        st.caption(f"➡️ TOB-tarief voor dit activum: **{_tob_rate:.2f}%**".replace(".", ","))
 
         if st.session_state.get(k("fetched")):
             st.success("✨ Velden ingevuld via Yahoo Finance — controleer en pas aan waar nodig, en klik daarna op Toevoegen.")
@@ -485,7 +495,8 @@ def page_assets():
             else:
                 t = ticker.strip().upper()
                 db.add_asset(t, name.strip(), asset_type, etf_subtype,
-                             currency, exchange.strip() or None, isin.strip() or None)
+                             currency, exchange.strip() or None, isin.strip() or None,
+                             belgian_registered=int(belg_reg))
                 clear_cache()
                 st.session_state["as_nonce"] = n + 1   # formulier leegmaken
                 st.success(f"✅ {t} — {name.strip()} toegevoegd!")
@@ -511,17 +522,23 @@ def page_assets():
                                              index=e_cur_opts.index(e_cur_val))
                         e_isin = st.text_input("ISIN", value=ea.get("isin") or "")
                     with e2:
-                        e_type = st.radio("Type", ["stock", "etf"],
-                                          index=0 if ea.get("asset_type") == "stock" else 1,
-                                          format_func=lambda x: "📊 Aandeel" if x == "stock" else "🧺 ETF")
+                        _types = ["stock", "etf", "bond"]
+                        e_type = st.radio("Type", _types,
+                                          index=_types.index(ea.get("asset_type")) if ea.get("asset_type") in _types else 0,
+                                          format_func=lambda x: {"stock": "📊 Aandeel", "etf": "🧺 ETF/fonds", "bond": "📈 Obligatie"}[x])
                         e_sub = ea.get("etf_subtype") or "distributing"
+                        e_breg = bool(ea.get("belgian_registered", 1))
                         if e_type == "etf":
                             e_sub = st.radio("ETF-type", ["distributing", "accumulating"],
                                              index=0 if e_sub == "distributing" else 1,
-                                             format_func=lambda x: "📤 Distribuerend" if x == "distributing" else "📦 Kapitaliseerend")
+                                             format_func=lambda x: "📤 Uitkerend (distributie)" if x == "distributing" else "📦 Kapitaliserend")
+                            e_breg = st.checkbox("🇧🇪 In België aangeboden / geregistreerd (FSMA)",
+                                                 value=e_breg,
+                                                 help="Uit = niet in België aangeboden tracker/ETC (bv. G2XJ.DE) → TOB 0,35%.")
                         e_exch = st.text_input("Beurs", value=ea.get("exchange") or "")
-                    st.caption("💡 Na het corrigeren van een ticker: klik op '🔄 Ververs prijzen' "
-                               "op de Portefeuille-pagina om de koers op te halen.")
+                    _etr = tax_mod.calculate_tob(e_type, e_sub, 10000, e_breg) / 10000 * 100
+                    st.caption(f"➡️ TOB-tarief: **{_etr:.2f}%**".replace(".", ",") +
+                               "  ·  💡 Na het corrigeren van een ticker: klik op '🔄 Ververs prijzen' op de Portefeuille-pagina.")
                     s1, s2 = st.columns(2)
                     if s1.form_submit_button("💾 Opslaan", type="primary"):
                         target = edit_tk
@@ -537,7 +554,8 @@ def page_assets():
                             db.update_asset(target, name=e_name.strip() or target,
                                             asset_type=e_type, etf_subtype=e_sub,
                                             currency=e_cur, exchange=e_exch.strip() or "",
-                                            isin=e_isin.strip() or "")
+                                            isin=e_isin.strip() or "",
+                                            belgian_registered=int(e_breg))
                             clear_cache()
                             st.session_state.pop("edit_asset", None)
                             st.success(f"✅ {target} bijgewerkt!")
@@ -612,32 +630,40 @@ def page_transactions():
     CUR = ["EUR", "USD", "GBP", "CHF"]
 
     with tab_add:
+        # Bevestiging tonen na een geslaagde toevoeging (na reset/rerun)
+        if st.session_state.get("txn_added_msg"):
+            st.success(st.session_state.pop("txn_added_msg"))
+
+        # Formulier-brede nonce: bij een geslaagde toevoeging bumpen we deze,
+        # waardoor alle velden verse (lege) widgets worden.
+        txn_n = st.session_state.get("txn_add_nonce", 0)
+        kk = lambda s: f"add_{s}_{txn_n}"
+
         c1, c2 = st.columns(2)
         with c1:
-            ticker   = st.selectbox("Activum *", asset_tickers, key="add_ticker",
+            ticker   = st.selectbox("Activum *", asset_tickers, key=kk("ticker"),
                                      format_func=fmt)
-            txn_date = st.date_input("Datum *", value=date.today(), key="add_date")
+            txn_date = st.date_input("Datum *", value=date.today(), key=kk("date"))
             txn_type = st.radio("Type *", ["buy", "sell"],
                                 format_func=lambda x: "🟢 Aankoop" if x == "buy" else "🔴 Verkoop",
-                                horizontal=True, key="add_type")
-            account  = st.selectbox("Rekening *", db.get_accounts(), key="add_acct",
+                                horizontal=True, key=kk("type"))
+            account  = st.selectbox("Rekening *", db.get_accounts(), key=kk("acct"),
                                     help="Beheer rekeningen via ⚙️ Instellingen → Rekeningen")
         with c2:
-            quantity   = st.number_input("Aantal *", min_value=0.0001, step=0.001,
-                                         format="%.4f", value=1.0, key="add_qty")
-            price_unit = st.number_input("Prijs per stuk *", min_value=0.0001,
-                                         step=0.01, format="%.4f", value=1.0, key="add_price")
-            currency   = st.selectbox("Munt", CUR, key="add_cur",
-                                      index=CUR.index(assets_map.get(ticker, {}).get("currency", "EUR"))
-                                      if assets_map.get(ticker, {}).get("currency", "EUR") in CUR else 0)
+            quantity   = st.number_input("Aantal *", min_value=0.0, step=0.001,
+                                         format="%.4f", value=None, key=kk("qty"))
+            price_unit = st.number_input("Prijs per stuk *", min_value=0.0,
+                                         step=0.01, format="%.4f", value=None,
+                                         key=kk("price"))
+            # Munt volgt automatisch het gekozen activum (per ticker een eigen widget)
+            asset_cur = assets_map.get(ticker, {}).get("currency", "EUR")
+            cur_opts  = CUR if asset_cur in CUR else CUR + [asset_cur]
+            currency  = st.selectbox("Munt", cur_opts, index=cur_opts.index(asset_cur),
+                                     key=f"add_cur_{ticker}_{txn_n}")
 
-        total_amount = quantity * price_unit
+        total_amount = (quantity or 0) * (price_unit or 0)
 
-        # Koersdoel + AI-bepaling.
-        # Een widget-key mag na instantiatie niet meer gewijzigd worden. Daarom
-        # zetten we de waarde via een aparte staging-variabele (pt_staged) en
-        # geven we de number_input een wisselende key (pt_nonce). Zo kan zowel de
-        # AI-knop als de reset na opslaan de waarde veilig aanpassen.
+        # Koersdoel + AI-bepaling (aparte staging-variabele, wisselende key).
         st.session_state.setdefault("pt_staged", 0.0)
         st.session_state.setdefault("pt_nonce", 0)
         ptn = st.session_state["pt_nonce"]
@@ -660,7 +686,7 @@ def page_transactions():
                         st.error(res["error"])
                     else:
                         st.session_state["pt_staged"] = float(res["price_target"])
-                        st.session_state["pt_nonce"]  = ptn + 1   # verse widget -> value wordt gehonoreerd
+                        st.session_state["pt_nonce"]  = ptn + 1
                         st.session_state["pt_info"] = (
                             f"🎯 AI-koersdoel {res['price_target']:.2f} {res['currency']} "
                             f"(model {res.get('model','?')}). {res.get('rationale','')} {res.get('scenario','')}")
@@ -672,27 +698,31 @@ def page_transactions():
         ck1, ck2 = st.columns([2, 1])
         with ck1:
             costs = st.number_input("Transactiekosten (optioneel)", min_value=0.0,
-                                    step=0.01, format="%.2f", value=0.0, key="add_costs",
+                                    step=0.01, format="%.2f", value=None,
+                                    key=kk("costs"),
                                     help="Broker-/beurskosten — apart gehouden, niet in de meerwaardeberekening.")
         with ck2:
-            costs_currency = st.selectbox("Kostenmunt", CUR, key="add_costs_cur")
+            costs_currency = st.selectbox("Kostenmunt", cur_opts,
+                                          index=cur_opts.index(asset_cur), key=kk("costs_cur"))
+        costs = costs or 0.0
 
         asset_info = assets_map.get(ticker, {})
         tob_amount = tax_mod.calculate_tob(asset_info.get("asset_type", "stock"),
                                            asset_info.get("etf_subtype", "distributing"),
-                                           total_amount)
+                                           total_amount,
+                                           bool(asset_info.get("belgian_registered", 1)))
         _fx_prev, _eur_prev = compute_eur(total_amount, currency, txn_date)
         eur_hint = "" if currency == "EUR" else f" ≈ **€{_eur_prev:,.2f}** (koers {_fx_prev:.4f})"
         st.info(f"**Totaalwaarde:** {currency} {total_amount:,.4f}{eur_hint} | **TOB:** {currency} {tob_amount:,.2f}")
 
-        if st.checkbox("TOB manueel aanpassen", key="add_tob_man"):
+        if st.checkbox("TOB manueel aanpassen", key=kk("tob_man")):
             tob_amount = st.number_input("TOB (€)", min_value=0.0, value=tob_amount,
-                                         step=0.01, format="%.2f", key="add_tob_val")
-        notes = st.text_area("Notities (optioneel)", height=60, key="add_notes")
+                                         step=0.01, format="%.2f", key=kk("tob_val"))
+        notes = st.text_area("Notities (optioneel)", height=60, key=kk("notes"))
 
-        if st.button("✅ Transactie toevoegen", type="primary", key="add_submit"):
-            if quantity <= 0 or price_unit <= 0:
-                st.error("Aantal en prijs moeten positief zijn.")
+        if st.button("✅ Transactie toevoegen", type="primary", key=kk("submit")):
+            if not quantity or not price_unit or quantity <= 0 or price_unit <= 0:
+                st.error("Vul een geldig aantal en prijs in (beide groter dan 0).")
             else:
                 fx_rate, tot_eur = compute_eur(total_amount, currency, txn_date)
                 _, costs_eur = compute_eur(costs, costs_currency, txn_date)
@@ -712,18 +742,30 @@ def page_transactions():
                                        total_amount_eur=tot_eur, costs_eur=costs_eur,
                                        price_target=(price_target or None))
                     clear_cache()
-                    # Koersdoelveld leegmaken: verse widget op de volgende run.
+                    # Volledige reset: bump formulier-nonce + koersdoel-staging leeg
+                    st.session_state["txn_add_nonce"] = txn_n + 1
                     st.session_state["pt_staged"] = 0.0
                     st.session_state["pt_nonce"] = st.session_state.get("pt_nonce", 0) + 1
                     st.session_state.pop("pt_info", None)
-                    st.success(f"✅ {'Aankoop' if txn_type == 'buy' else 'Verkoop'} van "
-                               f"{quantity:.4f} × {ticker} op {account} toegevoegd!")
+                    st.session_state["txn_added_msg"] = (
+                        f"✅ {'Aankoop' if txn_type == 'buy' else 'Verkoop'} van "
+                        f"{quantity:.4f} × {fmt(ticker)} op {account} toegevoegd! Het formulier is leeggemaakt.")
                     st.rerun()
 
     with tab_view:
         # ── Bewerkformulier (verschijnt bij klik op ✏️) ───────────────────────
         edit_id = st.session_state.get("edit_txn")
         if edit_id:
+            # Spring naar boven zodat het bewerkformulier meteen zichtbaar is
+            components.html(
+                """<script>
+                const doc = window.parent.document;
+                const el = doc.querySelector('section.main')
+                        || doc.querySelector('[data-testid="stMain"]')
+                        || doc.querySelector('[data-testid="stAppViewContainer"]')
+                        || doc.scrollingElement;
+                if (el) { el.scrollTo({top: 0, behavior: 'smooth'}); }
+                </script>""", height=0)
             et = next((x for x in db.get_transactions() if x["id"] == edit_id), None)
             if et:
                 st.markdown(f"### ✏️ Transactie #{edit_id} bewerken")
