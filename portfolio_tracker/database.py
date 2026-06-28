@@ -474,6 +474,24 @@ def get_asset(ticker: str) -> dict | None:
     return dict(row) if row else None
 
 
+def rename_ticker(old: str, new: str) -> bool:
+    """Hernoem een ticker overal (assets + transacties + dividenden +
+    koershistoriek + AI-ratings). Geeft False als de nieuwe ticker al bestaat."""
+    o, n = old.upper(), new.upper()
+    if o == n:
+        return True
+    conn = get_connection()
+    exists = conn.execute("SELECT 1 FROM assets WHERE ticker=?", (n,)).fetchone()
+    if exists:
+        conn.close()
+        return False
+    for tbl in ("assets", "transactions", "dividends", "price_history", "ai_ratings"):
+        conn.execute(f"UPDATE {tbl} SET ticker=? WHERE ticker=?", (n, o))
+    conn.commit()
+    conn.close()
+    return True
+
+
 def delete_asset(ticker: str):
     conn = get_connection()
     t = ticker.upper()

@@ -427,13 +427,19 @@ def page_assets():
                 else:
                     with st.spinner("Info ophalen via Yahoo Finance..."):
                         info = md.get_stock_info(ticker.strip().upper())
-                    st.session_state[k("name")] = info.get("name", "") or ""
-                    st.session_state[k("cur")]  = info.get("currency", "EUR") or "EUR"
-                    st.session_state[k("type")] = info.get("type", "stock") or "stock"
-                    st.session_state[k("exch")] = info.get("exchange", "") or ""
-                    st.session_state[k("isin")] = info.get("isin", "") or ""
-                    st.session_state[k("fetched")] = True
-                    st.rerun()
+                    if not info.get("found"):
+                        st.error(
+                            f"❌ Yahoo Finance vond geen gegevens voor '{ticker.strip().upper()}'. "
+                            "Controleer de ticker — Europese beurzen vereisen een suffix "
+                            "(bv. .PA Parijs, .AS Amsterdam, .BR Brussel, .DE Xetra, .MI Milaan, .L Londen).")
+                    else:
+                        st.session_state[k("name")] = info.get("name", "") or ""
+                        st.session_state[k("cur")]  = info.get("currency", "EUR") or "EUR"
+                        st.session_state[k("type")] = info.get("type", "stock") or "stock"
+                        st.session_state[k("exch")] = info.get("exchange", "") or ""
+                        st.session_state[k("isin")] = info.get("isin", "") or ""
+                        st.session_state[k("fetched")] = True
+                        st.rerun()
             name = st.text_input("Naam", key=k("name"),
                                  placeholder="bv. Vanguard FTSE All-World")
             cur_val  = st.session_state.get(k("cur"), "EUR")

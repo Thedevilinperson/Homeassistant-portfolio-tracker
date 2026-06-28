@@ -36,8 +36,18 @@ def _store(ticker: str, price: float, currency: str):
 def get_stock_info(ticker: str) -> dict:
     try:
         tkr  = yf.Ticker(ticker)
-        info = tkr.info
+        info = tkr.info or {}
         qt = info.get("quoteType", "").lower()
+        # Bepaal of Yahoo écht iets gevonden heeft (geldige ticker)
+        found = bool(
+            info.get("longName") or info.get("shortName")
+            or info.get("regularMarketPrice") is not None
+            or info.get("currentPrice") is not None
+            or info.get("previousClose") is not None
+        )
+        if not found:
+            return {"found": False, "name": ticker, "currency": "EUR",
+                    "exchange": "", "type": "stock", "isin": ""}
         isin = ""
         try:
             raw = tkr.isin
@@ -46,6 +56,7 @@ def get_stock_info(ticker: str) -> dict:
         except Exception:
             pass
         return {
+            "found":    True,
             "name":     info.get("longName") or info.get("shortName") or ticker,
             "currency": info.get("currency", "EUR"),
             "exchange": info.get("exchange", ""),
@@ -54,7 +65,8 @@ def get_stock_info(ticker: str) -> dict:
         }
     except Exception as e:
         logger.warning(f"get_stock_info({ticker}): {e}")
-        return {"name": ticker, "currency": "EUR", "exchange": "", "type": "stock", "isin": ""}
+        return {"found": False, "name": ticker, "currency": "EUR",
+                "exchange": "", "type": "stock", "isin": ""}
 
 
 def get_current_price(ticker: str) -> tuple[float | None, str | None]:

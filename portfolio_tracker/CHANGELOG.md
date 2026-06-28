@@ -1,19 +1,12 @@
 # Changelog
 
 Alle noemenswaardige wijzigingen aan de Portfolio Tracker add-on.
-De bovenste versie hoort overeen te komen met `version:` in `config.yaml`.
 
-##1.4.1
-Activa bewerken: bestaande activa kunnen aangepast worden (✏️ in het
-overzicht): naam, type, ETF-subtype, munt, beurs en ISIN.
-ISIN: activa hebben nu een ISIN-veld; het wordt mee opgehaald en getoond.
-Beurs wordt nu effectief bewaard: voorheen werd de opgehaalde beurs niet
-opgeslagen bij automatisch invullen; dat is nu gecorrigeerd.
-Info ophalen vóór opslaan: in het activumformulier vult de knop
-"🔍 Info ophalen via Yahoo Finance" naam, munt, type, beurs en ISIN direct in
-het formulier in, zodat je ze kunt nakijken en aanpassen vóór je bewaart
-(i.p.v. pas achteraf te zien of het juist liep).
+## 1.4.2
+Foutmelding bij onbekende ticker: als "🔍 Info ophalen via Yahoo Finance" niets vindt, toont de app nu een duidelijke fout (met hint over het beurssuffix) i.p.v. stilletjes standaardwaarden in te vullen.
 Ticker corrigeren: in het activum-bewerkformulier kan je nu ook de ticker zelf aanpassen (bv. STMPA → STMPA.PA). De bijbehorende transacties, dividenden, koershistoriek en AI-ratings verhuizen mee, zodat een verkeerde ticker zonder dataverlies te herstellen is.
+
+## 1.4.1
 Fix: crash bij het toevoegen van een transactie (st.session_state.pt_input cannot be modified after the widget ... is instantiated). Het koersdoelveld en de AI-knop gebruiken nu een veilig reset-patroon; de transactie verschijnt meteen zonder refresh.
 
 ## 1.4.0
