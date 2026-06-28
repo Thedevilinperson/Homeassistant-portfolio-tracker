@@ -18,6 +18,36 @@ import database as db
 import market_data
 
 
+# ── Fotomoment (referentiewaarde 31/12/2025) ──────────────────────────────────
+# Voor stukken gekocht vóór de start van het stelsel geldt als fiscale instapprijs
+# de hoogste van (a) de werkelijke aankoopprijs of (b) de slotkoers op 31/12/2025
+# ("fotomoment"). De keuze voor de (hogere) historische aankoopprijs is mogelijk
+# t/m boekjaar 2030; vanaf 2031 telt altijd de fotomomentwaarde.
+SNAPSHOT_DATE     = "2025-12-31"   # fotomoment
+OPT_IN_UNTIL_YEAR = 2030           # historische kostprijs claimbaar t/m dit boekjaar
+
+
+def fotomoment_taxable(sell_proceeds: float, cost_basis: float,
+                       snapshot_value: float, sell_year: int,
+                       opt_in_until: int = OPT_IN_UNTIL_YEAR) -> float:
+    """Belastbare meer-/minwaarde voor een vóór-2026 verworven schijf.
+
+    S = verkoopopbrengst, C = werkelijke kostprijs, F = fotomomentwaarde (alle EUR,
+    voor de verkochte hoeveelheid).
+      • S >= F : meerwaarde = S - F. Ligt C hoger dan F (en t/m 2030), dan mag de
+        gunstigere historische kostprijs gebruikt worden: max(0, S - C) — naar
+        beneden begrensd op 0 (historische minderwaarden zijn niet aftrekbaar).
+      • S <  F : dit is een minderwaarde ná het fotomoment (S - F < 0), aftrekbaar.
+    """
+    gain_vs_f = sell_proceeds - snapshot_value
+    if gain_vs_f >= 0:
+        taxable = gain_vs_f
+        if cost_basis > snapshot_value and sell_year <= opt_in_until:
+            taxable = max(0.0, sell_proceeds - cost_basis)
+        return taxable
+    return gain_vs_f
+
+
 # ── TOB berekening ────────────────────────────────────────────────────────────
 
 def calculate_tob(asset_type: str, etf_subtype: str, total_amount: float,
@@ -75,15 +105,22 @@ def _year(date_str: str) -> int:
 
 # ── FIFO core (per ticker + rekening, in EUR) ─────────────────────────────────
 
-def _fifo_core(transactions: list[dict]):
+def _fifo_core(transactions: list[dict], snapshots: dict | None = None):
     """
     Verwerk transacties chronologisch via FIFO per (ticker, rekening).
+
+    snapshots: optioneel {ticker: fotomomentwaarde_per_stuk_EUR}. Indien gegeven,
+    wordt voor loten gekocht vóór REGIME_START_YEAR de belastbare meer-/minwaarde
+    op basis van het fotomoment berekend (zie fotomoment_taxable). De economische
+    'gain_loss' blijft de werkelijke winst/verlies; 'taxable_gain_loss' is de
+    fiscale basis.
 
     Returns:
       pos_by_key   : {(ticker, account): {lots, total_quantity, total_cost}}
       realized     : lijst gerealiseerde W/V (EUR), met 'account'
       costs_by_key : {(ticker, account): som costs_eur}  (alle transacties)
     """
+    snapshots = snapshots or {}
     txns = sorted(transactions, key=lambda x: x["date"])
     pos_by_key: dict[tuple, dict] = {}
     realized: list[dict] = []
@@ -117,30 +154,47 @@ def _fifo_core(transactions: list[dict]):
             pos["total_cost"]     += eur_total
 
         else:  # sell
-            sell_qty   = qty
-            sell_total = eur_total          # EUR opbrengst (kosten apart)
-            remaining  = sell_qty
-            cost_basis = 0.0
+            sell_qty     = qty
+            sell_total   = eur_total          # EUR opbrengst (kosten apart)
+            sell_year    = _year(txn["date"])
+            snap_unit    = snapshots.get(ticker)
+            remaining    = sell_qty
+            cost_basis   = 0.0
+            taxable_gl   = 0.0
+            used_fotomoment = False
             for lot in pos["lots"]:
                 if remaining <= 0:
                     break
                 if lot["remaining_quantity"] <= 0:
                     continue
                 consumed = min(lot["remaining_quantity"], remaining)
-                cost_basis               += consumed * lot["price_per_unit"]
+                portion_cost     = consumed * lot["price_per_unit"]
+                portion_proceeds = consumed * price_eur
+                cost_basis += portion_cost
+
+                if snap_unit is not None and _year(lot["date"]) < REGIME_START_YEAR:
+                    F = snap_unit * consumed
+                    taxable_gl += fotomoment_taxable(portion_proceeds, portion_cost,
+                                                     F, sell_year)
+                    used_fotomoment = True
+                else:
+                    taxable_gl += portion_proceeds - portion_cost
+
                 lot["remaining_quantity"] -= consumed
-                remaining                -= consumed
+                remaining                 -= consumed
 
             realized.append({
                 "ticker":     ticker,
                 "account":    acct,
                 "date":       txn["date"],
-                "year":       _year(txn["date"]),
+                "year":       sell_year,
                 "quantity":   sell_qty,
                 "sell_price": price_eur,
                 "sell_total": sell_total,
                 "cost_basis": cost_basis,
-                "gain_loss":  sell_total - cost_basis,   # kosten tellen NIET mee
+                "gain_loss":  sell_total - cost_basis,   # economisch (kosten tellen NIET mee)
+                "taxable_gain_loss": taxable_gl,         # fiscale basis (fotomoment toegepast)
+                "fotomoment_applied": used_fotomoment,
             })
             pos["total_quantity"] = max(0.0, pos["total_quantity"] - sell_qty)
             pos["total_cost"]     = max(0.0, pos["total_cost"]     - cost_basis)
@@ -148,12 +202,14 @@ def _fifo_core(transactions: list[dict]):
     return pos_by_key, realized, costs_by_key
 
 
-def build_fifo_positions(transactions: list[dict]) -> tuple[dict, list[dict]]:
+def build_fifo_positions(transactions: list[dict],
+                         snapshots: dict | None = None) -> tuple[dict, list[dict]]:
     """
     Backward-compatibele weergave: posities geaggregeerd per ticker
     (over alle rekeningen heen). Realized blijft een platte lijst (met account).
+    snapshots: optioneel {ticker: fotomomentwaarde_per_stuk_EUR} (zie _fifo_core).
     """
-    pos_by_key, realized, _ = _fifo_core(transactions)
+    pos_by_key, realized, _ = _fifo_core(transactions, snapshots)
     positions: dict[str, dict] = {}
     for (ticker, _acctname), pos in pos_by_key.items():
         if ticker not in positions:
@@ -262,10 +318,12 @@ CARRY_MAX_YEARS = 5          # overdracht max 5 jaar -> max +€5.000 p.p.
 
 
 def realized_gains_by_year(all_gains: list[dict]) -> dict[int, float]:
-    """Netto gerealiseerde W/V per boekjaar (kan negatief zijn)."""
+    """Netto BELASTBARE gerealiseerde W/V per boekjaar (fotomoment toegepast).
+    Valt terug op de economische gain_loss als er geen fiscale basis is."""
     out: dict[int, float] = {}
     for g in all_gains:
-        out[g["year"]] = out.get(g["year"], 0.0) + g["gain_loss"]
+        val = g.get("taxable_gain_loss", g["gain_loss"])
+        out[g["year"]] = out.get(g["year"], 0.0) + val
     return out
 
 
@@ -356,10 +414,14 @@ def calculate_tax_overview(year: int | None = None,
     exemption_count = 2 if regime == "community" else 1
 
     all_txns = db.get_transactions()                      # globaal -> belasting
-    _, all_gains = build_fifo_positions(all_txns)
+    # Fotomoment-waarden per ticker (slotkoers 31/12/2025, in EUR)
+    snapshots = {a["ticker"]: a["snapshot_price_eur"]
+                 for a in db.get_assets()
+                 if a.get("snapshot_price_eur") is not None}
+    _, all_gains = build_fifo_positions(all_txns, snapshots)
 
     # Meerjarige opbouw van de vrijstelling (overdracht ongebruikt deel, max 5 jaar)
-    gains_by_year = realized_gains_by_year(all_gains)
+    gains_by_year = realized_gains_by_year(all_gains)     # fiscale basis
     first_year = None
     if all_txns:
         first_year = min(int(t["date"][:4]) for t in all_txns)
@@ -367,10 +429,12 @@ def calculate_tax_overview(year: int | None = None,
                               exemption_count, first_year)
     exemption       = exm["effective_total"]             # basis + opbouw, × aantal partners
 
-    year_gains    = [g for g in all_gains if g["year"] == year]
-    total_real_gl = sum(g["gain_loss"] for g in year_gains)
-    taxable       = max(0.0, total_real_gl - exemption) if total_real_gl > 0 else 0.0
-    tax_due       = round(taxable * tax_rate, 2)
+    year_gains       = [g for g in all_gains if g["year"] == year]
+    total_real_gl    = sum(g["gain_loss"] for g in year_gains)                       # economisch
+    total_taxable_gl = sum(g.get("taxable_gain_loss", g["gain_loss"]) for g in year_gains)  # fiscaal
+    taxable          = max(0.0, total_taxable_gl - exemption) if total_taxable_gl > 0 else 0.0
+    tax_due          = round(taxable * tax_rate, 2)
+    fotomoment_used  = any(g.get("fotomoment_applied") for g in year_gains)
 
     # Gerealiseerde W/V voor weergave: alle jaren, rekening-bewust.
     # (De fiscale berekening hierboven blijft globaal + per boekjaar.)
@@ -416,6 +480,8 @@ def calculate_tax_overview(year: int | None = None,
         "account_filter":        account,
         "realized_gains":        year_gains,
         "total_realized_gl":     total_real_gl,
+        "total_taxable_gl":      total_taxable_gl,
+        "fotomoment_applied":    fotomoment_used,
         "all_realized_gains":      all_gains,
         "realized_all_total":      sum(g["gain_loss"] for g in all_gains),
         "selection_realized_gains": sel_realized,
@@ -430,7 +496,7 @@ def calculate_tax_overview(year: int | None = None,
         "taxable_amount":        taxable,
         "tax_rate":              tax_rate,
         "tax_due":               tax_due,
-        "remaining_exemption":   max(0.0, exemption - total_real_gl) if total_real_gl >= 0 else exemption,
+        "remaining_exemption":   max(0.0, exemption - total_taxable_gl) if total_taxable_gl >= 0 else exemption,
         "total_dividends_gross": gross_div,
         "total_withholding_tax": wh_tax,
         "total_dividends_net":   net_div,

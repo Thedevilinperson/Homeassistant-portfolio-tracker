@@ -221,6 +221,12 @@ def _migrate(conn):
     if not _column_exists(cur, "assets", "belgian_registered"):
         cur.execute("ALTER TABLE assets ADD COLUMN belgian_registered INTEGER DEFAULT 1")
 
+    # Assets: fotomoment (slotkoers 31/12/2025) — native + EUR
+    if not _column_exists(cur, "assets", "snapshot_price"):
+        cur.execute("ALTER TABLE assets ADD COLUMN snapshot_price REAL")
+    if not _column_exists(cur, "assets", "snapshot_price_eur"):
+        cur.execute("ALTER TABLE assets ADD COLUMN snapshot_price_eur REAL")
+
     # Zorg dat oude rijen een rekening hebben
     cur.execute(
         "UPDATE transactions SET account=? WHERE account IS NULL OR account=''",
@@ -256,6 +262,15 @@ def get_all_settings() -> dict:
 
 
 # ── Rekeningen ───────────────────────────────────────────────────────────────
+
+def set_asset_snapshot(ticker, snapshot_price=None, snapshot_price_eur=None):
+    """Bewaar de fotomomentwaarde (slotkoers 31/12/2025) voor een activum."""
+    conn = get_connection()
+    conn.execute("UPDATE assets SET snapshot_price=?, snapshot_price_eur=? WHERE ticker=?",
+                 (snapshot_price, snapshot_price_eur, ticker.upper()))
+    conn.commit()
+    conn.close()
+
 
 def get_accounts() -> list[str]:
     """Lijst van rekeningnamen (oorsprong van de aandelen)."""

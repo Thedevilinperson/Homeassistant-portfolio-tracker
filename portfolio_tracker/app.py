@@ -260,11 +260,15 @@ def page_dashboard():
     with col_r:
         # Belastingstatus
         st.subheader(f"🧾 Belasting {year}")
-        pct_used = min(100.0, real_gl / exemption * 100) if exemption > 0 else 0
+        taxable_gl = overview.get("total_taxable_gl", real_gl)
+        pct_used = min(100.0, taxable_gl / exemption * 100) if exemption > 0 else 0
         color_lbl = "🟢" if pct_used < 60 else ("🟡" if pct_used < 90 else "🔴")
 
         st.metric("Netto gerealiseerde W/V", eur(real_gl),
                   delta_color=delta_color(real_gl))
+        if overview.get("fotomoment_applied") and abs(taxable_gl - real_gl) > 0.005:
+            st.caption(f"📸 Belastbare basis na fotomoment (31/12/2025): **{eur(taxable_gl)}** "
+                       "— de winst van vóór 2026 is vrijgesteld.")
         st.progress(min(1.0, pct_used / 100),
                     text=f"{color_lbl} {pct_used:.1f}% van vrijstelling (€{exemption:,.0f})")
 
@@ -548,6 +552,37 @@ def page_assets():
         _tob_rate = tax_mod.calculate_tob(asset_type, etf_subtype, 10000, belg_reg) / 10000 * 100
         st.caption(f"➡️ TOB-tarief voor dit activum: **{_tob_rate:.2f}%**".replace(".", ","))
 
+        # Fotomoment (slotkoers 31/12/2025) — voor de meerwaardebelasting op vóór-2026 stukken
+        st.session_state.setdefault(k("snap_stage"), None)
+        st.session_state.setdefault("as_snap_nonce", 0)
+        snn = st.session_state["as_snap_nonce"]
+        fm1, fm2 = st.columns([2, 1])
+        with fm1:
+            snap_val = st.number_input(
+                f"📸 Fotomomentwaarde 31/12/2025 ({currency}/stuk) — optioneel",
+                min_value=0.0, step=0.01, format="%.4f",
+                value=st.session_state[k("snap_stage")], key=f"as_snap_{n}_{snn}",
+                help="Slotkoers op 31/12/2025. Voor stukken die je vóór 2026 kocht vertrekt de "
+                     "belastbare meerwaarde van de hoogste van (werkelijke aankoopprijs, fotomomentwaarde). "
+                     "Laat leeg voor activa die je pas vanaf 2026 koopt.")
+        with fm2:
+            st.write(""); st.write("")
+            if st.button("📸 Ophalen 31/12/2025", key=k("snapfetch")):
+                if not ticker.strip():
+                    st.warning("Vul eerst een ticker in.")
+                else:
+                    with st.spinner("Slotkoers 31/12/2025 ophalen..."):
+                        p = md.get_close_on_date(ticker.strip().upper(), tax_mod.SNAPSHOT_DATE)
+                    if p is None:
+                        st.error("Geen slotkoers gevonden voor 31/12/2025 — vul ze handmatig in.")
+                    else:
+                        st.session_state[k("snap_stage")] = float(p)
+                        st.session_state["as_snap_nonce"] = snn + 1
+                        st.rerun()
+        if snap_val and snap_val > 0 and currency != "EUR":
+            _fxs, _snap_eur_prev = compute_eur(snap_val, currency, tax_mod.SNAPSHOT_DATE)
+            st.caption(f"≈ €{_snap_eur_prev:,.4f}/stuk (koers 31/12/2025: {_fxs:.4f})")
+
         if st.session_state.get(k("fetched")):
             st.success("✨ Velden ingevuld via Yahoo Finance — controleer en pas aan waar nodig, en klik daarna op Toevoegen.")
 
@@ -561,6 +596,9 @@ def page_assets():
                 db.add_asset(t, name.strip(), asset_type, etf_subtype,
                              currency, exchange.strip() or None, isin.strip() or None,
                              belgian_registered=int(belg_reg))
+                if snap_val and snap_val > 0:
+                    _fx, snap_eur = compute_eur(snap_val, currency, tax_mod.SNAPSHOT_DATE)
+                    db.set_asset_snapshot(t, float(snap_val), snap_eur)
                 clear_cache()
                 st.session_state["as_nonce"] = n + 1   # formulier leegmaken
                 st.success(f"✅ {t} — {name.strip()} toegevoegd!")
@@ -573,6 +611,17 @@ def page_assets():
             ea = db.get_asset(edit_tk)
             if ea:
                 st.markdown(f"### ✏️ {edit_tk} bewerken")
+                sfc1, sfc2 = st.columns([3, 1])
+                sfc1.caption("📸 Fotomoment = slotkoers 31/12/2025, gebruikt voor de meerwaardebelasting "
+                             "op stukken die je vóór 2026 kocht.")
+                if sfc2.button("📸 Ophalen 31/12/2025", key=f"esnapfetch_{edit_tk}"):
+                    with st.spinner("Slotkoers 31/12/2025 ophalen..."):
+                        p = md.get_close_on_date(edit_tk, tax_mod.SNAPSHOT_DATE)
+                    if p is None:
+                        st.warning("Geen slotkoers gevonden voor 31/12/2025 — vul ze handmatig in.")
+                    else:
+                        st.session_state[f"esnap_{edit_tk}"] = float(p)
+                        st.rerun()
                 with st.form("edit_asset_form"):
                     e1, e2 = st.columns(2)
                     with e1:
@@ -600,6 +649,13 @@ def page_assets():
                                                  value=e_breg,
                                                  help="Uit = niet in België aangeboden tracker/ETC (bv. G2XJ.DE) → TOB 0,35%.")
                         e_exch = st.text_input("Beurs", value=ea.get("exchange") or "")
+                        e_snap = st.number_input(
+                            f"📸 Fotomomentwaarde 31/12/2025 ({e_cur}/stuk)",
+                            min_value=0.0, step=0.01, format="%.4f",
+                            value=float(st.session_state.get(f"esnap_{edit_tk}",
+                                                             ea.get("snapshot_price") or 0.0)),
+                            help="Slotkoers op 31/12/2025. Laat 0 voor activa die je pas vanaf 2026 koopt. "
+                                 "Gebruik de knop hierboven om ze automatisch op te halen.")
                     _etr = tax_mod.calculate_tob(e_type, e_sub, 10000, e_breg) / 10000 * 100
                     st.caption(f"➡️ TOB-tarief: **{_etr:.2f}%**".replace(".", ",") +
                                "  ·  💡 Na het corrigeren van een ticker: klik op '🔄 Ververs prijzen' op de Portefeuille-pagina.")
@@ -620,6 +676,12 @@ def page_assets():
                                             currency=e_cur, exchange=e_exch.strip() or "",
                                             isin=e_isin.strip() or "",
                                             belgian_registered=int(e_breg))
+                            if e_snap and e_snap > 0:
+                                _fx, snap_eur = compute_eur(e_snap, e_cur, tax_mod.SNAPSHOT_DATE)
+                                db.set_asset_snapshot(target, float(e_snap), snap_eur)
+                            else:
+                                db.set_asset_snapshot(target, None, None)
+                            st.session_state.pop(f"esnap_{edit_tk}", None)
                             clear_cache()
                             st.session_state.pop("edit_asset", None)
                             st.success(f"✅ {target} bijgewerkt!")
@@ -652,6 +714,8 @@ def page_assets():
                 st.caption(f"{a['asset_type'].upper()}{subtype_lbl} | {a['currency']} | "
                            f"{a.get('exchange') or '—'}")
                 st.caption(f"ISIN: {a.get('isin') or '—'}")
+                if a.get("snapshot_price") is not None:
+                    st.caption(f"📸 Fotomoment 31/12/2025: {a['snapshot_price']:.4f} {a['currency']}")
             with c2:
                 lp = db.get_latest_price(a["ticker"])
                 if lp:
@@ -1177,6 +1241,8 @@ def page_tax():
 
     pv          = overview["position_values"]
     real_gl     = overview["total_realized_gl"]
+    taxable_gl  = overview.get("total_taxable_gl", real_gl)
+    foto        = overview.get("fotomoment_applied") and abs(taxable_gl - real_gl) > 0.005
     exemption   = overview["annual_exemption"]
     remaining   = overview["remaining_exemption"]
     taxable     = overview["taxable_amount"]
@@ -1188,11 +1254,15 @@ def page_tax():
 
     # ── Metrics ──────────────────────────────────────────────────────────────
     c1, c2, c3, c4 = st.columns(4)
-    c1.metric("Gerealiseerde W/V", eur(real_gl), delta_color=delta_color(real_gl))
+    c1.metric("Belastbare W/V" if foto else "Gerealiseerde W/V", eur(taxable_gl),
+              delta_color=delta_color(taxable_gl))
     c2.metric("Jaarlijkse vrijstelling", eur(exemption))
     c3.metric("Belastbaar bedrag", eur(taxable))
     c4.metric("Geschatte belasting (10%)", eur(tax_due),
               delta_color="inverse" if tax_due > 0 else "off")
+    if foto:
+        st.caption(f"📸 Fotomoment toegepast: economische W/V **{eur(real_gl)}**, maar fiscaal belastbaar "
+                   f"**{eur(taxable_gl)}** — de meerwaarde opgebouwd vóór 2026 (referentie 31/12/2025) is vrijgesteld.")
     cnt       = overview.get("exemption_count", 1)
     carry_eff = overview.get("carry_exemption", 0.0)
     base_eff  = overview.get("base_exemption_effective", exemption)
@@ -1207,16 +1277,18 @@ def page_tax():
     col_l, col_r = st.columns([3, 2])
 
     with col_l:
-        pct_used = min(100.0, real_gl / exemption * 100) if exemption > 0 else 0
+        pct_used = min(100.0, taxable_gl / exemption * 100) if exemption > 0 else 0
         color_lbl = "🟢" if pct_used < 60 else ("🟡" if pct_used < 90 else "🔴")
         st.subheader("Vrijstelling gebruik")
         st.progress(max(0.0, min(1.0, pct_used / 100)),
-                    text=f"{color_lbl} {pct_used:.1f}% gebruikt ({eur(real_gl)} / {eur(exemption)})")
+                    text=f"{color_lbl} {pct_used:.1f}% gebruikt ({eur(taxable_gl)} / {eur(exemption)})")
 
+        _econ_row = f"| Gerealiseerde W/V (economisch) | {eur(real_gl)} |\n" if foto else ""
+        _basis_lbl = "Belastbare meerwaarden (na fotomoment)" if foto else "Gerealiseerde meerwaarden"
         st.markdown(f"""
 | | Bedrag |
 |---|---|
-| Gerealiseerde meerwaarden | **{eur(real_gl)}** |
+{_econ_row}| {_basis_lbl} | **{eur(taxable_gl)}** |
 | Basisvrijstelling | {eur(overview.get('base_exemption_effective', exemption))} |
 | Opgebouwde overdracht | {eur(overview.get('carry_exemption', 0))} |
 | **Totale vrijstelling** | **{eur(exemption)}** |

@@ -2,7 +2,28 @@
 
 Alle noemenswaardige wijzigingen aan de Portfolio Tracker add-on.
 
-## 1.9.0
+## 0.10.0
+- Fotomoment (referentiewaarde 31/12/2025) voor de meerwaardebelasting. Voor
+stukken die je vóór 2026 kocht, vertrekt de belastbare meerwaarde niet langer van
+de werkelijke aankoopprijs, maar van het fotomoment:
+  - Ligt de slotkoers op 31/12/2025 hoger dan je aankoopprijs, dan wordt die de
+fiscale instapprijs (de winst van vóór 2026 is vrijgesteld).
+Ligt ze lager, dan mag je de (hogere) werkelijke aankoopprijs gebruiken, maar
+het resultaat wordt tot €0 begrensd (historische minderwaarden zijn niet
+aftrekbaar). Die keuze geldt t/m boekjaar 2030; vanaf 2031 telt altijd de
+fotomomentwaarde.
+  - Een minderwaarde ná het fotomoment blijft aftrekbaar.
+  - Stukken gekocht vanaf 2026 gebruiken gewoon de aankoopprijs (FIFO).
+  - Werkt voor alle activa; gemengde loten (deels vóór, deels vanaf 2026) worden
+per schijf correct behandeld.
+- Per activum een fotomomentwaarde (slotkoers 31/12/2025), met een knop om die
+automatisch op te halen via Yahoo Finance of handmatig in te vullen — in zowel het
+toevoeg- als het bewerkformulier, en zichtbaar in het activa-overzicht.
+- Dashboard en belastingpagina tonen nu duidelijk het verschil tussen de
+economische winst/verlies en de (lagere) belastbare basis na het fotomoment; de
+vrijstelling en de geschatte belasting worden op de fiscale basis berekend.
+
+## 0.9.0
 Dividenden per rekening: een dividend wordt nu aan een rekening gekoppeld,
 niet enkel aan een activum.
 - Het toevoegformulier heeft een rekeningselector.
@@ -14,7 +35,7 @@ rekening); de globale totalen en de belastingcijfers blijven kloppen.
 - Bestaande dividenden krijgen bij de upgrade automatisch de standaardrekening
 toegewezen; je kunt ze nadien per stuk herschikken.
 
-## 1.8.0
+## 0.8.0
 Meer-/minwaarden over rekeningen heen:
 - Het dashboard toont nu een totale meer-/minwaarde (gerealiseerd over alle
 jaren + ongerealiseerd), zodat winst uit een verkoop en latere heraankoop
@@ -29,7 +50,7 @@ op de ene rekening verkocht en op een andere heraangekocht is.
 - De fiscale berekening (gerealiseerde W/V per boekjaar, vrijstelling) blijft
 zoals het hoort globaal per persoon.
 
-## 1.7.0
+## 0.7.0
 - Aandelensplitsingen: nieuwe tab "🔀 Splitsingen" op de Activa-pagina om een
 (omgekeerde) splitsing te registreren (bv. NVIDIA 1→10). Transacties van vóór de
 splitsdatum worden automatisch omgerekend (aantal × ratio, prijs ÷ ratio); de
@@ -37,7 +58,7 @@ kostbasis blijft gelijk en posities/waarde blijven consistent met de
 split-gecorrigeerde Yahoo-koersen. Het transactie-overzicht toont nog steeds je
 oorspronkelijk ingevoerde waarden.
 
-## 1.6.0
+## 0.6.0
 - TOB correcter berekend: het tarief houdt nu rekening met of een ETF/fonds
 in België is aangeboden/geregistreerd (FSMA). Een kapitaliserende ETF die niet
 in België is aangeboden (bv. een ETC zoals G2XJ.DE) valt nu onder 0,35% i.p.v.
@@ -53,7 +74,7 @@ blijven gelden.
 - Transactie-overzicht: bij het bewerken springt de pagina automatisch naar
 boven, naar het bewerkformulier.
 
-## 1.5.0
+## 0.5.0
 - Activumnaam i.p.v. ticker op meer plaatsen, makkelijker te herkennen:
 - Dashboard: staafdiagram "Ongerealiseerde winst/verlies per positie" toont de naam.
 - Portefeuille: de keuzelijst en titel bij "Prijsgeschiedenis" tonen de naam.
@@ -65,14 +86,14 @@ naam of ticker bijgekomen.
 - Transacties: in het overzicht is de tekstfilter op ticker vervangen door een
 keuzelijst "Activum" (op naam), wat tegelijk de naam- en tickerfilter dekt.
 
-## 1.4.2
+## 0.4.2
 Foutmelding bij onbekende ticker: als "🔍 Info ophalen via Yahoo Finance" niets vindt, toont de app nu een duidelijke fout (met hint over het beurssuffix) i.p.v. stilletjes standaardwaarden in te vullen.
 Ticker corrigeren: in het activum-bewerkformulier kan je nu ook de ticker zelf aanpassen (bv. STMPA → STMPA.PA). De bijbehorende transacties, dividenden, koershistoriek en AI-ratings verhuizen mee, zodat een verkeerde ticker zonder dataverlies te herstellen is.
 
-## 1.4.1
+## 0.4.1
 Fix: crash bij het toevoegen van een transactie (st.session_state.pt_input cannot be modified after the widget ... is instantiated). Het koersdoelveld en de AI-knop gebruiken nu een veilig reset-patroon; de transactie verschijnt meteen zonder refresh.
 
-## 1.4.0
+## 0.4.0
 - Activa bewerken: bestaande activa kunnen aangepast worden (✏️ in het
 overzicht): naam, type, ETF-subtype, munt, beurs en ISIN.
 ISIN: activa hebben nu een ISIN-veld; het wordt mee opgehaald en getoond.
@@ -83,14 +104,13 @@ opgeslagen bij automatisch invullen; dat is nu gecorrigeerd.
 het formulier in, zodat je ze kunt nakijken en aanpassen vóór je bewaart
 (i.p.v. pas achteraf te zien of het juist liep).
 
-## 1.3.2
+## 0.3.2
 - verwijderen van deprecated ARM-arch values in config
 
-## 1.3.1
+## 0.3.1
 - fix van changelog
 
-## 1.3.0
-
+## 0.3.0
 - **AI-kosten in de app:** het tokengebruik en de geschatte kost per AI-oproep
   worden bijgehouden en getoond op de AI-adviseur-pagina: totaal, deze maand, en
   een uitsplitsing per model en per functie (belastingadvies, marktevaluatie,
@@ -104,8 +124,7 @@ het formulier in, zodat je ze kunt nakijken en aanpassen vóór je bewaart
 - **Fix:** `use_container_width` vervangen door `width='stretch'` om de Streamlit-
   deprecation (verwijdering na 2025-12-31) voor te zijn.
 
-## 1.2.1
-
+## 0.2.1
 - **Fix:** scheduler crashte bij het opstarten op `job.next_run_time`
   (`AttributeError`) met nieuwere APScheduler-versies, waardoor de geplande jobs
   (koersophaling, dagelijks belastingadvies, marktevaluaties) niet meer draaiden.
@@ -113,7 +132,7 @@ het formulier in, zodat je ze kunt nakijken en aanpassen vóór je bewaart
 - **Fix:** `apscheduler` vastgepind op de 3.x-reeks (`<4.0`) om te vermijden dat
   een herbouw per ongeluk de incompatibele 4.x-API binnenhaalt.
 
-## 1.2.0
+## 0.2.0
 
 - **Transacties bewerken:** bestaande transacties kunnen gecorrigeerd en
   aangevuld worden (✏️ in het overzicht); EUR-bedragen worden herberekend.
@@ -133,14 +152,14 @@ het formulier in, zodat je ze kunt nakijken en aanpassen vóór je bewaart
   het model hiervoor is apart instelbaar.
 - **Koersdoel in Portefeuille:** kolommen "Koersdoel" en "Potentieel" (%).
 
-## 1.1.0
+## 0.1.0
 
 - Integratie van rekeningen (multi-rekening/multi-broker), de evolutiepagina met
   historische waardereconstructie, volledige EUR-omrekening op transactiedatum,
   het Belgische huwelijksstelsel (gemeenschap van goederen) en de meerjarige
   opbouw van de vrijstelling.
 
-## 1.0.1
+## 0.0.1
 
 - Basisversie: portefeuillebeheer, FIFO-kostbasis, Belgische
   meerwaardebelasting, TOB en dividenden.

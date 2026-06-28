@@ -137,6 +137,22 @@ def convert_to_eur(amount: float, currency: str) -> float | None:
 
 # ── Historische data ─────────────────────────────────────────────────────────
 
+def get_close_on_date(ticker: str, on_date: str) -> float | None:
+    """Slotkoers (native valuta) op of vlak vóór 'YYYY-MM-DD'. Voor het fotomoment
+    (31/12/2025). auto_adjust=False zodat de koers de werkelijke slotkoers van die
+    dag is (zonder latere split-/dividendcorrectie)."""
+    try:
+        d = datetime.strptime(on_date[:10], "%Y-%m-%d")
+        start = (d - timedelta(days=10)).strftime("%Y-%m-%d")
+        end = (d + timedelta(days=1)).strftime("%Y-%m-%d")
+        hist = yf.Ticker(ticker).history(start=start, end=end, auto_adjust=False)
+        if not hist.empty:
+            return round(float(hist["Close"].iloc[-1]), 4)
+    except Exception as e:
+        logger.warning(f"get_close_on_date({ticker},{on_date}): {e}")
+    return None
+
+
 def get_historical_exchange_rate(from_currency: str, on_date: str,
                                  to_currency: str = "EUR") -> float | None:
     """
