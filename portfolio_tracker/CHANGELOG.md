@@ -2,6 +2,17 @@
 
 Alle noemenswaardige wijzigingen aan de Portfolio Tracker add-on.
 
+## 0.13.0
+- Totaal resultaat per activum, over de rekeningen heen. De gerealiseerde winst/verlies
+van een activum wordt nu opgeteld over álle geselecteerde rekeningen (niet langer per
+rekening apart) en gecombineerd met de lopende ongerealiseerde W/V:
+  - Dashboard: drie aparte cijfers — totale ongerealiseerde W/V, totale gerealiseerde
+W/V en de som (totale W/V) — over de geselecteerde rekeningen. Het staafdiagram toont nu
+per activum de totale W/V (ongerealiseerd + gerealiseerd), met de opsplitsing in de tooltip.
+  - Portefeuille: een nieuwe tabel "Totaal resultaat per activum" met per activum de
+ongerealiseerde W/V, de gerealiseerde W/V en het totaal — inclusief activa die op de ene
+rekening volledig verkocht en op een andere heraangekocht zijn.
+
 ## 0.12.0
 - AI-kosten in de zijbalk: de totale AI-kost (en deze maand) staat nu links in de zijbalk.
 - Rekeningfilter als multiselect op het dashboard en de portefeuille: selecteer één,

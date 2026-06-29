@@ -115,6 +115,34 @@ def dividends_net_eur(divs, accounts=None) -> float:
     return tot
 
 
+def per_asset_result(overview: dict, year=None) -> dict:
+    """Per activum het gecombineerde resultaat over de geselecteerde rekeningen:
+    ongerealiseerde W/V (lopende positie) + gerealiseerde W/V (verkopen, over álle
+    geselecteerde rekeningen heen). year=None telt alle jaren mee, anders enkel dat jaar.
+
+    Bevat ook activa zonder open positie maar mét gerealiseerde historiek (bv. volledig
+    verkocht op de ene rekening en elders heraangekocht)."""
+    pv = overview.get("position_values", {})
+    realized = overview.get("selection_realized_gains", [])
+    if year is not None:
+        realized = [g for g in realized if g["year"] == year]
+    real_by_tkr: dict[str, float] = {}
+    for g in realized:
+        real_by_tkr[g["ticker"]] = real_by_tkr.get(g["ticker"], 0.0) + g["gain_loss"]
+    out: dict[str, dict] = {}
+    for t in set(pv.keys()) | set(real_by_tkr.keys()):
+        p = pv.get(t, {})
+        unreal = p.get("unrealized_gain_loss") or 0.0
+        out[t] = {
+            "quantity":      p.get("quantity") or 0.0,
+            "current_value": p.get("current_value") or 0.0,
+            "unrealized":    unreal,
+            "realized":      real_by_tkr.get(t, 0.0),
+            "total":         unreal + real_by_tkr.get(t, 0.0),
+        }
+    return out
+
+
 def render_realized_history(realized_list, names=None, empty_msg="Nog geen gerealiseerde meer-/minwaarden."):
     """Tabel met gerealiseerde meer-/minwaarden (verkopen), over alle jaren/rekeningen
     heen zoals meegegeven. Toont ook posities die intussen netto 0 zijn."""
@@ -234,12 +262,16 @@ def page_dashboard():
               help="Transactiekosten + algemene rekeningkosten (bv. beheerskosten). "
                    "Apart gehouden, niet in de meerwaardeberekening.")
 
-    # Totale meer-/minwaarde: gerealiseerd (periode, rekening-bewust) + ongerealiseerd.
+    # ── Resultaat: ongerealiseerd + gerealiseerd + totaal (over de rekeningen heen) ──
     totale_wv = realized_period + (unreal_gl or 0)
-    st.caption(
-        f"📊 **Totale meer-/minwaarde ({period_lbl}):** {eur(totale_wv)}  —  waarvan gerealiseerd "
-        f"{eur(realized_period)} en ongerealiseerd {eur(unreal_gl)}."
-        + ("  Inclusief winst/verlies uit verkochte posities die intussen netto 0 zijn." if realized_period else ""))
+    st.markdown(f"#### 📊 Resultaat ({period_lbl}, over alle geselecteerde rekeningen)")
+    rc1, rc2, rc3 = st.columns(3)
+    rc1.metric("Ongerealiseerde W/V", eur(unreal_gl), delta_color=delta_color(unreal_gl),
+               help="Lopende winst/verlies op de posities die je nu aanhoudt (geselecteerde rekeningen).")
+    rc2.metric("Gerealiseerde W/V", eur(realized_period), delta_color=delta_color(realized_period),
+               help="Winst/verlies uit verkopen, over alle geselecteerde rekeningen heen — "
+                    "ook van posities die elders heraangekocht zijn.")
+    rc3.metric("Totale W/V (gereal. + ongereal.)", eur(totale_wv), delta_color=delta_color(totale_wv))
 
     st.divider()
 
@@ -266,27 +298,36 @@ def page_dashboard():
         )
         st.plotly_chart(fig_pie, width='stretch')
 
-        # Staafdiagram W/V per positie
+        # Staafdiagram: totale W/V per activum (ongerealiseerd + gerealiseerd)
         names = asset_name_map()
-        tickers_sorted = sorted(pv.keys(), key=lambda t: pv[t]["unrealized_gain_loss"] or 0)
-        gl_vals = [pv[t]["unrealized_gain_loss"] or 0 for t in tickers_sorted]
-        colors  = ["#00b894" if v >= 0 else "#d63031" for v in gl_vals]
-        labels  = [names.get(t, t) for t in tickers_sorted]
+        result = per_asset_result(overview, year=None if all_time else year)
+        if result:
+            tickers_sorted = sorted(result.keys(), key=lambda t: result[t]["total"])
+            tot_vals  = [result[t]["total"] for t in tickers_sorted]
+            unr_vals  = [result[t]["unrealized"] for t in tickers_sorted]
+            real_vals = [result[t]["realized"] for t in tickers_sorted]
+            labels    = [names.get(t, t) for t in tickers_sorted]
+            colors    = ["#00b894" if v >= 0 else "#d63031" for v in tot_vals]
+            customdata = list(zip(tickers_sorted, unr_vals, real_vals))
 
-        fig_bar = go.Figure(go.Bar(
-            x=labels, y=gl_vals, marker_color=colors,
-            customdata=tickers_sorted,
-            text=[f"€{v:,.0f}" for v in gl_vals], textposition="outside",
-            hovertemplate="<b>%{x}</b> (%{customdata})<br>€%{y:,.2f}<extra></extra>",
-        ))
-        fig_bar.add_hline(y=0, line_dash="dot", line_color="rgba(200,200,200,0.3)")
-        fig_bar.update_layout(
-            title="Ongerealiseerde winst/verlies per positie",
-            height=280, showlegend=False,
-            margin=dict(t=40, b=30, l=20, r=20),
-            plot_bgcolor="rgba(0,0,0,0)", paper_bgcolor="rgba(0,0,0,0)",
-        )
-        st.plotly_chart(fig_bar, width='stretch')
+            fig_bar = go.Figure(go.Bar(
+                x=labels, y=tot_vals, marker_color=colors,
+                customdata=customdata,
+                text=[f"€{v:,.0f}" for v in tot_vals], textposition="outside",
+                hovertemplate="<b>%{x}</b> (%{customdata[0]})<br>Totaal: €%{y:,.2f}"
+                              "<br>Ongerealiseerd: €%{customdata[1]:,.2f}"
+                              "<br>Gerealiseerd: €%{customdata[2]:,.2f}<extra></extra>",
+            ))
+            fig_bar.add_hline(y=0, line_dash="dot", line_color="rgba(200,200,200,0.3)")
+            fig_bar.update_layout(
+                title=f"Totale winst/verlies per activum ({period_lbl})",
+                height=300, showlegend=False,
+                margin=dict(t=40, b=30, l=20, r=20),
+                plot_bgcolor="rgba(0,0,0,0)", paper_bgcolor="rgba(0,0,0,0)",
+            )
+            st.plotly_chart(fig_bar, width='stretch')
+            st.caption("Bevat ook de gerealiseerde winst/verlies van eerder verkochte (en eventueel "
+                       "elders heraangekochte) posities, opgeteld bij de lopende ongerealiseerde W/V.")
 
     with col_r:
         # Belastingstatus
@@ -439,6 +480,34 @@ def page_portfolio():
     st.caption(f"💡 Nettorendement na kosten: **{eur(net_return)}**  "
                f"(ongerealiseerde W/V + dividenden − kosten). "
                f"Waarvan transactiekosten {eur(txn_costs)} en rekeningkosten {eur(acct_costs)}.")
+
+    # ── Totaal resultaat per activum (ongerealiseerd + gerealiseerd, over rekeningen heen) ──
+    st.divider()
+    st.subheader("📊 Totaal resultaat per activum")
+    st.caption("Ongerealiseerde W/V op de lopende positie + gerealiseerde W/V uit eerdere verkopen, "
+               "over alle geselecteerde rekeningen heen (alle jaren). Zo zie je het volledige resultaat "
+               "van een activum, ook als het op de ene rekening verkocht en op een andere heraangekocht is.")
+    result = per_asset_result(overview, year=None)
+    if result:
+        nmap = asset_name_map()
+        rrows = []
+        for t in sorted(result.keys(), key=lambda x: result[x]["total"], reverse=True):
+            r = result[t]
+            rrows.append({
+                "Activum":           asset_label(t, nmap),
+                "Aantal (nu)":       f"{r['quantity']:.4f}" if r["quantity"] else "0",
+                "Huidige waarde":    eur(r["current_value"]),
+                "Ongerealiseerde W/V": eur(r["unrealized"]),
+                "Gerealiseerde W/V":   eur(r["realized"]),
+                "Totale W/V":        eur(r["total"]),
+            })
+        st.dataframe(pd.DataFrame(rrows), width='stretch', hide_index=True)
+        tot_unreal = sum(r["unrealized"] for r in result.values())
+        tot_real   = sum(r["realized"] for r in result.values())
+        st.caption(f"**Totaal — ongerealiseerd {eur(tot_unreal)} + gerealiseerd {eur(tot_real)} "
+                   f"= {eur(tot_unreal + tot_real)}**")
+    else:
+        st.info("Nog geen posities of gerealiseerde historiek voor deze selectie.")
 
     # ── AI-ratingsynthese (laatste 9 adviezen) ────────────────────────────────
     st.divider()
