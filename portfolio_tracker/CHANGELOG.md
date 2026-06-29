@@ -2,6 +2,19 @@
 
 Alle noemenswaardige wijzigingen aan de Portfolio Tracker add-on.
 
+## 0.12.0
+- AI-kosten in de zijbalk: de totale AI-kost (en deze maand) staat nu links in de zijbalk.
+- Rekeningfilter als multiselect op het dashboard en de portefeuille: selecteer één,
+meerdere of (leeg) alle rekeningen tegelijk.
+- Compactere overzichten: de overzichten van activa, transacties en dividenden zijn nu
+echte tabellen (kolommen/rijen) in plaats van losse regels, met veel minder lege ruimte.
+- Bewerken/verwijderen/herschikken gebeurt via een actiebalk onder de tabel.
+- Dashboard YTD ↔ all-time: een schakelaar wisselt de overzichtslijn (gerealiseerde W/V,
+dividenden, totale meer-/minwaarde) tussen "dit jaar" en "sinds start".
+- Oudere transacties: datums vanaf 1/1/2000 zijn nu toegelaten (voorheen kon je niet
+verder terug dan ~10 jaar).
+- Transactiekosten standaard in EUR in plaats van de valuta van het activum.
+
 ## 0.11.0
 Dividenden — gedetailleerde invoer van de volledige voorheffingsketen. Naast de
 bestaande eenvoudige invoer kun je nu ingeven: ① bruto dividend vóór buitenlandse

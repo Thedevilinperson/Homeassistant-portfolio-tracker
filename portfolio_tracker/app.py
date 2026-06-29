@@ -69,8 +69,9 @@ def delta_color(val: float | None) -> str:
 
 
 @st.cache_data(ttl=60, show_spinner=False)
-def get_overview(year: int, account: str | None = None) -> dict:
-    """Gecachte portfolioverzicht (60 s TTL). account=None -> alle rekeningen."""
+def get_overview(year: int, account=None) -> dict:
+    """Gecachte portfolioverzicht (60 s TTL). account=None -> alle rekeningen;
+    mag ook een tuple van rekeningnamen zijn (multiselect)."""
     assets = db.get_assets()
     tickers = [a["ticker"] for a in assets]
     prices = md.get_prices_for_tickers(tickers)
@@ -93,6 +94,25 @@ def asset_label(ticker: str, names: dict | None = None) -> str:
     names = names if names is not None else asset_name_map()
     nm = names.get(ticker, ticker)
     return f"{nm} ({ticker})" if nm and nm != ticker else ticker
+
+
+def dividend_net_eur(d: dict) -> float:
+    """Netto ontvangen dividend in EUR (na alle voorheffingen)."""
+    if d.get("net_eur") is not None:
+        return d["net_eur"]
+    g = d.get("gross_eur") if d.get("gross_eur") is not None else d["gross_amount"]
+    w = d.get("withholding_eur") if d.get("withholding_eur") is not None else d["withholding_tax"]
+    return g - w
+
+
+def dividends_net_eur(divs, accounts=None) -> float:
+    """Som van netto dividenden (EUR), optioneel gefilterd op een set rekeningen."""
+    tot = 0.0
+    for d in divs:
+        if accounts is not None and (d.get("account") or db.DEFAULT_ACCOUNT) not in accounts:
+            continue
+        tot += dividend_net_eur(d)
+    return tot
 
 
 def render_realized_history(realized_list, names=None, empty_msg="Nog geen gerealiseerde meer-/minwaarden."):
@@ -126,11 +146,13 @@ def compute_eur(amount: float, currency: str, date_str: str) -> tuple[float, flo
     return rate, float(amount) * rate
 
 
-def account_filter_widget(key: str) -> str | None:
-    """Dropdown 'Alle rekeningen' + gedefinieerde rekeningen. None = alle."""
-    opts = ["📂 Alle rekeningen"] + db.get_accounts()
-    sel = st.selectbox("Rekening", opts, key=key)
-    return None if sel.startswith("📂") else sel
+def account_filter_widget(key: str):
+    """Multiselect van rekeningen. Lege selectie = alle rekeningen.
+    Retourneert een tuple (cachebaar) of None."""
+    opts = db.get_accounts()
+    sel = st.multiselect("Rekeningen", opts, default=[], key=key,
+                         placeholder="Alle rekeningen")
+    return tuple(sel) if sel else None
 
 
 def backfill_eur(force: bool = False) -> int:
@@ -161,11 +183,15 @@ def backfill_eur(force: bool = False) -> int:
 def page_dashboard():
     st.title("📊 Dashboard")
 
-    fc1, fc2 = st.columns([1, 4])
+    fc1, fc2 = st.columns([2, 3])
     with fc1:
         acct = account_filter_widget("dash_acct")
+    with fc2:
+        period = st.radio("Periode", ["YTD (dit jaar)", "Sinds start (all-time)"],
+                          horizontal=True, key="dash_period", label_visibility="collapsed")
+    all_time = period.startswith("Sinds")
     if acct:
-        st.caption(f"📂 Gefilterd op rekening: **{acct}** — belastingcijfers blijven globaal (vrijstelling geldt per persoon).")
+        st.caption(f"📂 Gefilterd op: **{', '.join(acct)}** — belastingcijfers blijven globaal (vrijstelling geldt per persoon).")
 
     year = datetime.now().year
     overview, assets, prices = get_overview(year, acct)
@@ -187,28 +213,33 @@ def page_dashboard():
     exemption  = overview["annual_exemption"]
     remaining  = overview["remaining_exemption"]
 
+    # Periode-afhankelijke cijfers
+    accset = set(acct) if acct else None
+    divs_period = db.get_dividends(year=None if all_time else year)
+    div_net = dividends_net_eur(divs_period, accset)
+    realized_period = (overview.get("selection_realized_total", 0.0) if all_time
+                       else overview.get("selection_realized_year", 0.0))
+    period_lbl = "sinds start" if all_time else "YTD"
+
     # ── KPI-rij ──────────────────────────────────────────────────────────────
     c1, c2, c3, c4, c5 = st.columns(5)
     c1.metric("💼 Portefeuillewaarde", eur(total_val),
               delta=eur(unreal_gl), delta_color=delta_color(unreal_gl))
     c2.metric("💸 Totaal geïnvesteerd", eur(total_cost))
-    c3.metric("📈 Ongerealiseerde W/V",
-              pct(unreal_gl / total_cost * 100 if total_cost else None),
-              delta=eur(unreal_gl), delta_color=delta_color(unreal_gl))
-    c4.metric("💰 Netto dividenden YTD", eur(overview["total_dividends_net"]))
+    c3.metric(f"📊 Gerealiseerde W/V ({period_lbl})", eur(realized_period),
+              delta_color=delta_color(realized_period))
+    c4.metric(f"💰 Netto dividenden ({period_lbl})", eur(div_net))
     _kosten = overview.get("selection_costs", 0) + overview.get("account_costs_selection", 0)
     c5.metric("🧾 Kosten (txn + rekening)", eur(_kosten),
               help="Transactiekosten + algemene rekeningkosten (bv. beheerskosten). "
                    "Apart gehouden, niet in de meerwaardeberekening.")
 
-    # Totale meer-/minwaarde over de volledige historiek: gerealiseerd (alle jaren,
-    # rekening-bewust) + ongerealiseerd. Zo is een verkoop+heraankoop ook zichtbaar.
-    sel_real_total = overview.get("selection_realized_total", 0.0)
-    totale_wv = sel_real_total + (unreal_gl or 0)
+    # Totale meer-/minwaarde: gerealiseerd (periode, rekening-bewust) + ongerealiseerd.
+    totale_wv = realized_period + (unreal_gl or 0)
     st.caption(
-        f"📊 **Totale meer-/minwaarde:** {eur(totale_wv)}  —  waarvan gerealiseerd "
-        f"(alle jaren) {eur(sel_real_total)} en ongerealiseerd {eur(unreal_gl)}."
-        + ("  Inclusief winst/verlies uit verkochte posities die intussen netto 0 zijn." if sel_real_total else ""))
+        f"📊 **Totale meer-/minwaarde ({period_lbl}):** {eur(totale_wv)}  —  waarvan gerealiseerd "
+        f"{eur(realized_period)} en ongerealiseerd {eur(unreal_gl)}."
+        + ("  Inclusief winst/verlies uit verkochte posities die intussen netto 0 zijn." if realized_period else ""))
 
     st.divider()
 
@@ -293,7 +324,7 @@ def page_dashboard():
     st.divider()
     st.subheader("📊 Gerealiseerde meer-/minwaarden (historiek)")
     if acct:
-        st.caption(f"Rekening **{acct}** — ook zichtbaar wanneer de huidige positie 0 is "
+        st.caption(f"Rekeningen **{', '.join(acct)}** — ook zichtbaar wanneer de huidige positie 0 is "
                    "(bv. een afgesloten rekening).")
     else:
         st.caption("Over alle rekeningen heen, alle jaren — inclusief winst/verlies uit "
@@ -487,7 +518,7 @@ def page_portfolio():
     st.divider()
     st.subheader("📊 Gerealiseerde meer-/minwaarden (historiek)")
     if acct:
-        st.caption(f"Rekening **{acct}**.")
+        st.caption(f"Rekeningen **{', '.join(acct)}**.")
     else:
         st.caption("Alle rekeningen, alle jaren — zo zie je de volledige historiek van een "
                    "activum, ook als het op de ene rekening verkocht en op een andere heraangekocht is.")
@@ -711,35 +742,37 @@ def page_assets():
             st.info("Geen activa gevonden voor deze filter.")
             return
         st.caption(f"{len(assets)} activum/activa")
+        rows = []
         for a in assets:
-            c1, c2, c3, c4 = st.columns([5, 2, 1, 1])
-            with c1:
-                subtype_lbl = f" ({a['etf_subtype']})" if a["asset_type"] == "etf" else ""
-                st.markdown(f"**{a['ticker']}** — {a.get('name') or '—'}")
-                st.caption(f"{a['asset_type'].upper()}{subtype_lbl} | {a['currency']} | "
-                           f"{a.get('exchange') or '—'}")
-                st.caption(f"ISIN: {a.get('isin') or '—'}")
-                if a.get("snapshot_price") is not None:
-                    st.caption(f"📸 Fotomoment 31/12/2025: {a['snapshot_price']:.4f} {a['currency']}")
-            with c2:
-                lp = db.get_latest_price(a["ticker"])
-                if lp:
-                    st.metric("Laatste koers", f"{lp['price']:.4f} {lp['currency']}",
-                              label_visibility="collapsed")
-                else:
-                    st.caption("Geen koers")
-            with c3:
-                if st.button("✏️", key=f"edit_asset_{a['ticker']}",
-                             help=f"Bewerk {a['ticker']}"):
-                    st.session_state["edit_asset"] = a["ticker"]
-                    st.rerun()
-            with c4:
-                if st.button("🗑️", key=f"del_asset_{a['ticker']}",
-                             help=f"Verwijder {a['ticker']} (inclusief alle transacties)"):
-                    db.delete_asset(a["ticker"])
-                    clear_cache()
-                    st.rerun()
-            st.divider()
+            lp = db.get_latest_price(a["ticker"])
+            sub = a.get("etf_subtype") if a["asset_type"] == "etf" else ""
+            rows.append({
+                "Ticker":   a["ticker"],
+                "Naam":     a.get("name") or "—",
+                "Type":     {"stock": "Aandeel", "etf": "ETF", "bond": "Obligatie"}.get(a["asset_type"], a["asset_type"]),
+                "ETF-type": {"distributing": "uitkerend", "accumulating": "kapitaliserend"}.get(sub, ""),
+                "BE":       "✓" if a.get("belgian_registered") else "✗",
+                "Munt":     a["currency"],
+                "Beurs":    a.get("exchange") or "—",
+                "ISIN":     a.get("isin") or "—",
+                "Fotomoment": round(a["snapshot_price"], 4) if a.get("snapshot_price") is not None else None,
+                "Laatste koers": round(lp["price"], 4) if lp else None,
+            })
+        st.dataframe(pd.DataFrame(rows), width='stretch', hide_index=True)
+
+        st.caption("Selecteer een activum om te bewerken of verwijderen:")
+        a_ids = [a["ticker"] for a in assets]
+        a_names = {a["ticker"]: (a.get("name") or a["ticker"]) for a in assets}
+        b1, b2, b3 = st.columns([4, 1, 1])
+        sel_tk = b1.selectbox("Activum", a_ids, format_func=lambda t: asset_label(t, a_names),
+                              key="asset_action_sel", label_visibility="collapsed")
+        if b2.button("✏️ Bewerk", key="asset_action_edit", width='stretch'):
+            st.session_state["edit_asset"] = sel_tk
+            st.rerun()
+        if b3.button("🗑️ Wis", key="asset_action_del", width='stretch'):
+            db.delete_asset(sel_tk)
+            clear_cache()
+            st.rerun()
 
     with tab_splits:
         st.subheader("🔀 Aandelensplitsingen")
@@ -759,7 +792,7 @@ def page_assets():
                     s_tk = st.selectbox("Activum", s_tickers,
                                         format_func=lambda t: asset_label(t, s_names))
                 with sc2:
-                    s_date = st.date_input("Splitsdatum", value=date.today())
+                    s_date = st.date_input("Splitsdatum", value=date.today(), min_value=date(2000,1,1), max_value=date.today())
                 with sc3:
                     s_from = st.number_input("Van (oude aandelen)", min_value=1, value=1, step=1)
                 with sc4:
@@ -827,7 +860,7 @@ def page_transactions():
         with c1:
             ticker   = st.selectbox("Activum *", asset_tickers, key=kk("ticker"),
                                      format_func=fmt)
-            txn_date = st.date_input("Datum *", value=date.today(), key=kk("date"))
+            txn_date = st.date_input("Datum *", value=date.today(), min_value=date(2000,1,1), max_value=date.today(), key=kk("date"))
             txn_type = st.radio("Type *", ["buy", "sell"],
                                 format_func=lambda x: "🟢 Aankoop" if x == "buy" else "🔴 Verkoop",
                                 horizontal=True, key=kk("type"))
@@ -887,7 +920,8 @@ def page_transactions():
                                     help="Broker-/beurskosten — apart gehouden, niet in de meerwaardeberekening.")
         with ck2:
             costs_currency = st.selectbox("Kostenmunt", cur_opts,
-                                          index=cur_opts.index(asset_cur), key=kk("costs_cur"))
+                                          index=cur_opts.index("EUR") if "EUR" in cur_opts else 0,
+                                          key=kk("costs_cur"))
         costs = costs or 0.0
 
         asset_info = assets_map.get(ticker, {})
@@ -961,7 +995,7 @@ def page_transactions():
                                                 format_func=fmt)
                         e_type = st.selectbox("Type", ["buy", "sell"],
                                               index=0 if et["transaction_type"] == "buy" else 1)
-                        e_date = st.date_input("Datum", value=datetime.strptime(et["date"][:10], "%Y-%m-%d").date())
+                        e_date = st.date_input("Datum", value=datetime.strptime(et["date"][:10], "%Y-%m-%d").date(), min_value=date(2000,1,1), max_value=date.today())
                         e_acct = st.selectbox("Rekening", db.get_accounts(),
                                               index=db.get_accounts().index(et.get("account")) if et.get("account") in db.get_accounts() else 0)
                     with e2:
@@ -1019,46 +1053,52 @@ def page_transactions():
         total_costs = sum(t.get("costs_eur") or 0 for t in txns)
         st.caption(f"{len(txns)} transactie(s) | Totale TOB: {eur(total_tob)} | Kosten: {eur(total_costs)}")
 
+        ordered = list(reversed(txns))
+        rows = []
+        for t in ordered:
+            rows.append({
+                "Datum":    t["date"][:10],
+                "Type":     "🟢 Aankoop" if t["transaction_type"] == "buy" else "🔴 Verkoop",
+                "Activum":  asset_label(t["ticker"], names),
+                "Aantal":   round(t["quantity"], 4),
+                "Prijs":    round(t["price_per_unit"], 4),
+                "Munt":     t["currency"],
+                "Totaal":   round(t["total_amount"], 2),
+                "€ Totaal": round(t.get("total_amount_eur") or t["total_amount"], 2),
+                "Rekening": t.get("account") or db.DEFAULT_ACCOUNT,
+                "TOB €":    round(t.get("tob_tax") or 0, 2),
+                "Kosten €": round(t.get("costs_eur") or 0, 2),
+                "Koersdoel": t.get("price_target") or None,
+                "Notities": t.get("notes") or "",
+            })
+        st.dataframe(pd.DataFrame(rows), width='stretch', hide_index=True)
+
+        # Actiebalk: selecteer een transactie om te bewerken/verwijderen/herschikken
+        st.caption("Selecteer een transactie om te bewerken, verwijderen of naar een andere rekening te verplaatsen:")
+        id_label = {t["id"]: f"#{t['id']} · {t['date'][:10]} · "
+                             f"{'Aankoop' if t['transaction_type']=='buy' else 'Verkoop'} · "
+                             f"{asset_label(t['ticker'], names)} · {t['quantity']:.4f}" for t in ordered}
+        ids = [t["id"] for t in ordered]
         accounts = db.get_accounts()
-        for t in reversed(txns):
-            icon  = "🟢" if t["transaction_type"] == "buy" else "🔴"
-            label = "Aankoop" if t["transaction_type"] == "buy" else "Verkoop"
-            nm = names.get(t["ticker"], "")
-            name_part = f"{nm} — " if nm and nm != t["ticker"] else ""
-            c_info, c_val, c_acct, c_edit, c_del = st.columns([4, 3, 2, 1, 1])
-            with c_info:
-                st.markdown(f"{icon} **{t['ticker']}** — {name_part}{label}")
-                st.caption(f"📅 {t['date']}")
-                tgt = t.get("price_target")
-                if tgt:
-                    st.caption(f"🎯 Koersdoel: {tgt:.2f} {t['currency']}")
-                if t.get("notes"):
-                    st.caption(f"📝 {t['notes']}")
-            with c_val:
-                st.markdown(f"{t['quantity']:.4f} × {t['currency']} {t['price_per_unit']:.4f}")
-                eur_tot = t.get("total_amount_eur")
-                eur_str = f" (€{eur_tot:,.2f})" if eur_tot is not None and t["currency"] != "EUR" else ""
-                st.caption(f"Totaal: {t['currency']} {t['total_amount']:,.2f}{eur_str}")
-                st.caption(f"TOB: {eur(t['tob_tax'])} | Kosten: {eur(t.get('costs_eur') or 0)}")
-            with c_acct:
-                cur_acct = t.get("account") or db.DEFAULT_ACCOUNT
-                idx = accounts.index(cur_acct) if cur_acct in accounts else 0
-                new_acct = st.selectbox("Rekening", accounts, index=idx,
-                                        key=f"acct_{t['id']}", label_visibility="collapsed")
-                if new_acct != cur_acct:
-                    db.update_transaction_account(t["id"], new_acct)
-                    clear_cache()
-                    st.rerun()
-            with c_edit:
-                if st.button("✏️", key=f"edit_t_{t['id']}"):
-                    st.session_state["edit_txn"] = t["id"]
-                    st.rerun()
-            with c_del:
-                if st.button("🗑️", key=f"del_t_{t['id']}"):
-                    db.delete_transaction(t["id"])
-                    clear_cache()
-                    st.rerun()
-            st.divider()
+        a1, a2, a3, a4 = st.columns([4, 2, 1, 1])
+        sel_id = a1.selectbox("Transactie", ids, format_func=lambda i: id_label[i],
+                              key="txn_action_sel", label_visibility="collapsed")
+        sel_t = next(t for t in ordered if t["id"] == sel_id)
+        cur_acct = sel_t.get("account") or db.DEFAULT_ACCOUNT
+        new_acct = a2.selectbox("Rekening", accounts,
+                                index=accounts.index(cur_acct) if cur_acct in accounts else 0,
+                                key=f"txn_action_acct_{sel_id}", label_visibility="collapsed")
+        if new_acct != cur_acct:
+            db.update_transaction_account(sel_id, new_acct)
+            clear_cache()
+            st.rerun()
+        if a3.button("✏️ Bewerk", key="txn_action_edit", width='stretch'):
+            st.session_state["edit_txn"] = sel_id
+            st.rerun()
+        if a4.button("🗑️ Wis", key="txn_action_del", width='stretch'):
+            db.delete_transaction(sel_id)
+            clear_cache()
+            st.rerun()
 
     with tab_costs:
         st.subheader("🏦 Algemene rekeningkosten")
@@ -1068,7 +1108,7 @@ def page_transactions():
             a1, a2, a3 = st.columns(3)
             with a1:
                 ac_acct = st.selectbox("Rekening *", db.get_accounts())
-                ac_date = st.date_input("Datum *", value=date.today())
+                ac_date = st.date_input("Datum *", value=date.today(), min_value=date(2000,1,1), max_value=date.today())
             with a2:
                 ac_amount = st.number_input("Bedrag *", min_value=0.0, step=0.01, format="%.2f")
                 ac_cur    = st.selectbox("Munt", CUR)
@@ -1130,7 +1170,7 @@ def page_dividends():
             cc1, cc2, cc3 = st.columns(3)
             d_ticker  = cc1.selectbox("Activum *", tickers, key=dk("tkr"),
                                       format_func=lambda t: asset_label(t, div_names))
-            d_date    = cc2.date_input("Datum *", value=date.today(), key=dk("date"))
+            d_date    = cc2.date_input("Datum *", value=date.today(), min_value=date(2000,1,1), max_value=date.today(), key=dk("date"))
             d_account = cc3.selectbox("Rekening *", db.get_accounts(), key=dk("acct"),
                                       help="De rekening waarop dit dividend is uitgekeerd. "
                                            "Hetzelfde dividend op een andere rekening voer je als een aparte lijn in.")
@@ -1238,6 +1278,90 @@ def page_dividends():
                         st.rerun()
 
     with tab_view:
+        # ── Bewerkformulier (bij klik op ✏️) ──────────────────────────────────
+        edit_did = st.session_state.get("edit_div")
+        if edit_did:
+            components.html(
+                """<script>const d=window.parent.document;const el=d.querySelector('section.main')
+                ||d.querySelector('[data-testid="stMain"]')||d.scrollingElement;
+                if(el)el.scrollTo({top:0,behavior:'smooth'});</script>""", height=0)
+            ed = next((x for x in db.get_dividends() if x["id"] == edit_did), None)
+            if ed:
+                st.markdown(f"### ✏️ Dividend #{edit_did} ({ed['ticker']}) bewerken")
+                ecur = ed.get("currency") or "EUR"
+                ECUR = ["EUR", "USD", "GBP", "CHF"]
+                eopts = ECUR if ecur in ECUR else ECUR + [ecur]
+                # Standaardwaarden: gebruik de keten indien aanwezig, anders de eenvoudige velden
+                dA = ed.get("gross_before_wht")
+                dB = ed.get("foreign_wht_amt")
+                dC = ed.get("gross_after_wht")
+                dD = ed.get("net_received")
+                if dA is None and dB is None and dC is None and dD is None:
+                    dA = ed.get("gross_amount")
+                    dD = (ed.get("gross_amount") or 0) - (ed.get("withholding_tax") or 0)
+                with st.form("edit_div_form"):
+                    g1, g2, g3 = st.columns(3)
+                    e_date = g1.date_input("Datum", value=datetime.strptime(ed["date"][:10], "%Y-%m-%d").date(),
+                                           min_value=date(2000, 1, 1), max_value=date.today())
+                    e_acct = g2.selectbox("Rekening", db.get_accounts(),
+                                          index=db.get_accounts().index(ed.get("account") or db.DEFAULT_ACCOUNT)
+                                          if (ed.get("account") or db.DEFAULT_ACCOUNT) in db.get_accounts() else 0)
+                    def _ecur(col, key, stored):
+                        cc = stored or ecur
+                        oo = eopts if cc in eopts else eopts + [cc]
+                        return col.selectbox("Munt", oo, index=oo.index(cc), key=key, label_visibility="collapsed")
+                    e1a, e1b = st.columns([3, 1])
+                    eA = e1a.number_input("① Bruto vóór buitenlandse bronbelasting", min_value=0.0,
+                                          step=0.01, format="%.4f", value=dA, key="ediv_A")
+                    eAc = _ecur(e1b, "ediv_Ac", ed.get("gross_before_wht_cur"))
+                    e2a, e2b = st.columns([3, 1])
+                    eB = e2a.number_input("② Buitenlandse bronbelasting", min_value=0.0,
+                                          step=0.01, format="%.4f", value=dB, key="ediv_B")
+                    eBc = _ecur(e2b, "ediv_Bc", ed.get("foreign_wht_cur"))
+                    e3a, e3b = st.columns([3, 1])
+                    eC = e3a.number_input("③ Bruto na bronbelasting / vóór Belgische RV", min_value=0.0,
+                                          step=0.01, format="%.4f", value=dC, key="ediv_C")
+                    eCc = _ecur(e3b, "ediv_Cc", ed.get("gross_after_wht_cur"))
+                    e4a, e4b = st.columns([3, 1])
+                    eD = e4a.number_input("④ Netto na alle voorheffingen", min_value=0.0,
+                                          step=0.01, format="%.4f", value=dD, key="ediv_D")
+                    eDc = _ecur(e4b, "ediv_Dc", ed.get("net_received_cur"))
+                    e_notes = st.text_area("Notities", value=ed.get("notes") or "", height=60)
+                    sd1, sd2 = st.columns(2)
+                    if sd1.form_submit_button("💾 Opslaan", type="primary"):
+                        res = tax_mod.resolve_dividend_chain(eA, eB, eC, eD)
+                        rA, rB, rC, rD, rRV = res["a"], res["b"], res["c"], res["d"], res["rv"]
+                        def _te(v, cur): return None if v is None else compute_eur(v, cur, e_date)[1]
+                        a_eur, c_eur, d_eur = _te(rA, eAc), _te(rC, eCc), _te(rD, eDc)
+                        gross_eur = a_eur if a_eur is not None else (c_eur if c_eur is not None else d_eur)
+                        net_eur   = d_eur if d_eur is not None else c_eur
+                        if gross_eur is None or net_eur is None:
+                            st.error("Geef minstens een bruto- en nettowaarde in.")
+                        else:
+                            wh_eur = max(0.0, gross_eur - net_eur)
+                            prim_v, prim_cur = ((rA, eAc) if rA is not None else
+                                                (rC, eCc) if rC is not None else (rD, eDc))
+                            fx_prim = compute_eur(prim_v, prim_cur, e_date)[0] or 1.0
+                            db.update_dividend(
+                                edit_did, date=str(e_date), account=e_acct, notes=e_notes or None,
+                                currency=prim_cur, gross_amount=prim_v, withholding_tax=round(wh_eur / fx_prim, 2),
+                                fx_rate=fx_prim, gross_eur=gross_eur, withholding_eur=wh_eur, net_eur=net_eur,
+                                foreign_wht_withheld=1 if (rB and rB > 0) else 0,
+                                belgian_rv_withheld=1 if (rRV and rRV > 0) else 0,
+                                gross_before_wht=rA, gross_before_wht_cur=eAc if rA is not None else None,
+                                foreign_wht_amt=rB, foreign_wht_cur=eBc if rB is not None else None,
+                                gross_after_wht=rC, gross_after_wht_cur=eCc if rC is not None else None,
+                                belgian_rv_amt=rRV, net_received=rD,
+                                net_received_cur=eDc if rD is not None else None)
+                            clear_cache()
+                            st.session_state.pop("edit_div", None)
+                            st.success("✅ Dividend bijgewerkt!")
+                            st.rerun()
+                    if sd2.form_submit_button("✖️ Annuleren"):
+                        st.session_state.pop("edit_div", None)
+                        st.rerun()
+                st.divider()
+
         fcol1, fcol2 = st.columns(2)
         f_year = fcol1.selectbox("Jaar:", ["Alle"] + [str(y) for y in range(datetime.now().year, 2019, -1)],
                                  key="div_year")
@@ -1274,50 +1398,49 @@ def page_dividends():
                            "  ·  ".join(f"{a}: {eur(v)}" for a, v in sorted(per_acct.items())))
         st.divider()
 
-        div_accts = db.get_accounts()
+        names_map = asset_name_map()
+        rows = []
         for d in divs:
-            c_info, c_val, c_acct, c_del = st.columns([4, 3, 2, 1])
-            with c_info:
-                st.markdown(f"🎁 **{d['ticker']}**")
-                st.caption(f"📅 {d['date']}")
-                if d.get("notes"):
-                    st.caption(f"📝 {d['notes']}")
-            with c_val:
-                if d.get("net_received") is not None or d.get("gross_before_wht") is not None:
-                    # Gedetailleerd ingevoerd: toon de keten
-                    def _ff(v, cur):
-                        return "—" if v is None else f"{cur or d['currency']} {v:,.2f}"
-                    if d.get("gross_before_wht") is not None:
-                        st.markdown(f"① Bruto: **{_ff(d['gross_before_wht'], d.get('gross_before_wht_cur'))}**")
-                    if d.get("foreign_wht_amt") is not None:
-                        st.caption(f"② Bronbelasting: {_ff(d['foreign_wht_amt'], d.get('foreign_wht_cur'))}")
-                    if d.get("gross_after_wht") is not None:
-                        st.caption(f"③ Na bronbelasting: {_ff(d['gross_after_wht'], d.get('gross_after_wht_cur'))}")
-                    if d.get("belgian_rv_amt") is not None:
-                        st.caption(f"🇧🇪 RV: {_ff(d['belgian_rv_amt'], d.get('gross_after_wht_cur'))}")
-                    if d.get("net_received") is not None:
-                        st.markdown(f"④ Netto: **{_ff(d['net_received'], d.get('net_received_cur'))}**")
-                    st.caption(f"≈ netto {eur(_neur(d))}")
-                else:
-                    net = d["gross_amount"] - d["withholding_tax"]
-                    st.markdown(f"Bruto: **{d['currency']} {d['gross_amount']:,.2f}**")
-                    st.caption(f"Voorheffing: {d['currency']} {d['withholding_tax']:,.2f} | "
-                               f"Netto: {d['currency']} {net:,.2f}  (≈ {eur(_neur(d))})")
-            with c_acct:
-                cur_acct = d.get("account") or db.DEFAULT_ACCOUNT
-                idx = div_accts.index(cur_acct) if cur_acct in div_accts else 0
-                new_acct = st.selectbox("Rekening", div_accts, index=idx,
-                                        key=f"div_acct_{d['id']}", label_visibility="collapsed")
-                if new_acct != cur_acct:
-                    db.set_dividend_account(d["id"], new_acct)
-                    clear_cache()
-                    st.rerun()
-            with c_del:
-                if st.button("🗑️", key=f"del_d_{d['id']}"):
-                    db.delete_dividend(d["id"])
-                    clear_cache()
-                    st.rerun()
-            st.divider()
+            rows.append({
+                "Datum":    d["date"][:10],
+                "Activum":  asset_label(d["ticker"], names_map),
+                "Rekening": d.get("account") or db.DEFAULT_ACCOUNT,
+                "① Bruto":  d.get("gross_before_wht"),
+                "② Bronbel.": d.get("foreign_wht_amt"),
+                "③ Na bronbel.": d.get("gross_after_wht"),
+                "🇧🇪 RV":   d.get("belgian_rv_amt"),
+                "④ Netto":  d.get("net_received") if d.get("net_received") is not None
+                            else round(d["gross_amount"] - d["withholding_tax"], 2),
+                "Munt":     d.get("net_received_cur") or d.get("gross_before_wht_cur") or d["currency"],
+                "Netto €":  round(_neur(d), 2),
+                "Notities": d.get("notes") or "",
+            })
+        st.dataframe(pd.DataFrame(rows), width='stretch', hide_index=True)
+
+        st.caption("Selecteer een dividend om te bewerken, verwijderen of naar een andere rekening te verplaatsen:")
+        d_label = {d["id"]: f"#{d['id']} · {d['date'][:10]} · {asset_label(d['ticker'], names_map)} · "
+                           f"netto {eur(_neur(d))}" for d in divs}
+        d_ids = [d["id"] for d in divs]
+        div_accts = db.get_accounts()
+        da1, da2, da3, da4 = st.columns([4, 2, 1, 1])
+        sel_did = da1.selectbox("Dividend", d_ids, format_func=lambda i: d_label[i],
+                                key="div_action_sel", label_visibility="collapsed")
+        sel_d = next(d for d in divs if d["id"] == sel_did)
+        cur_acct = sel_d.get("account") or db.DEFAULT_ACCOUNT
+        new_acct = da2.selectbox("Rekening", div_accts,
+                                 index=div_accts.index(cur_acct) if cur_acct in div_accts else 0,
+                                 key=f"div_action_acct_{sel_did}", label_visibility="collapsed")
+        if new_acct != cur_acct:
+            db.set_dividend_account(sel_did, new_acct)
+            clear_cache()
+            st.rerun()
+        if da3.button("✏️ Bewerk", key="div_action_edit", width='stretch'):
+            st.session_state["edit_div"] = sel_did
+            st.rerun()
+        if da4.button("🗑️ Wis", key="div_action_del", width='stretch'):
+            db.delete_dividend(sel_did)
+            clear_cache()
+            st.rerun()
 
 
 # ── PAGINA: Belgische belasting ────────────────────────────────────────────────
@@ -1926,6 +2049,14 @@ with st.sidebar:
             icon = "🟢" if gl >= 0 else "🔴"
             st.metric("💼 Waarde", eur(total_v))
             st.caption(f"{icon} {eur(gl)} ({pct(gl/total_c*100 if total_c else 0)})")
+    except Exception:
+        pass
+
+    try:
+        _ai = db.get_ai_usage_summary()
+        st.metric("🤖 AI-kosten totaal", f"${_ai['total_cost_usd']:,.2f}",
+                  help=f"Deze maand: ${_ai['month_cost_usd']:,.2f} · {_ai['total_calls']} oproepen. "
+                       "Details op de AI Advisor-pagina.")
     except Exception:
         pass
 

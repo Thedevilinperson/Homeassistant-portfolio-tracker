@@ -761,6 +761,32 @@ def set_dividend_account(div_id: int, account: str):
     conn.close()
 
 
+_DIV_EDITABLE = {
+    "date", "account", "notes", "currency", "gross_amount", "withholding_tax",
+    "fx_rate", "gross_eur", "withholding_eur", "net_eur",
+    "foreign_wht_withheld", "belgian_rv_withheld",
+    "gross_before_wht", "gross_before_wht_cur", "foreign_wht_amt", "foreign_wht_cur",
+    "gross_after_wht", "gross_after_wht_cur", "belgian_rv_amt",
+    "net_received", "net_received_cur",
+}
+
+
+def update_dividend(div_id: int, **fields):
+    """Werk een dividend bij. Enkel toegelaten kolommen (whitelist) worden gewijzigd."""
+    sets, vals = [], []
+    for k, v in fields.items():
+        if k in _DIV_EDITABLE:
+            sets.append(f"{k}=?")
+            vals.append(v)
+    if not sets:
+        return
+    vals.append(div_id)
+    conn = get_connection()
+    conn.execute(f"UPDATE dividends SET {','.join(sets)} WHERE id=?", vals)
+    conn.commit()
+    conn.close()
+
+
 def delete_dividend(div_id: int):
     conn = get_connection()
     conn.execute("DELETE FROM dividends WHERE id=?", (div_id,))

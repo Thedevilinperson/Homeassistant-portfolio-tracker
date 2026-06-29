@@ -415,16 +415,25 @@ def available_exemption(gains_by_year: dict[int, float], target_year: int,
 
 def calculate_tax_overview(year: int | None = None,
                             current_prices: dict | None = None,
-                            account: str | None = None) -> dict:
+                            account=None) -> dict:
     """
     Belastingoverzicht voor een boekjaar.
 
     De belasting (gerealiseerde W/V, vrijstelling) is ALTIJD globaal over alle
     rekeningen — de €-vrijstelling geldt per belastingplichtige. De 'account'-
     filter beïnvloedt alleen de getoonde posities/waarde (portefeuillekant).
+    'account' mag None (alle), een string (één rekening) of een lijst/tuple zijn.
     """
     if year is None:
         year = datetime.now().year
+
+    # Normaliseer rekeningfilter naar een set (of None = alle)
+    if account is None:
+        accts = None
+    elif isinstance(account, str):
+        accts = {account}
+    else:
+        accts = set(account) or None
 
     s         = db.get_all_settings()
     tax_rate  = float(s.get("capital_gains_tax_rate", "0.10"))
@@ -457,7 +466,7 @@ def calculate_tax_overview(year: int | None = None,
 
     # Gerealiseerde W/V voor weergave: alle jaren, rekening-bewust.
     # (De fiscale berekening hierboven blijft globaal + per boekjaar.)
-    sel_realized      = [g for g in all_gains if (account is None or g["account"] == account)]
+    sel_realized      = [g for g in all_gains if (accts is None or g["account"] in accts)]
     sel_real_total    = sum(g["gain_loss"] for g in sel_realized)
     sel_real_year     = sum(g["gain_loss"] for g in sel_realized if g["year"] == year)
 
@@ -470,7 +479,7 @@ def calculate_tax_overview(year: int | None = None,
     net_div   = gross_div - wh_tax
 
     # Posities (eventueel gefilterd op rekening)
-    display_txns = db.get_transactions(account=account) if account else all_txns
+    display_txns = [t for t in all_txns if _acct(t) in accts] if accts else all_txns
     positions, _ = build_fifo_positions(display_txns)
 
     if current_prices is None:
@@ -491,7 +500,8 @@ def calculate_tax_overview(year: int | None = None,
 
     # Algemene rekeningkosten (beheerskosten e.d. — niet aandeel-gebonden)
     acct_costs_total = db.total_account_costs_eur()
-    acct_costs_sel   = db.total_account_costs_eur(account=account) if account else acct_costs_total
+    acct_costs_sel   = (sum(db.total_account_costs_eur(account=a) for a in accts)
+                        if accts else acct_costs_total)
     acct_costs_year  = db.total_account_costs_eur(year=year)
 
     return {
