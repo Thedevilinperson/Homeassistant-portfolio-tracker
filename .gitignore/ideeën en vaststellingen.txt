@@ -1,38 +1,30 @@
+
+
 Nieuw
 
-
-UI - lopend (use limit)
-1) voeg de totale AI-kost toe in de linker zijbalk van de app.
-2) kan je een multiselect maken voor het selecteren van de rekeningen op de pagina 'dashboard' en pagina 'portefeuille'
-3) Vorm de overzichten van de activa, transacties en dividenden om tot een meer overzichtelijk tabel gestoken met kolommen en rijen in plaats van een lijn met diverse datastukken. Beperk de lege ruimte tussen de lijnen
-4) Maak het mogelijk om in het dashboard te switchen tussen YTD in de overzichtslijn en all-time.
-5) Maak ingevoerde dividenden aanpasbaar
-6) Ouder dan 28/6/2016 kan ik geen transactie aanmaken: pas dit aan
-7) de munteenheid van transactiekosten staat nu steeds in USD. Zet dit standaard in EUR
-
-
-
-Procesflow
-14) AI advies over belastingsoptimalisatie moet maar 1 keer per maand uitgevoerd worden.
-15) Maak een scheduler die maandelijks de prijzen van de AI-modellen opzoekt en indien nodig de prijzen aanpast.
-5) als ik de details van Europese aandelen via yahoo opvraag (met .BR of .DE) erachter komt de ISIN vaak niet mee. Kan je dit oplossen?
-19) TOB is maar van toepassing sinds een bepaalde datum: pas de applicatie zo aan.
+Procesflow - lopend
+1) AI advies over belastingsoptimalisatie moet maar 1 keer per maand uitgevoerd worden.
+2) Maak een scheduler die maandelijks de prijzen van de AI-modellen opzoekt en indien nodig de prijzen aanpast.
+3) als ik de details van Europese aandelen via yahoo opvraag (met .BR of .DE) erachter komt de ISIN vaak niet mee. Kan je dit oplossen?
+4) TOB is maar van toepassing sinds een bepaalde datum: pas de applicatie zo aan.
+5) volgens mij is de TOB bepaling bij invoeren van historische aankopen in munteenheden anders dan Euro niet 100% correct. een voorbeeld: ik kocht 10 aandelen van anavex life science en ik betaalde 0,34 euro TOB. De app geeft echter 0,37 euro op. Heeft dit te maken met FX-rates of iets anders?
+6) kan je er voor zorgen dat het AI-advies over bijkopen, houden, verkopen ook in de tabel met historiek wordt weergegeven end at daar ook de visuele indicator (rode bol/groene bol) zichtbaar is voor winst/verlies situatie?
+7) schakel over op op klikbare rijselectie in de tabellen zelf
 
 Structurelere aanpassingen
-21) mogelijkheid om transacties, dividenden en assetlijsten te downloaden
 22) mogelijkheid om transacties, kosten en dividenden in bulk op te laden door een gestructureerde Excel aan te bieden
 11) Het dashboard houdt bij de bepaling van de winst-verliesrekening met de kosten en de dividenden. Voor de dividenden houdt de app ook rekening met belastingssituatie, met name de vrijstelling van 833 per persoon eventueel in combinatie met de FBB voor Franse aandelen. Ook in het overzicht wordt er per jaar rekening gehouden met de vrijstellingen
 7) Hoe moet ik omgaan met winsten die ik uit het beleggingssysteem haal? Kan er gewerkt worden met een totale cash positie die cash in vergelijkt met beschikbare cash voor aankoop van aandelen en de cash out?
 8) Bouw een simulatiemodule voor de meerwaardebelasting op basis van de bestaande portefeuille: deze maakt het mogelijk om op voorhand in te schatten hoe de meerwaardebelasting zal uitdraaien. Het moet mogelijk zijn om meerdere aandelen posities geheel of gedeeltelijk te verkopen en terug aan te kopen.
 
-Verbetering user experience
-2) ik zie nu wel de historische gerealiseerde min- of meerwaarden, maar als ik op de pagina 'dashboard' of 'portefeuille' kijk naar een welbepaald aandeel zie ik nog steeds enkel de waarde die gerealiseerd is op 1 rekening. Ik geef een concreet voorbeeld: ik kocht in 2023 5 aandelen G2XJ (een goud ETF aan). Die verkocht ik met winst in 2026 op dezelfde rekening. Daarna kocht ik diezelfde 5 aandelen aan op een andere rekening. Ik wil dit totaal resultaat zien staan als ik een combinatie van rekeningen selecteer waarop deze verschillende activa op voor komen. Een andere voorbeeld van winstweergave: ik koop op een bepaald moment Nvidia (toen 3 aandelen) en verkoop die iets later) met 211 winst. Later op het jaar koop ik echter terug Nvidia aan voor een hogere prijs dan toen ik verkocht heb. De 211 euro meerwaarde is reëel, maar moet ook opgeteld worden bij de lopende meerwaarde op de Nvidia aandelen terwijl die nu nog niet verkocht zijn. Geef dus op het dashboard weer wat de totale ongerealiseerde winst/verlies is over de rekeningen heen, geef ook de gerealiseerde winst/verlies weer en geef dan uiteindelijk ook de totale winst/verlies (gerealiseerd+ongerealisieerd)
 
 Bugs
-9) volgens mij is de TOB bepaling bij invoeren van historische aankopen in munteenheden anders dan Euro niet 100% correct. een voorbeeld: ik kocht 10 aandelen van anavex life science en ik betaalde 0,34 euro TOB. De app geeft echter 0,37 euro op. Heeft dit te maken met FX-rates of iets anders?
+
 
 Aanpak/designvragen
 4) op een bepaalde rekening ontvang ik warrants als bonus van het werk. Deze moeten meegerekend worden in de meerwaardebelasting, maar hoe ga ik best om met de registratie van deze warrants? Ik koop deze niet, maar ik krijg die als loon en daarop betaal ik op de basiswaarde bedrijfsvoorheffing. Hoe geef ik dit best in als transactie?
 17) hoe moet ik omgaan met aandelen die ik krijg als performance shares? Hoe voer ik die in als transactie? Kan je een apart kostentype maken voor de personenbelasting die ik daar op moest betalen. In beginsel betaalde ik namelijk bv. 53,5% van de waarde van de aandelen op dat moment en zou dat in feit moeten weerspiegeld worden in de totale winst. In het dashboard moet er een toggle zijn om de invloed van de personenbelasting in of uit te schakelen
+5) hoe voorkom ik dat mijn financiële data blootgesteld wordt via AI?
+
 
 nu ingevoerde dividenden kloppen niet

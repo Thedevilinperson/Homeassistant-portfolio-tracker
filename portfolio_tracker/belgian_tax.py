@@ -69,18 +69,29 @@ def resolve_dividend_chain(a, b, c, d):
 
 # ── TOB berekening ────────────────────────────────────────────────────────────
 
-def calculate_tob(asset_type: str, etf_subtype: str, total_amount: float,
-                  belgian_registered: bool = True) -> float:
-    """Belgische beurstaks (TOB).
+def calculate_tob(asset_type: str, etf_subtype: str, total_amount_eur: float,
+                  belgian_registered: bool = True, txn_date=None) -> float:
+    """Belgische beurstaks (TOB), berekend op de waarde in EUR.
+
+    BELANGRIJK: 'total_amount_eur' moet de transactiewaarde in EUR zijn (niet de
+    native valuta). De TOB is een Belgische heffing op de EUR-tegenwaarde; rekenen
+    op het native bedrag geeft een (FX-)fout.
+
+    txn_date: indien gegeven en vóór de geconfigureerde ingangsdatum
+    ('tob_start_date', default 1/1/2017 — sinds wanneer Belgische beleggers via een
+    buitenlandse tussenpersoon TOB-plichtig zijn), is er geen TOB (0).
 
     Tarieven (met plafond per verrichting):
       0,12% (max €1.300): obligaties; in België aangeboden UITKERENDE ETF's/fondsen
       1,32% (max €4.000): in België aangeboden KAPITALISERENDE ETF's/fondsen
       0,35% (max €1.600): aandelen; alle overige effecten, waaronder ETF's/fondsen
-                          die NIET in België zijn aangeboden/geregistreerd (bv. een
-                          buitenlandse tracker of ETC zoals een goud-ETC)
+                          die NIET in België zijn aangeboden/geregistreerd
     """
     s = db.get_all_settings()
+    if txn_date is not None:
+        start = s.get("tob_start_date", "2017-01-01")
+        if str(txn_date)[:10] < str(start)[:10]:
+            return 0.0
     rate012 = float(s.get("tob_rate_etf_distributing", "0.0012"))
     cap012  = float(s.get("tob_max_etf_distributing",  "1300"))
     rate132 = float(s.get("tob_rate_etf_accumulating", "0.0132"))
@@ -100,7 +111,7 @@ def calculate_tob(asset_type: str, etf_subtype: str, total_amount: float,
     else:  # stock / overige
         rate, cap = rate035, cap035
 
-    return round(min(total_amount * rate, cap), 2)
+    return round(min(total_amount_eur * rate, cap), 2)
 
 
 # ── Helpers ───────────────────────────────────────────────────────────────────

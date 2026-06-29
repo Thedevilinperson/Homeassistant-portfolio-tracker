@@ -33,6 +33,44 @@ def _store(ticker: str, price: float, currency: str):
 
 # ── Publieke API ─────────────────────────────────────────────────────────────
 
+def _lookup_isin(tkr, info: dict, ticker: str) -> str:
+    """Best-effort ISIN-opzoeking. Yahoo geeft de ISIN voor Europese listings (.BR/.DE)
+    vaak niet mee via het gewone info-object; we proberen daarom meerdere bronnen."""
+    def _ok(v):
+        return isinstance(v, str) and len(v) >= 10 and v not in ("-", "0", "None", "")
+
+    # 1) Rechtstreeks in het info-object
+    for key in ("isin", "isinCode"):
+        v = info.get(key)
+        if _ok(v):
+            return v
+    # 2) yfinance .isin (interne Yahoo-zoekopdracht)
+    try:
+        raw = tkr.isin
+        if _ok(raw):
+            return raw
+    except Exception:
+        pass
+    # 3) Yahoo search-endpoint — bevat voor heel wat Europese effecten wél de ISIN
+    try:
+        import requests
+        resp = requests.get(
+            "https://query2.finance.yahoo.com/v1/finance/search",
+            params={"q": ticker, "quotesCount": 6, "newsCount": 0, "enableFuzzyQuery": False},
+            headers={"User-Agent": "Mozilla/5.0"}, timeout=6)
+        if resp.ok:
+            quotes = resp.json().get("quotes", [])
+            for q in quotes:  # eerst exacte symboolmatch
+                if q.get("symbol", "").upper() == ticker.upper() and _ok(q.get("isin", "")):
+                    return q["isin"]
+            for q in quotes:  # anders de eerste met een geldige ISIN
+                if _ok(q.get("isin", "")):
+                    return q["isin"]
+    except Exception:
+        pass
+    return ""
+
+
 def get_stock_info(ticker: str) -> dict:
     try:
         tkr  = yf.Ticker(ticker)
@@ -48,20 +86,13 @@ def get_stock_info(ticker: str) -> dict:
         if not found:
             return {"found": False, "name": ticker, "currency": "EUR",
                     "exchange": "", "type": "stock", "isin": ""}
-        isin = ""
-        try:
-            raw = tkr.isin
-            if raw and raw not in ("-", "0", "None"):
-                isin = raw
-        except Exception:
-            pass
         return {
             "found":    True,
             "name":     info.get("longName") or info.get("shortName") or ticker,
             "currency": info.get("currency", "EUR"),
             "exchange": info.get("exchange", ""),
             "type":     "etf" if qt == "etf" else "stock",
-            "isin":     isin,
+            "isin":     _lookup_isin(tkr, info, ticker),
         }
     except Exception as e:
         logger.warning(f"get_stock_info({ticker}): {e}")

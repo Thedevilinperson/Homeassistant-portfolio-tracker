@@ -2,6 +2,30 @@
 
 Alle noemenswaardige wijzigingen aan de Portfolio Tracker add-on.
 
+## 0.14.0
+- AI-belastingadvies nu maandelijks (i.p.v. dagelijks) — de scheduler genereert het
+advies op de 1e van de maand.
+- Maandelijkse AI-prijsverversing: een scheduler zoekt maandelijks de actuele prijzen
+van de AI-modellen op en past ze indien nodig aan. De modelprijzen staan nu in de
+database (instelbaar), met een knop "💲 Ververs nu" en een prijzentabel in het
+- AI-kostenpaneel. Ongeldige/onwaarschijnlijke prijzen worden genegeerd.
+- ISIN-fallback voor Europese listings: bij het ophalen van info (.BR/.DE e.d.) worden
+nu meerdere bronnen geprobeerd om de ISIN te vinden. Lukt het niet, dan verschijnt een
+duidelijke melding om de ISIN handmatig in te vullen (Yahoo geeft die niet altijd mee).
+- TOB-ingangsdatum: transacties vóór een instelbare datum krijgen geen TOB. Standaard
+1/1/2017 — sinds dan zijn Belgische beleggers via een buitenlandse tussenpersoon
+TOB-plichtig. Aanpasbaar via ⚙️ Instellingen → TOB.
+- TOB-FX-correctie: de TOB wordt nu berekend op de EUR-tegenwaarde van de transactie
+in plaats van op het bedrag in vreemde munt. Dat lost de afwijking op bij historische
+aankopen in USD e.d. (bv. Anavex: €0,34 i.p.v. €0,37). Let op: bestaande, eerder
+ingevoerde transacties behouden hun oude TOB-waarde — corrigeer ze eventueel via bewerken.
+- W/V-indicator + AI-advies in de historiektabellen: de tabel "Totaal resultaat per
+activum" en de gerealiseerde-historiektabel tonen nu een 🟢/🔴-bol voor winst/verlies,
+en de resultaattabel toont ook het AI-advies (kopen/houden/verkopen).
+- Klikbare rijselectie: in de overzichten van activa, transacties en dividenden klik je
+nu rechtstreeks op een rij in de tabel om ze te bewerken, verwijderen of te verplaatsen
+(de aparte keuzelijst is vervangen).
+
 ## 0.13.1
 Fix: het dashboard gaf een fout bij een netto gerealiseerd verlies (de
 vrijstellings-indicator kreeg een negatieve waarde). De voortgangsbalk wordt nu

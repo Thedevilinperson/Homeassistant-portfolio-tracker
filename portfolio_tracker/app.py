@@ -153,6 +153,7 @@ def render_realized_history(realized_list, names=None, empty_msg="Nog geen gerea
     rows = []
     for g in sorted(realized_list, key=lambda x: x["date"], reverse=True):
         rows.append({
+            "W/V":           sign_icon(g["gain_loss"]),
             "Datum":         g["date"][:10],
             "Activum":       asset_label(g["ticker"], names),
             "Rekening":      g.get("account") or "—",
@@ -181,6 +182,26 @@ def account_filter_widget(key: str):
     sel = st.multiselect("Rekeningen", opts, default=[], key=key,
                          placeholder="Alle rekeningen")
     return tuple(sel) if sel else None
+
+
+def df_row_select(df, key: str):
+    """Toon een dataframe met klikbare enkelvoudige rijselectie en geef de index van de
+    geselecteerde rij terug (positie in df), of None. Defensief tegen oudere Streamlit-
+    versies en testomgevingen die geen selectie-object teruggeven."""
+    ev = st.dataframe(df, width="stretch", hide_index=True, key=key,
+                      on_select="rerun", selection_mode="single-row")
+    rows = None
+    try:
+        rows = ev.selection.rows
+    except Exception:
+        try:
+            rows = ev["selection"]["rows"]
+        except Exception:
+            rows = None
+    if isinstance(rows, (list, tuple)) and rows and isinstance(rows[0], int):
+        return rows[0]
+    return None
+
 
 
 def backfill_eur(force: bool = False) -> int:
@@ -493,19 +514,23 @@ def page_portfolio():
         rrows = []
         for t in sorted(result.keys(), key=lambda x: result[x]["total"], reverse=True):
             r = result[t]
+            rec = synth.get(t, {}).get("consensus")
             rrows.append({
+                "W/V":               sign_icon(r["total"]),
                 "Activum":           asset_label(t, nmap),
                 "Aantal (nu)":       f"{r['quantity']:.4f}" if r["quantity"] else "0",
                 "Huidige waarde":    eur(r["current_value"]),
                 "Ongerealiseerde W/V": eur(r["unrealized"]),
                 "Gerealiseerde W/V":   eur(r["realized"]),
                 "Totale W/V":        eur(r["total"]),
+                "AI-advies":         badge.get(rec, "—"),
             })
         st.dataframe(pd.DataFrame(rrows), width='stretch', hide_index=True)
         tot_unreal = sum(r["unrealized"] for r in result.values())
         tot_real   = sum(r["realized"] for r in result.values())
         st.caption(f"**Totaal — ongerealiseerd {eur(tot_unreal)} + gerealiseerd {eur(tot_real)} "
-                   f"= {eur(tot_unreal + tot_real)}**")
+                   f"= {eur(tot_unreal + tot_real)}**  ·  🟢 = winst, 🔴 = verlies. "
+                   "AI-advies = consensus uit de laatste adviesrondes.")
     else:
         st.info("Nog geen posities of gerealiseerde historiek voor deze selectie.")
 
@@ -630,7 +655,15 @@ def page_assets():
                         st.session_state[k("exch")] = info.get("exchange", "") or ""
                         st.session_state[k("isin")] = info.get("isin", "") or ""
                         st.session_state[k("fetched")] = True
+                        if not (info.get("isin") or "").strip():
+                            st.session_state[k("isin_missing")] = True
+                        else:
+                            st.session_state.pop(k("isin_missing"), None)
                         st.rerun()
+            if st.session_state.get(k("isin_missing")):
+                st.warning("ℹ️ Yahoo gaf voor deze ticker geen ISIN mee (komt vaak voor bij "
+                           ".BR/.DE-listings). Vul de ISIN hieronder handmatig in — je vindt ze op "
+                           "de website van de uitgever, op justETF, of op de beurspagina.")
             name = st.text_input("Naam *", key=k("name"),
                                  placeholder="bv. Vanguard FTSE All-World")
             cur_val  = st.session_state.get(k("cur"), "EUR")
@@ -827,21 +860,22 @@ def page_assets():
                 "Fotomoment": round(a["snapshot_price"], 4) if a.get("snapshot_price") is not None else None,
                 "Laatste koers": round(lp["price"], 4) if lp else None,
             })
-        st.dataframe(pd.DataFrame(rows), width='stretch', hide_index=True)
-
-        st.caption("Selecteer een activum om te bewerken of verwijderen:")
-        a_ids = [a["ticker"] for a in assets]
         a_names = {a["ticker"]: (a.get("name") or a["ticker"]) for a in assets}
-        b1, b2, b3 = st.columns([4, 1, 1])
-        sel_tk = b1.selectbox("Activum", a_ids, format_func=lambda t: asset_label(t, a_names),
-                              key="asset_action_sel", label_visibility="collapsed")
-        if b2.button("✏️ Bewerk", key="asset_action_edit", width='stretch'):
-            st.session_state["edit_asset"] = sel_tk
-            st.rerun()
-        if b3.button("🗑️ Wis", key="asset_action_del", width='stretch'):
-            db.delete_asset(sel_tk)
-            clear_cache()
-            st.rerun()
+        sel_idx = df_row_select(pd.DataFrame(rows), "asset_table")
+        if sel_idx is None:
+            st.caption("👆 Klik op een rij om dat activum te bewerken of verwijderen.")
+        else:
+            sel_a = assets[sel_idx]
+            sel_tk = sel_a["ticker"]
+            st.caption(f"Geselecteerd: **{asset_label(sel_tk, a_names)}**")
+            b1, b2 = st.columns(2)
+            if b1.button("✏️ Bewerk", key="asset_action_edit", width="stretch"):
+                st.session_state["edit_asset"] = sel_tk
+                st.rerun()
+            if b2.button("🗑️ Wis (incl. transacties)", key="asset_action_del", width="stretch"):
+                db.delete_asset(sel_tk)
+                clear_cache()
+                st.rerun()
 
     with tab_splits:
         st.subheader("🔀 Aandelensplitsingen")
@@ -994,13 +1028,14 @@ def page_transactions():
         costs = costs or 0.0
 
         asset_info = assets_map.get(ticker, {})
+        _fx_prev, _eur_prev = compute_eur(total_amount, currency, txn_date)
         tob_amount = tax_mod.calculate_tob(asset_info.get("asset_type", "stock"),
                                            asset_info.get("etf_subtype", "distributing"),
-                                           total_amount,
-                                           bool(asset_info.get("belgian_registered", 1)))
-        _fx_prev, _eur_prev = compute_eur(total_amount, currency, txn_date)
+                                           _eur_prev,
+                                           bool(asset_info.get("belgian_registered", 1)),
+                                           txn_date=txn_date)
         eur_hint = "" if currency == "EUR" else f" ≈ **€{_eur_prev:,.2f}** (koers {_fx_prev:.4f})"
-        st.info(f"**Totaalwaarde:** {currency} {total_amount:,.4f}{eur_hint} | **TOB:** {currency} {tob_amount:,.2f}")
+        st.info(f"**Totaalwaarde:** {currency} {total_amount:,.4f}{eur_hint} | **TOB:** €{tob_amount:,.2f}")
 
         if st.checkbox("TOB manueel aanpassen", key=kk("tob_man")):
             tob_amount = st.number_input("TOB (€)", min_value=0.0, value=tob_amount,
@@ -1140,34 +1175,34 @@ def page_transactions():
                 "Koersdoel": t.get("price_target") or None,
                 "Notities": t.get("notes") or "",
             })
-        st.dataframe(pd.DataFrame(rows), width='stretch', hide_index=True)
+        sel_idx = df_row_select(pd.DataFrame(rows), "txn_table")
 
-        # Actiebalk: selecteer een transactie om te bewerken/verwijderen/herschikken
-        st.caption("Selecteer een transactie om te bewerken, verwijderen of naar een andere rekening te verplaatsen:")
-        id_label = {t["id"]: f"#{t['id']} · {t['date'][:10]} · "
-                             f"{'Aankoop' if t['transaction_type']=='buy' else 'Verkoop'} · "
-                             f"{asset_label(t['ticker'], names)} · {t['quantity']:.4f}" for t in ordered}
-        ids = [t["id"] for t in ordered]
-        accounts = db.get_accounts()
-        a1, a2, a3, a4 = st.columns([4, 2, 1, 1])
-        sel_id = a1.selectbox("Transactie", ids, format_func=lambda i: id_label[i],
-                              key="txn_action_sel", label_visibility="collapsed")
-        sel_t = next(t for t in ordered if t["id"] == sel_id)
-        cur_acct = sel_t.get("account") or db.DEFAULT_ACCOUNT
-        new_acct = a2.selectbox("Rekening", accounts,
-                                index=accounts.index(cur_acct) if cur_acct in accounts else 0,
-                                key=f"txn_action_acct_{sel_id}", label_visibility="collapsed")
-        if new_acct != cur_acct:
-            db.update_transaction_account(sel_id, new_acct)
-            clear_cache()
-            st.rerun()
-        if a3.button("✏️ Bewerk", key="txn_action_edit", width='stretch'):
-            st.session_state["edit_txn"] = sel_id
-            st.rerun()
-        if a4.button("🗑️ Wis", key="txn_action_del", width='stretch'):
-            db.delete_transaction(sel_id)
-            clear_cache()
-            st.rerun()
+        # Acties voor de aangeklikte rij
+        if sel_idx is None:
+            st.caption("👆 Klik op een rij om die te bewerken, verwijderen of naar een andere rekening te verplaatsen.")
+        else:
+            sel_t = ordered[sel_idx]
+            sel_id = sel_t["id"]
+            accounts = db.get_accounts()
+            cur_acct = sel_t.get("account") or db.DEFAULT_ACCOUNT
+            st.caption(f"Geselecteerd: **#{sel_id} · {sel_t['date'][:10]} · "
+                       f"{'Aankoop' if sel_t['transaction_type']=='buy' else 'Verkoop'} · "
+                       f"{asset_label(sel_t['ticker'], names)}**")
+            a1, a2, a3 = st.columns([2, 1, 1])
+            new_acct = a1.selectbox("Verplaats naar rekening", accounts,
+                                    index=accounts.index(cur_acct) if cur_acct in accounts else 0,
+                                    key=f"txn_action_acct_{sel_id}")
+            if new_acct != cur_acct:
+                db.update_transaction_account(sel_id, new_acct)
+                clear_cache()
+                st.rerun()
+            if a2.button("✏️ Bewerk", key="txn_action_edit", width="stretch"):
+                st.session_state["edit_txn"] = sel_id
+                st.rerun()
+            if a3.button("🗑️ Wis", key="txn_action_del", width="stretch"):
+                db.delete_transaction(sel_id)
+                clear_cache()
+                st.rerun()
 
     with tab_costs:
         st.subheader("🏦 Algemene rekeningkosten")
@@ -1484,32 +1519,31 @@ def page_dividends():
                 "Netto €":  round(_neur(d), 2),
                 "Notities": d.get("notes") or "",
             })
-        st.dataframe(pd.DataFrame(rows), width='stretch', hide_index=True)
-
-        st.caption("Selecteer een dividend om te bewerken, verwijderen of naar een andere rekening te verplaatsen:")
-        d_label = {d["id"]: f"#{d['id']} · {d['date'][:10]} · {asset_label(d['ticker'], names_map)} · "
-                           f"netto {eur(_neur(d))}" for d in divs}
-        d_ids = [d["id"] for d in divs]
-        div_accts = db.get_accounts()
-        da1, da2, da3, da4 = st.columns([4, 2, 1, 1])
-        sel_did = da1.selectbox("Dividend", d_ids, format_func=lambda i: d_label[i],
-                                key="div_action_sel", label_visibility="collapsed")
-        sel_d = next(d for d in divs if d["id"] == sel_did)
-        cur_acct = sel_d.get("account") or db.DEFAULT_ACCOUNT
-        new_acct = da2.selectbox("Rekening", div_accts,
-                                 index=div_accts.index(cur_acct) if cur_acct in div_accts else 0,
-                                 key=f"div_action_acct_{sel_did}", label_visibility="collapsed")
-        if new_acct != cur_acct:
-            db.set_dividend_account(sel_did, new_acct)
-            clear_cache()
-            st.rerun()
-        if da3.button("✏️ Bewerk", key="div_action_edit", width='stretch'):
-            st.session_state["edit_div"] = sel_did
-            st.rerun()
-        if da4.button("🗑️ Wis", key="div_action_del", width='stretch'):
-            db.delete_dividend(sel_did)
-            clear_cache()
-            st.rerun()
+        sel_idx = df_row_select(pd.DataFrame(rows), "div_table")
+        if sel_idx is None:
+            st.caption("👆 Klik op een rij om dat dividend te bewerken, verwijderen of te verplaatsen.")
+        else:
+            sel_d = divs[sel_idx]
+            sel_did = sel_d["id"]
+            div_accts = db.get_accounts()
+            cur_acct = sel_d.get("account") or db.DEFAULT_ACCOUNT
+            st.caption(f"Geselecteerd: **#{sel_did} · {sel_d['date'][:10]} · "
+                       f"{asset_label(sel_d['ticker'], names_map)} · netto {eur(_neur(sel_d))}**")
+            da1, da2, da3 = st.columns([2, 1, 1])
+            new_acct = da1.selectbox("Verplaats naar rekening", div_accts,
+                                     index=div_accts.index(cur_acct) if cur_acct in div_accts else 0,
+                                     key=f"div_action_acct_{sel_did}")
+            if new_acct != cur_acct:
+                db.set_dividend_account(sel_did, new_acct)
+                clear_cache()
+                st.rerun()
+            if da2.button("✏️ Bewerk", key="div_action_edit", width="stretch"):
+                st.session_state["edit_div"] = sel_did
+                st.rerun()
+            if da3.button("🗑️ Wis", key="div_action_del", width="stretch"):
+                db.delete_dividend(sel_did)
+                clear_cache()
+                st.rerun()
 
 
 # ── PAGINA: Belgische belasting ────────────────────────────────────────────────
@@ -1691,12 +1725,35 @@ def page_ai_advisor():
                 func_labels = {"tax_optimization": "Belastingadvies",
                                "market_evaluation": "Marktevaluatie",
                                "portfolio_ratings": "Portefeuille-ratings",
-                               "price_target": "Koersdoel", "chat": "Overig"}
+                               "price_target": "Koersdoel", "chat": "Overig",
+                               "price_refresh": "Prijsverversing"}
                 st.dataframe(pd.DataFrame([{
                     "Functie": func_labels.get(r["function"], r["function"]),
                     "Oproepen": r["n"],
                     "Kost (USD)": f"${r['c']:.4f}",
                 } for r in usage["by_function"]]), width='stretch', hide_index=True)
+
+            st.divider()
+            pr1, pr2 = st.columns([3, 1])
+            last = db.get_setting("ai_pricing_last_refresh", "")
+            pr1.caption("Richtprijzen per model (USD per 1M tokens). Worden maandelijks automatisch "
+                        "ververst." + (f" Laatste verversing: {last}." if last else ""))
+            if pr2.button("💲 Ververs nu", key="refresh_prices"):
+                if not db.get_setting("openai_api_key", ""):
+                    st.warning("Geen OpenAI-sleutel — stel die in via ⚙️ Instellingen.")
+                else:
+                    with st.spinner("Actuele modelprijzen opzoeken via AI..."):
+                        res = ai_advisor.refresh_model_prices()
+                    if res.get("error"):
+                        st.error(res["error"])
+                    else:
+                        st.success(f"✅ {len(res['updated'])} prijs(en) bijgewerkt "
+                                   f"({', '.join(res['updated']) or 'geen wijziging'}).")
+                        st.rerun()
+            pricing = ai_advisor.get_model_pricing()
+            st.dataframe(pd.DataFrame([{
+                "Model": m, "Input ($/1M)": f"{p[0]:.2f}", "Output ($/1M)": f"{p[1]:.2f}",
+            } for m, p in pricing.items()]), width='stretch', hide_index=True)
             st.caption("ℹ️ Richtprijzen medio 2026; werkelijke kosten kunnen afwijken. "
                        "Controleer je OpenAI-dashboard voor de exacte factuur.")
         st.divider()
@@ -1902,6 +1959,17 @@ def page_settings():
         wh = st.number_input("Roerende voorheffing (%)",
                               value=float(db.get_setting("withholding_tax_rate", "0.30"))*100,
                               step=0.5)
+        _tob_start = db.get_setting("tob_start_date", "2017-01-01")
+        try:
+            _tob_start_d = datetime.strptime(_tob_start[:10], "%Y-%m-%d").date()
+        except Exception:
+            _tob_start_d = date(2017, 1, 1)
+        tob_start = st.date_input(
+            "TOB van toepassing vanaf", value=_tob_start_d,
+            min_value=date(1990, 1, 1), max_value=date.today(),
+            help="Transacties vóór deze datum krijgen geen TOB. Voor beleggers via een "
+                 "buitenlandse tussenpersoon (bv. DEGIRO) geldt de TOB-plicht pas sinds 1/1/2017. "
+                 "Gebruik je (ook) een Belgische broker die vroeger al TOB inhield, pas de datum dan aan.")
         if st.button("💾 Opslaan", key="save_tob"):
             db.set_setting("tob_rate_stocks", str(r_s/100))
             db.set_setting("tob_rate_etf_distributing", str(r_ed/100))
@@ -1909,6 +1977,7 @@ def page_settings():
             db.set_setting("tob_max_stocks", str(m_s))
             db.set_setting("tob_max_etf_distributing", str(m_ed))
             db.set_setting("tob_max_etf_accumulating", str(m_ea))
+            db.set_setting("tob_start_date", str(tob_start))
             db.set_setting("withholding_tax_rate", str(wh/100))
             st.success("✅ TOB-instellingen opgeslagen!")
 

@@ -30,7 +30,7 @@ MAX_TOKENS = 1800
 # Richtprijzen per 1M tokens (USD, input/output) — stand medio 2026.
 # Dit zijn schattingen voor kostenraming; de echte factuur staat op je
 # OpenAI-dashboard. Pas indien nodig aan bij prijswijzigingen.
-MODEL_PRICING = {
+DEFAULT_MODEL_PRICING = {
     "gpt-4.1":      (2.00, 8.00),
     "gpt-4.1-mini": (0.40, 1.60),
     "gpt-4.1-nano": (0.10, 0.40),
@@ -40,9 +40,82 @@ MODEL_PRICING = {
 _DEFAULT_PRICE = (0.40, 1.60)  # fallback ~ gpt-4.1-mini
 
 
+def get_model_pricing() -> dict:
+    """Actuele modelprijzen (USD per 1M tokens) = standaard, overschreven door wat
+    in de instellingen ('ai_model_pricing', JSON) staat — bv. door de maandelijkse
+    prijsverversing of handmatig."""
+    pricing = {k: tuple(v) for k, v in DEFAULT_MODEL_PRICING.items()}
+    try:
+        raw = db.get_setting("ai_model_pricing", "")
+        if raw:
+            for model, pair in json.loads(raw).items():
+                if isinstance(pair, (list, tuple)) and len(pair) == 2:
+                    pin, pout = float(pair[0]), float(pair[1])
+                    if 0 < pin < 1000 and 0 < pout < 1000:
+                        pricing[model] = (pin, pout)
+    except Exception as e:
+        logger.warning(f"get_model_pricing: kon overrides niet lezen ({e})")
+    return pricing
+
+
+# Backwards-compat: sommige modules importeren MODEL_PRICING rechtstreeks.
+MODEL_PRICING = DEFAULT_MODEL_PRICING
+
+
 def estimate_cost_usd(model: str, prompt_tokens: int, completion_tokens: int) -> float:
-    pin, pout = MODEL_PRICING.get(model, _DEFAULT_PRICE)
+    pin, pout = get_model_pricing().get(model, _DEFAULT_PRICE)
     return (prompt_tokens / 1_000_000) * pin + (completion_tokens / 1_000_000) * pout
+
+
+def refresh_model_prices() -> dict:
+    """Vraag de AI naar de actuele prijzen (USD/1M tokens) van de gekende modellen
+    en bewaar geldige waarden in de instellingen. Conservatief: enkel gekende
+    modellen, plausibele bedragen (0–1000), ongeldige antwoorden worden genegeerd.
+
+    Retourneert {updated: [...], unchanged: [...], error: str|None}.
+    """
+    client, model = _get_client()
+    if not client:
+        return {"error": "Geen OpenAI-sleutel ingesteld.", "updated": [], "unchanged": []}
+    models = list(DEFAULT_MODEL_PRICING.keys())
+    system = ("Je bent een nauwkeurige assistent. Antwoord UITSLUITEND met geldige JSON, "
+              "zonder uitleg of opmaak.")
+    user = ("Geef de actuele officiële OpenAI API-prijzen in USD per 1 miljoen tokens voor "
+            "elk van deze modellen. Formaat: een JSON-object {model: {\"input\": getal, "
+            "\"output\": getal}}. Enkel deze modellen: " + ", ".join(models) + ". "
+            "Als je een prijs niet zeker weet, laat dat model dan weg.")
+    try:
+        raw = _chat(client, model, system, user, max_tokens=400, temperature=0.0,
+                    track_as="price_refresh")
+        raw = raw.strip().removeprefix("```json").removeprefix("```").removesuffix("```").strip()
+        data = json.loads(raw)
+    except Exception as e:
+        logger.warning(f"refresh_model_prices: AI-antwoord onbruikbaar ({e})")
+        return {"error": f"AI-antwoord onbruikbaar: {e}", "updated": [], "unchanged": []}
+
+    current = get_model_pricing()
+    new_pricing = {k: list(v) for k, v in current.items()}
+    updated, unchanged = [], []
+    for m in models:
+        entry = data.get(m) if isinstance(data, dict) else None
+        if not isinstance(entry, dict):
+            unchanged.append(m); continue
+        try:
+            pin = float(entry.get("input")); pout = float(entry.get("output"))
+        except (TypeError, ValueError):
+            unchanged.append(m); continue
+        if not (0 < pin < 1000 and 0 < pout < 1000):
+            unchanged.append(m); continue
+        old = current.get(m)
+        if old and abs(old[0] - pin) < 1e-9 and abs(old[1] - pout) < 1e-9:
+            unchanged.append(m)
+        else:
+            new_pricing[m] = [pin, pout]; updated.append(m)
+
+    db.set_setting("ai_model_pricing", json.dumps(new_pricing))
+    db.set_setting("ai_pricing_last_refresh", datetime.now().strftime("%Y-%m-%d %H:%M"))
+    logger.info(f"AI-prijsverversing: {len(updated)} bijgewerkt, {len(unchanged)} ongewijzigd")
+    return {"error": None, "updated": updated, "unchanged": unchanged}
 
 AVAILABLE_MODELS = {
     "gpt-4.1-mini":  "GPT-4.1 Mini — aanbevolen (snel, kostenefficiënt, sterk)",

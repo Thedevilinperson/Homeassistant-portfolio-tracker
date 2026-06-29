@@ -76,13 +76,25 @@ def job_market_eval(timing: str, exchanges: list[str]):
 
 
 def job_tax_optimization():
-    """Genereer en sla het dagelijkse belastingadvies op."""
-    logger.info("💡 Dagelijks belastingadvies genereren...")
+    """Genereer en sla het belastingadvies op (maandelijks)."""
+    logger.info("💡 Maandelijks belastingadvies genereren...")
     result = ai_advisor.generate_tax_optimization()
     if result.startswith("❌"):
         logger.warning(f"Belastingadvies niet gegenereerd: {result[:80]}")
     else:
         logger.info("✅ Belastingadvies opgeslagen")
+
+
+def job_refresh_ai_prices():
+    """Zoek maandelijks de actuele AI-modelprijzen op en pas ze indien nodig aan."""
+    logger.info("💲 AI-modelprijzen verversen...")
+    res = ai_advisor.refresh_model_prices()
+    if res.get("error"):
+        logger.warning(f"Prijsverversing niet gelukt: {res['error']}")
+    else:
+        logger.info(f"✅ Prijsverversing: {len(res['updated'])} bijgewerkt "
+                    f"({', '.join(res['updated']) or 'geen'}), "
+                    f"{len(res['unchanged'])} ongewijzigd")
 
 
 def on_job_error(event):
@@ -156,13 +168,22 @@ def main():
             replace_existing=True, misfire_grace_time=300,
         )
 
-    # ── Dagelijks belastingadvies: 08:00 op werkdagen ──
+    # ── Maandelijks belastingadvies: 1e van de maand om 08:00 ──
     scheduler.add_job(
         job_tax_optimization,
-        trigger=CronTrigger(day_of_week="mon-fri", hour=8, minute=0, timezone=BRUSSELS),
-        id="daily_tax",
+        trigger=CronTrigger(day=1, hour=8, minute=0, timezone=BRUSSELS),
+        id="monthly_tax",
         replace_existing=True,
-        misfire_grace_time=600,
+        misfire_grace_time=3600,
+    )
+
+    # ── Maandelijkse AI-prijsverversing: 1e van de maand om 07:30 ──
+    scheduler.add_job(
+        job_refresh_ai_prices,
+        trigger=CronTrigger(day=1, hour=7, minute=30, timezone=BRUSSELS),
+        id="monthly_ai_prices",
+        replace_existing=True,
+        misfire_grace_time=3600,
     )
 
     logger.info("🚀 Scheduler gestart. Geplande jobs:")
