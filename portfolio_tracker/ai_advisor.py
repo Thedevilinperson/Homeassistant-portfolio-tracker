@@ -459,11 +459,22 @@ Antwoord UITSLUITEND met geldige JSON in exact dit formaat (geen markdown):
         ratings = data.get("ratings", []) if isinstance(data, dict) else data
         batch_id = datetime.now().strftime("%Y%m%d%H%M%S")
         valid_tickers = {p["ticker"] for p in ctx["posities"]}
+        base_map = {}  # basis-symbool (vóór de punt) -> volledige ticker
+        for vt in valid_tickers:
+            base_map.setdefault(vt.split(".")[0], vt)
+
+        def _match(returned: str):
+            r = (returned or "").upper()
+            if r in valid_tickers:
+                return r
+            cand = base_map.get(r.split(".")[0])   # bv. AI gaf 'VWCE' i.p.v. 'VWCE.DE'
+            return cand
+
         stored = 0
         for r in ratings:
-            tk = str(r.get("ticker", "")).upper()
+            tk = _match(str(r.get("ticker", "")))
             rating = str(r.get("rating", "")).lower().replace(" ", "_")
-            if tk not in valid_tickers or rating not in RATING_LABELS:
+            if not tk or rating not in RATING_LABELS:
                 continue
             db.save_ai_rating(
                 batch_id, tk, rating,
@@ -541,6 +552,23 @@ en het beleggingsprofiel. Antwoord UITSLUITEND met geldige JSON (geen markdown):
 
 
 # ── Synthese-helper voor de portefeuillepagina ────────────────────────────────
+
+def rating_changes(tickers: list[str]) -> dict:
+    """Vergelijk de laatste twee adviesrondes per ticker. Returnt {ticker: {from, to, up}}
+    voor enkel de tickers waarvan de rating wijzigde. up=True = bullisher geworden."""
+    batches = db.get_recent_rating_batches(2)
+    if len(batches) < 2:
+        return {}
+    new_b, old_b = batches[0], batches[1]
+    new_r = {r["ticker"]: r["rating"] for r in db.get_ai_ratings(batch_ids=[new_b])}
+    old_r = {r["ticker"]: r["rating"] for r in db.get_ai_ratings(batch_ids=[old_b])}
+    out: dict[str, dict] = {}
+    for tk in tickers:
+        a, b = old_r.get(tk), new_r.get(tk)
+        if a and b and a != b and a in RATING_ORDER and b in RATING_ORDER:
+            out[tk] = {"from": a, "to": b, "up": RATING_ORDER.index(b) < RATING_ORDER.index(a)}
+    return out
+
 
 def rating_synthesis(tickers: list[str], n_batches: int = 9) -> dict:
     """

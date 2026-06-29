@@ -62,6 +62,26 @@ def sign_icon(val: float | None) -> str:
     return "🟢" if val >= 0 else "🔴"
 
 
+RATING_BADGE = {"strong_buy": "🟢🟢 Sterk kopen", "buy": "🟢 Kopen",
+                "hold": "⚪ Behouden", "sell": "🔴 Verkopen",
+                "strong_sell": "🔴🔴 Sterk verkopen"}
+
+
+def change_arrow(change: dict | None) -> str:
+    """Pijl die aangeeft of het advies sinds de vorige ronde wijzigde (↑ bullisher,
+    ↓ bearisher). Lege string als er geen wijziging is."""
+    if not change:
+        return ""
+    return " 🔺" if change.get("up") else " 🔻"
+
+
+def ai_badge(rec: str | None, change: dict | None = None) -> str:
+    """Tekstlabel voor een AI-rating, met optionele wijzigingspijl."""
+    if not rec:
+        return "—"
+    return RATING_BADGE.get(rec, "—") + change_arrow(change)
+
+
 def delta_color(val: float | None) -> str:
     if val is None or val == 0:
         return "off"
@@ -115,30 +135,59 @@ def dividends_net_eur(divs, accounts=None) -> float:
     return tot
 
 
-def per_asset_result(overview: dict, year=None) -> dict:
+def per_asset_result(overview: dict, year=None, accounts=None) -> dict:
     """Per activum het gecombineerde resultaat over de geselecteerde rekeningen:
     ongerealiseerde W/V (lopende positie) + gerealiseerde W/V (verkopen, over álle
-    geselecteerde rekeningen heen). year=None telt alle jaren mee, anders enkel dat jaar.
+    geselecteerde rekeningen heen), plus netto dividenden en de aan het aandeel
+    gelinkte kosten (transactiekosten + TOB). year=None telt alle jaren mee, anders
+    enkel dat jaar. accounts = set rekeningen (None = alle).
 
-    Bevat ook activa zonder open positie maar mét gerealiseerde historiek (bv. volledig
-    verkocht op de ene rekening en elders heraangekocht)."""
+    Velden per ticker: quantity, current_value, unrealized, realized, total
+    (= unrealized+realized), dividends, costs, net_total
+    (= unrealized+realized+dividends−costs).
+
+    Bevat ook activa zonder open positie maar mét historiek (bv. volledig verkocht op
+    de ene rekening en elders heraangekocht)."""
     pv = overview.get("position_values", {})
     realized = overview.get("selection_realized_gains", [])
     if year is not None:
         realized = [g for g in realized if g["year"] == year]
-    real_by_tkr: dict[str, float] = {}
+    real_by: dict[str, float] = {}
     for g in realized:
-        real_by_tkr[g["ticker"]] = real_by_tkr.get(g["ticker"], 0.0) + g["gain_loss"]
+        real_by[g["ticker"]] = real_by.get(g["ticker"], 0.0) + g["gain_loss"]
+
+    # Netto dividenden per ticker (rekening- en periode-bewust)
+    div_by: dict[str, float] = {}
+    for d in db.get_dividends(year=year):
+        if accounts is not None and (d.get("account") or db.DEFAULT_ACCOUNT) not in accounts:
+            continue
+        div_by[d["ticker"]] = div_by.get(d["ticker"], 0.0) + dividend_net_eur(d)
+
+    # Aan het aandeel gelinkte kosten per ticker: transactiekosten + TOB (in EUR)
+    cost_by: dict[str, float] = {}
+    for t in db.get_transactions():
+        if accounts is not None and (t.get("account") or db.DEFAULT_ACCOUNT) not in accounts:
+            continue
+        if year is not None and str(t["date"])[:4] != str(year):
+            continue
+        cost_by[t["ticker"]] = cost_by.get(t["ticker"], 0.0) + (t.get("costs_eur") or 0.0) + (t.get("tob_tax") or 0.0)
+
     out: dict[str, dict] = {}
-    for t in set(pv.keys()) | set(real_by_tkr.keys()):
+    for t in set(pv) | set(real_by) | set(div_by) | set(cost_by):
         p = pv.get(t, {})
         unreal = p.get("unrealized_gain_loss") or 0.0
+        realg  = real_by.get(t, 0.0)
+        divg   = div_by.get(t, 0.0)
+        costg  = cost_by.get(t, 0.0)
         out[t] = {
             "quantity":      p.get("quantity") or 0.0,
             "current_value": p.get("current_value") or 0.0,
             "unrealized":    unreal,
-            "realized":      real_by_tkr.get(t, 0.0),
-            "total":         unreal + real_by_tkr.get(t, 0.0),
+            "realized":      realg,
+            "total":         unreal + realg,
+            "dividends":     divg,
+            "costs":         costg,
+            "net_total":     unreal + realg + divg - costg,
         }
     return out
 
@@ -296,6 +345,10 @@ def page_dashboard():
 
     st.divider()
 
+    # AI-ratingsynthese + wijzigingen sinds de vorige ronde (gedeeld door beide kolommen)
+    dash_synth   = ai_advisor.rating_synthesis(list(pv.keys()), n_batches=9) if pv else {}
+    dash_changes = ai_advisor.rating_changes(list(pv.keys())) if pv else {}
+
     col_l, col_r = st.columns([3, 2])
 
     with col_l:
@@ -319,36 +372,38 @@ def page_dashboard():
         )
         st.plotly_chart(fig_pie, width='stretch')
 
-        # Staafdiagram: totale W/V per activum (ongerealiseerd + gerealiseerd)
+        # Staafdiagram: netto resultaat per activum (W/V + dividenden − kosten)
         names = asset_name_map()
-        result = per_asset_result(overview, year=None if all_time else year)
+        result = per_asset_result(overview, year=None if all_time else year, accounts=accset)
         if result:
-            tickers_sorted = sorted(result.keys(), key=lambda t: result[t]["total"])
-            tot_vals  = [result[t]["total"] for t in tickers_sorted]
-            unr_vals  = [result[t]["unrealized"] for t in tickers_sorted]
-            real_vals = [result[t]["realized"] for t in tickers_sorted]
+            tickers_sorted = sorted(result.keys(), key=lambda t: result[t]["net_total"])
+            net_vals  = [result[t]["net_total"] for t in tickers_sorted]
+            wv_vals   = [result[t]["total"] for t in tickers_sorted]
+            div_vals  = [result[t]["dividends"] for t in tickers_sorted]
+            cost_vals = [result[t]["costs"] for t in tickers_sorted]
             labels    = [names.get(t, t) for t in tickers_sorted]
-            colors    = ["#00b894" if v >= 0 else "#d63031" for v in tot_vals]
-            customdata = list(zip(tickers_sorted, unr_vals, real_vals))
+            colors    = ["#00b894" if v >= 0 else "#d63031" for v in net_vals]
+            customdata = list(zip(tickers_sorted, wv_vals, div_vals, cost_vals))
 
             fig_bar = go.Figure(go.Bar(
-                x=labels, y=tot_vals, marker_color=colors,
+                x=labels, y=net_vals, marker_color=colors,
                 customdata=customdata,
-                text=[f"€{v:,.0f}" for v in tot_vals], textposition="outside",
-                hovertemplate="<b>%{x}</b> (%{customdata[0]})<br>Totaal: €%{y:,.2f}"
-                              "<br>Ongerealiseerd: €%{customdata[1]:,.2f}"
-                              "<br>Gerealiseerd: €%{customdata[2]:,.2f}<extra></extra>",
+                text=[f"€{v:,.0f}" for v in net_vals], textposition="outside",
+                hovertemplate="<b>%{x}</b> (%{customdata[0]})<br>Netto resultaat: €%{y:,.2f}"
+                              "<br>W/V (gereal.+ongereal.): €%{customdata[1]:,.2f}"
+                              "<br>Dividenden: €%{customdata[2]:,.2f}"
+                              "<br>Kosten (txn + TOB): −€%{customdata[3]:,.2f}<extra></extra>",
             ))
             fig_bar.add_hline(y=0, line_dash="dot", line_color="rgba(200,200,200,0.3)")
             fig_bar.update_layout(
-                title=f"Totale winst/verlies per activum ({period_lbl})",
+                title=f"Netto resultaat per activum ({period_lbl})",
                 height=300, showlegend=False,
                 margin=dict(t=40, b=30, l=20, r=20),
                 plot_bgcolor="rgba(0,0,0,0)", paper_bgcolor="rgba(0,0,0,0)",
             )
             st.plotly_chart(fig_bar, width='stretch')
-            st.caption("Bevat ook de gerealiseerde winst/verlies van eerder verkochte (en eventueel "
-                       "elders heraangekochte) posities, opgeteld bij de lopende ongerealiseerde W/V.")
+            st.caption("Netto = ongerealiseerde + gerealiseerde W/V + ontvangen dividenden − "
+                       "de aan het aandeel gelinkte kosten (transactiekosten + TOB).")
 
     with col_r:
         # Belastingstatus
@@ -372,16 +427,33 @@ def page_dashboard():
 
         st.divider()
 
-        # Laatste AI-advies
-        st.subheader("🤖 Laatste AI-advies")
-        latest = db.get_ai_evaluations("tax_optimization", limit=1)
-        if latest:
-            ev = latest[0]
-            st.caption(f"📅 {ev['created_at'][:16]}")
-            preview = ev["content"][:350]
-            st.markdown(preview + ("…" if len(ev["content"]) > 350 else ""))
+        # AI-advies: enkel de kooptips (zonder uitleg) + link naar de AI-pagina
+        st.subheader("🤖 AI-kooptips")
+        names_d = asset_name_map()
+        buy_tips = [tk for tk in pv
+                    if dash_synth.get(tk, {}).get("consensus") in ("strong_buy", "buy")]
+        if buy_tips:
+            buy_tips.sort(key=lambda tk: 0 if dash_synth[tk]["consensus"] == "strong_buy" else 1)
+            for tk in buy_tips:
+                cons = dash_synth[tk]["consensus"]
+                st.markdown(f"- {RATING_BADGE[cons]} — **{asset_label(tk, names_d)}**"
+                            f"{change_arrow(dash_changes.get(tk))}")
         else:
-            st.caption("Nog geen advies. Genereer het via 🤖 AI Advisor.")
+            st.caption("Geen actuele kooptips. Genereer/actualiseer het advies via 🤖 AI Advisor.")
+
+        if dash_changes:
+            ups = [tk for tk, c in dash_changes.items() if c["up"]]
+            downs = [tk for tk, c in dash_changes.items() if not c["up"]]
+            parts = []
+            if ups:
+                parts.append("🔺 opgewaardeerd: " + ", ".join(names_d.get(t, t) for t in ups))
+            if downs:
+                parts.append("🔻 afgewaardeerd: " + ", ".join(names_d.get(t, t) for t in downs))
+            st.caption("**Advieswijzigingen sinds de vorige ronde** — " + "  ·  ".join(parts))
+
+        if st.button("➡️ Naar AI Advisor", key="dash_to_ai", width="stretch"):
+            st.session_state["nav_menu"] = "🤖 AI Advisor"
+            st.rerun()
 
     st.divider()
     st.subheader("📊 Gerealiseerde meer-/minwaarden (historiek)")
@@ -443,180 +515,196 @@ def page_portfolio():
             if pt:
                 price_targets[tk] = pt["price_target"]
 
-    # AI-ratingsynthese (laatste 9 adviesrondes)
-    synth = ai_advisor.rating_synthesis(list(pv.keys()), n_batches=9)
-    badge = {"strong_buy": "🟢🟢 Sterk kopen", "buy": "🟢 Kopen",
-             "hold": "⚪ Behouden", "sell": "🔴 Verkopen",
-             "strong_sell": "🔴🔴 Sterk verkopen"}
+    accset = set(acct) if acct else None
+    nmap = asset_name_map()
 
-    rows = []
-    for ticker, pos in pv.items():
-        asset = assets_map.get(ticker, {})
-        div = divs_net.get(ticker, 0)
-        total_return = (pos["unrealized_gain_loss"] or 0) + div
-        tgt = price_targets.get(ticker)
-        upside = None
-        if tgt and pos["current_price"]:
-            upside = (tgt - pos["current_price"]) / pos["current_price"] * 100
-        rec = synth.get(ticker, {}).get("consensus")
-        rows.append({
-            "":             sign_icon(pos["unrealized_gain_loss"]),
-            "Ticker":       ticker,
-            "Naam":         (asset.get("name") or ticker)[:20],
-            "Munt":         pos["current_price_currency"] or "EUR",
-            "Aantal":       f"{pos['quantity']:.4f}",
-            "Gem.kostpr.(€)":  f"{pos['avg_cost']:.4f}",
-            "Koers (native)":  f"{pos['current_price']:.4f}" if pos["current_price"] else "—",
-            "Koersdoel":    f"{tgt:.2f}" if tgt else "—",
-            "Potentieel":   pct(upside) if upside is not None else "—",
-            "Huidige waarde": eur(pos["current_value"]),
-            "W/V (%)":      pct(pos["unrealized_gain_loss_pct"]),
-            "Dividend":     eur(div),
-            "Tot. rendement": eur(total_return),
-            "AI-advies":    badge.get(rec, "—"),
-        })
+    # AI-ratingsynthese + wijzigingen t.o.v. de vorige ronde
+    synth   = ai_advisor.rating_synthesis(list(pv.keys()), n_batches=9)
+    changes = ai_advisor.rating_changes(list(pv.keys()))
+    n_rounds = len(db.get_recent_rating_batches(9))
 
-    df = pd.DataFrame(rows)
-    st.dataframe(df, width='stretch', hide_index=True, height=420)
+    # ── Renderblokken (volgorde wordt onderaan bepaald) ───────────────────────
 
-    # Totaalrij
-    total_val  = overview["total_portfolio_value"]
-    total_cost = overview["total_cost_basis"]
-    tot_gl     = overview["unrealized_gl"]
-    tot_div    = overview["total_dividends_net"]
-    txn_costs  = overview.get("selection_costs", 0)
-    acct_costs = overview.get("account_costs_selection", 0)
-    all_costs  = txn_costs + acct_costs
-    net_return = tot_gl + tot_div - all_costs
-    c1, c2, c3, c4, c5 = st.columns(5)
-    c1.metric("Totaal geïnvesteerd", eur(total_cost))
-    c2.metric("Totale waarde",       eur(total_val))
-    c3.metric("Ongerealiseerde W/V", eur(tot_gl),
-              delta=pct(tot_gl / total_cost * 100 if total_cost else 0),
-              delta_color=delta_color(tot_gl))
-    c4.metric("Netto dividenden",    eur(tot_div))
-    c5.metric("Kosten (txn + rekening)", eur(all_costs),
-              help="Transactiekosten + algemene rekeningkosten (bv. beheerskosten). "
-                   "Drukken het nettorendement, los van de meerwaardeberekening.")
-    st.caption(f"💡 Nettorendement na kosten: **{eur(net_return)}**  "
-               f"(ongerealiseerde W/V + dividenden − kosten). "
-               f"Waarvan transactiekosten {eur(txn_costs)} en rekeningkosten {eur(acct_costs)}.")
-
-    # ── Totaal resultaat per activum (ongerealiseerd + gerealiseerd, over rekeningen heen) ──
-    st.divider()
-    st.subheader("📊 Totaal resultaat per activum")
-    st.caption("Ongerealiseerde W/V op de lopende positie + gerealiseerde W/V uit eerdere verkopen, "
-               "over alle geselecteerde rekeningen heen (alle jaren). Zo zie je het volledige resultaat "
-               "van een activum, ook als het op de ene rekening verkocht en op een andere heraangekocht is.")
-    result = per_asset_result(overview, year=None)
-    if result:
-        nmap = asset_name_map()
+    def render_per_asset():
+        st.subheader("📊 Totaal resultaat per activum")
+        st.caption("Per activum: ongerealiseerde + gerealiseerde W/V (over alle geselecteerde "
+                   "rekeningen, alle jaren), de ontvangen dividenden en de gelinkte kosten "
+                   "(transactiekosten + TOB). 'Netto resultaat' telt dat alles samen.")
+        result = per_asset_result(overview, year=None, accounts=accset)
+        if not result:
+            st.info("Nog geen posities of historiek voor deze selectie.")
+            return
         rrows = []
-        for t in sorted(result.keys(), key=lambda x: result[x]["total"], reverse=True):
+        for t in sorted(result.keys(), key=lambda x: result[x]["net_total"], reverse=True):
             r = result[t]
             rec = synth.get(t, {}).get("consensus")
             rrows.append({
-                "W/V":               sign_icon(r["total"]),
-                "Activum":           asset_label(t, nmap),
-                "Aantal (nu)":       f"{r['quantity']:.4f}" if r["quantity"] else "0",
-                "Huidige waarde":    eur(r["current_value"]),
-                "Ongerealiseerde W/V": eur(r["unrealized"]),
-                "Gerealiseerde W/V":   eur(r["realized"]),
-                "Totale W/V":        eur(r["total"]),
-                "AI-advies":         badge.get(rec, "—"),
+                "W/V":                 sign_icon(r["net_total"]),
+                "Activum":             asset_label(t, nmap),
+                "Aantal (nu)":         f"{r['quantity']:.4f}" if r["quantity"] else "0",
+                "Huidige waarde":      eur(r["current_value"]),
+                "Ongerealiseerd":      eur(r["unrealized"]),
+                "Gerealiseerd":        eur(r["realized"]),
+                "Dividenden":          eur(r["dividends"]),
+                "Kosten":              eur(r["costs"]),
+                "Netto resultaat":     eur(r["net_total"]),
+                "AI-advies":           ai_badge(rec, changes.get(t)),
             })
-        st.dataframe(pd.DataFrame(rrows), width='stretch', hide_index=True)
-        tot_unreal = sum(r["unrealized"] for r in result.values())
-        tot_real   = sum(r["realized"] for r in result.values())
-        st.caption(f"**Totaal — ongerealiseerd {eur(tot_unreal)} + gerealiseerd {eur(tot_real)} "
-                   f"= {eur(tot_unreal + tot_real)}**  ·  🟢 = winst, 🔴 = verlies. "
-                   "AI-advies = consensus uit de laatste adviesrondes.")
-    else:
-        st.info("Nog geen posities of gerealiseerde historiek voor deze selectie.")
+        st.dataframe(pd.DataFrame(rrows), width="stretch", hide_index=True)
+        tu = sum(r["unrealized"] for r in result.values())
+        tr = sum(r["realized"] for r in result.values())
+        tdv = sum(r["dividends"] for r in result.values())
+        tc = sum(r["costs"] for r in result.values())
+        st.caption(f"**Netto resultaat — ongerealiseerd {eur(tu)} + gerealiseerd {eur(tr)} "
+                   f"+ dividenden {eur(tdv)} − kosten {eur(tc)} = {eur(tu + tr + tdv - tc)}**  ·  "
+                   "🟢 = positief, 🔴 = negatief.  🔺/🔻 = advies gewijzigd sinds de vorige ronde.")
 
-    # ── AI-ratingsynthese (laatste 9 adviezen) ────────────────────────────────
-    st.divider()
-    sc1, sc2 = st.columns([3, 1])
-    sc1.subheader("🤖 AI-advies — synthese laatste 9 rondes")
-    with sc2:
-        if st.button("🔄 Genereer AI-advies", key="gen_ratings"):
-            if not db.get_setting("openai_api_key", ""):
-                st.warning("Geen OpenAI-sleutel — stel die in via ⚙️ Instellingen.")
-            else:
-                with st.spinner("AI beoordeelt je portefeuille..."):
-                    res = ai_advisor.generate_portfolio_ratings()
-                if res.get("error"):
-                    st.error(res["error"])
+    def render_positions():
+        st.subheader("📋 Open posities")
+        rows = []
+        for ticker, pos in pv.items():
+            asset = assets_map.get(ticker, {})
+            div = divs_net.get(ticker, 0)
+            total_return = (pos["unrealized_gain_loss"] or 0) + div
+            tgt = price_targets.get(ticker)
+            upside = None
+            if tgt and pos["current_price"]:
+                upside = (tgt - pos["current_price"]) / pos["current_price"] * 100
+            rec = synth.get(ticker, {}).get("consensus")
+            rows.append({
+                "":             sign_icon(pos["unrealized_gain_loss"]),
+                "Ticker":       ticker,
+                "Naam":         (asset.get("name") or ticker)[:20],
+                "Munt":         pos["current_price_currency"] or "EUR",
+                "Aantal":       f"{pos['quantity']:.4f}",
+                "Gem.kostpr.(€)":  f"{pos['avg_cost']:.4f}",
+                "Koers (native)":  f"{pos['current_price']:.4f}" if pos["current_price"] else "—",
+                "Koersdoel":    f"{tgt:.2f}" if tgt else "—",
+                "Potentieel":   pct(upside) if upside is not None else "—",
+                "Huidige waarde": eur(pos["current_value"]),
+                "W/V (%)":      pct(pos["unrealized_gain_loss_pct"]),
+                "Dividend":     eur(div),
+                "Tot. rendement": eur(total_return),
+                "AI-advies":    ai_badge(rec, changes.get(ticker)),
+            })
+        st.dataframe(pd.DataFrame(rows), width="stretch", hide_index=True, height=420)
+
+        total_val  = overview["total_portfolio_value"]
+        total_cost = overview["total_cost_basis"]
+        tot_gl     = overview["unrealized_gl"]
+        tot_div    = dividends_net_eur(db.get_dividends(), accset)   # all-time, rekening-bewust
+        txn_costs  = overview.get("selection_costs", 0)
+        acct_costs = overview.get("account_costs_selection", 0)
+        all_costs  = txn_costs + acct_costs
+        net_return = tot_gl + tot_div - all_costs
+        c1, c2, c3, c4, c5 = st.columns(5)
+        c1.metric("Totaal geïnvesteerd", eur(total_cost))
+        c2.metric("Totale waarde",       eur(total_val))
+        c3.metric("Ongerealiseerde W/V", eur(tot_gl),
+                  delta=pct(tot_gl / total_cost * 100 if total_cost else 0),
+                  delta_color=delta_color(tot_gl))
+        c4.metric("Netto dividenden (all-time)", eur(tot_div))
+        c5.metric("Kosten (txn + rekening)", eur(all_costs),
+                  help="Transactiekosten + algemene rekeningkosten (bv. beheerskosten). "
+                       "Drukken het nettorendement, los van de meerwaardeberekening.")
+        st.caption(f"💡 Nettorendement na kosten: **{eur(net_return)}**  "
+                   f"(ongerealiseerde W/V + dividenden − kosten). "
+                   f"Waarvan transactiekosten {eur(txn_costs)} en rekeningkosten {eur(acct_costs)}.")
+
+    def render_realized():
+        st.subheader("📊 Gerealiseerde meer-/minwaarden (historiek)")
+        if acct:
+            st.caption(f"Rekeningen **{', '.join(acct)}**.")
+        else:
+            st.caption("Alle rekeningen, alle jaren — zo zie je de volledige historiek van een "
+                       "activum, ook als het op de ene rekening verkocht en op een andere heraangekocht is.")
+        render_realized_history(overview.get("selection_realized_gains", []), nmap)
+
+    def render_ai_synth():
+        sc1, sc2 = st.columns([3, 1])
+        sc1.subheader(f"🤖 AI-advies — synthese ({n_rounds} ronde(s))")
+        with sc2:
+            if st.button("🔄 Genereer AI-advies", key="gen_ratings"):
+                if not db.get_setting("openai_api_key", ""):
+                    st.warning("Geen OpenAI-sleutel — stel die in via ⚙️ Instellingen.")
                 else:
-                    st.success(f"✅ {res['stored']} ratings gegenereerd.")
-                    st.rerun()
-    if synth:
-        srows = []
-        for tk in pv:
-            s = synth.get(tk)
-            if not s:
-                srows.append({"Ticker": tk, "Consensus": "—", "Laatste": "—",
-                              "Sterk kopen": 0, "Kopen": 0, "Behouden": 0,
-                              "Verkopen": 0, "Sterk verkopen": 0, "Koersdoel": "—"})
-                continue
-            c = s["counts"]
-            srows.append({
-                "Ticker":         tk,
-                "Consensus":      badge.get(s["consensus"], "—"),
-                "Laatste":        ai_advisor.RATING_LABELS.get(s["latest"], "—"),
-                "Sterk kopen":    c["strong_buy"],
-                "Kopen":          c["buy"],
-                "Behouden":       c["hold"],
-                "Verkopen":       c["sell"],
-                "Sterk verkopen": c["strong_sell"],
-                "Koersdoel":      f"{s['latest_target']:.2f} {s['currency']}" if s.get("latest_target") else "—",
-            })
-        st.dataframe(pd.DataFrame(srows), width='stretch', hide_index=True)
-        st.caption("Telling van de ratings over de laatste (max 9) AI-adviesrondes per ticker. "
-                   "Consensus = meest voorkomende rating. Afgestemd op je profiel per rekening en je investeringsvolume.")
-    else:
-        st.info("Nog geen AI-adviezen. Klik op '🔄 Genereer AI-advies' om de eerste ronde te maken.")
+                    with st.spinner("AI beoordeelt je portefeuille..."):
+                        res = ai_advisor.generate_portfolio_ratings()
+                    if res.get("error"):
+                        st.error(res["error"])
+                    else:
+                        st.success(f"✅ {res['stored']} ratings gegenereerd.")
+                        st.rerun()
+        if synth:
+            srows = []
+            for tk in pv:
+                s = synth.get(tk)
+                ch = changes.get(tk)
+                delta = "🔺" if (ch and ch["up"]) else ("🔻" if ch else "")
+                if not s:
+                    srows.append({"Ticker": tk, "Consensus": "—", "Δ": "", "Laatste": "—",
+                                  "Sterk kopen": 0, "Kopen": 0, "Behouden": 0,
+                                  "Verkopen": 0, "Sterk verkopen": 0, "Koersdoel": "—"})
+                    continue
+                c = s["counts"]
+                srows.append({
+                    "Ticker":         tk,
+                    "Consensus":      RATING_BADGE.get(s["consensus"], "—"),
+                    "Δ":              delta,
+                    "Laatste":        ai_advisor.RATING_LABELS.get(s["latest"], "—"),
+                    "Sterk kopen":    c["strong_buy"],
+                    "Kopen":          c["buy"],
+                    "Behouden":       c["hold"],
+                    "Verkopen":       c["sell"],
+                    "Sterk verkopen": c["strong_sell"],
+                    "Koersdoel":      f"{s['latest_target']:.2f} {s['currency']}" if s.get("latest_target") else "—",
+                })
+            st.dataframe(pd.DataFrame(srows), width="stretch", hide_index=True)
+            st.caption(f"Telling van de ratings over de laatste {n_rounds} (max 9) adviesronde(s) per ticker. "
+                       "Consensus = meest voorkomende rating. Δ 🔺/🔻 = advies bullisher/bearisher dan de "
+                       "vorige ronde. Afgestemd op je profiel per rekening en je investeringsvolume.")
+        else:
+            st.info("Nog geen AI-adviezen gegenereerd. Klik op '🔄 Genereer AI-advies' om de eerste ronde te maken.")
 
+    def render_price_history():
+        st.subheader("📈 Prijsgeschiedenis")
+        tickers = list(pv.keys())
+        sel = st.selectbox("Selecteer positie:", tickers,
+                           format_func=lambda t: asset_label(t, nmap))
+        days = st.slider("Aantal dagen:", 1, 90, 14)
+        hist = db.get_price_history(sel, days=days)
+        if hist:
+            df_h = pd.DataFrame(hist)
+            df_h["timestamp"] = pd.to_datetime(df_h["timestamp"])
+            avg_cost = pv[sel]["avg_cost"]
+            fig = go.Figure()
+            fig.add_trace(go.Scatter(
+                x=df_h["timestamp"], y=df_h["price"],
+                mode="lines", line=dict(color="#74b9ff", width=2),
+                fill="tozeroy", fillcolor="rgba(116,185,255,0.08)",
+                name=nmap.get(sel, sel),
+            ))
+            fig.add_hline(y=avg_cost, line_dash="dash", line_color="#fdcb6e",
+                          annotation_text=f"Gem. kostprijs {avg_cost:.4f}")
+            fig.update_layout(
+                title=f"{asset_label(sel, nmap)} — {days} dagen",
+                height=340, plot_bgcolor="rgba(0,0,0,0)", paper_bgcolor="rgba(0,0,0,0)",
+                margin=dict(t=40, b=30, l=20, r=20),
+            )
+            st.plotly_chart(fig, width="stretch")
+        else:
+            st.info("Nog geen prijsgeschiedenis. De scheduler slaat elke 5 minuten koersen op.")
+
+    # Volgorde: totaal per activum → open posities → gerealiseerde historiek → AI-synthese → prijsgeschiedenis
+    render_per_asset()
     st.divider()
-    st.subheader("📈 Prijsgeschiedenis")
-    tickers = list(pv.keys())
-    names = asset_name_map()
-    sel = st.selectbox("Selecteer positie:", tickers,
-                       format_func=lambda t: asset_label(t, names))
-    days = st.slider("Aantal dagen:", 1, 90, 14)
-
-    hist = db.get_price_history(sel, days=days)
-    if hist:
-        df_h = pd.DataFrame(hist)
-        df_h["timestamp"] = pd.to_datetime(df_h["timestamp"])
-        avg_cost = pv[sel]["avg_cost"]
-
-        fig = go.Figure()
-        fig.add_trace(go.Scatter(
-            x=df_h["timestamp"], y=df_h["price"],
-            mode="lines", line=dict(color="#74b9ff", width=2),
-            fill="tozeroy", fillcolor="rgba(116,185,255,0.08)",
-            name=names.get(sel, sel),
-        ))
-        fig.add_hline(y=avg_cost, line_dash="dash", line_color="#fdcb6e",
-                      annotation_text=f"Gem. kostprijs {avg_cost:.4f}")
-        fig.update_layout(
-            title=f"{asset_label(sel, names)} — {days} dagen",
-            height=340, plot_bgcolor="rgba(0,0,0,0)", paper_bgcolor="rgba(0,0,0,0)",
-            margin=dict(t=40, b=30, l=20, r=20),
-        )
-        st.plotly_chart(fig, width='stretch')
-    else:
-        st.info("Nog geen prijsgeschiedenis. De scheduler slaat elke 5 minuten koersen op.")
-
+    render_positions()
     st.divider()
-    st.subheader("📊 Gerealiseerde meer-/minwaarden (historiek)")
-    if acct:
-        st.caption(f"Rekeningen **{', '.join(acct)}**.")
-    else:
-        st.caption("Alle rekeningen, alle jaren — zo zie je de volledige historiek van een "
-                   "activum, ook als het op de ene rekening verkocht en op een andere heraangekocht is.")
-    render_realized_history(overview.get("selection_realized_gains", []), asset_name_map())
+    render_realized()
+    st.divider()
+    render_ai_synth()
+    st.divider()
+    render_price_history()
 
 
 # ── PAGINA: Activa ────────────────────────────────────────────────────────────
@@ -2169,7 +2257,7 @@ with st.sidebar:
     st.title("📈 Portfolio Tracker")
     st.caption("Belgische belegger 🇧🇪")
 
-    selected = st.radio("Menu", list(PAGES.keys()), label_visibility="collapsed")
+    selected = st.radio("Menu", list(PAGES.keys()), label_visibility="collapsed", key="nav_menu")
 
     st.divider()
     # Snelle stats

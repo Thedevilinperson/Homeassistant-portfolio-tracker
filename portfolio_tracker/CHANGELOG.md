@@ -2,6 +2,27 @@
 
 Alle noemenswaardige wijzigingen aan de Portfolio Tracker add-on.
 
+## 0.15.0
+- Dashboard — AI-kooptips i.p.v. lange tekst: het AI-blok toont nu enkel de aandelen met
+een koopadvies (sterk kopen / kopen), zonder de uitleg, plus een knop "➡️ Naar AI Advisor".
+- Dashboard — advieswijzigingen: toont voor welke aandelen het koop/houden/verkoop-advies
+is opgewaardeerd (🔺) of afgewaardeerd (🔻) sinds de vorige adviesronde.
+- Dashboard — staafdiagram houdt nu rekening met dividenden en kosten: de balk per activum
+toont het netto resultaat = ongerealiseerde + gerealiseerde W/V + ontvangen dividenden − de
+aan het aandeel gelinkte kosten (transactiekosten + TOB), met de opsplitsing in de tooltip.
+- Portefeuille — AI-advies bij minder dan 9 rondes: de synthese en de AI-advieskolommen
+tonen nu meteen iets, ook met 1–8 adviesrondes (titel toont het werkelijke aantal). Een
+tickermatch-correctie zorgt ervoor dat ratings voor Europese tickers (bv. VWCE.DE) ook
+echt worden opgeslagen wanneer de AI het basis-symbool (VWCE) teruggeeft.
+- Portefeuille — wijzigingssymbool: 🔺/🔻 naast het advies wanneer het sinds de vorige
+ronde bullisher/bearisher werd.
+- Portefeuille — herordening: "Totaal resultaat per activum" staat nu bovenaan, dan de
+open posities, dan de gerealiseerde historiek, dan de AI-synthese en de prijsgeschiedenis.
+- De resultaattabel toont nu ook dividenden, kosten en het netto resultaat per activum.
+- Portefeuille — netto dividenden (all-time): de KPI "Netto dividenden" toont nu de
+all-time waarde (rekening-bewust) i.p.v. enkel het lopende jaar (toonde 0 als de dividenden
+in een ander jaar geboekt waren).
+
 ## 0.14.0
 - AI-belastingadvies nu maandelijks (i.p.v. dagelijks) — de scheduler genereert het
 advies op de 1e van de maand.
