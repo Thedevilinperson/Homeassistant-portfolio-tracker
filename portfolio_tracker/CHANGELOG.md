@@ -2,6 +2,11 @@
 
 Alle noemenswaardige wijzigingen aan de Portfolio Tracker add-on.
 
+## 0.13.1
+Fix: het dashboard gaf een fout bij een netto gerealiseerd verlies (de
+vrijstellings-indicator kreeg een negatieve waarde). De voortgangsbalk wordt nu
+correct afgeklemd op 0–100%.
+
 ## 0.13.0
 - Totaal resultaat per activum, over de rekeningen heen. De gerealiseerde winst/verlies
 van een activum wordt nu opgeteld over álle geselecteerde rekeningen (niet langer per

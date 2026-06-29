@@ -341,7 +341,7 @@ def page_dashboard():
         if overview.get("fotomoment_applied") and abs(taxable_gl - real_gl) > 0.005:
             st.caption(f"📸 Belastbare basis na fotomoment (31/12/2025): **{eur(taxable_gl)}** "
                        "— de winst van vóór 2026 is vrijgesteld.")
-        st.progress(min(1.0, pct_used / 100),
+        st.progress(max(0.0, min(1.0, pct_used / 100)),
                     text=f"{color_lbl} {pct_used:.1f}% van vrijstelling (€{exemption:,.0f})")
 
         if tax_due > 0:
