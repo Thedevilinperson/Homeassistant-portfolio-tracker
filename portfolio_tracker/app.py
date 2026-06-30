@@ -163,22 +163,32 @@ def per_asset_result(overview: dict, year=None, accounts=None) -> dict:
             continue
         div_by[d["ticker"]] = div_by.get(d["ticker"], 0.0) + dividend_net_eur(d)
 
-    # Aan het aandeel gelinkte kosten per ticker: transactiekosten + TOB (in EUR)
+    # Aan het aandeel gelinkte kosten per ticker: transactiekosten + TOB (in EUR),
+    # de personenbelasting op performance shares, en de toekenningswaarde (perf_basis)
+    # van die performance shares (= kostbasis die in de W/V zit; nodig voor het reële model).
     cost_by: dict[str, float] = {}
+    inctax_by: dict[str, float] = {}
+    perfbasis_by: dict[str, float] = {}
     for t in db.get_transactions():
         if accounts is not None and (t.get("account") or db.DEFAULT_ACCOUNT) not in accounts:
             continue
         if year is not None and str(t["date"])[:4] != str(year):
             continue
         cost_by[t["ticker"]] = cost_by.get(t["ticker"], 0.0) + (t.get("costs_eur") or 0.0) + (t.get("tob_tax") or 0.0)
+        inctax_by[t["ticker"]] = inctax_by.get(t["ticker"], 0.0) + (t.get("income_tax_eur") or 0.0)
+        if t.get("is_performance_share") and t["transaction_type"] == "buy":
+            perfbasis_by[t["ticker"]] = perfbasis_by.get(t["ticker"], 0.0) + (t.get("total_amount_eur") or 0.0)
 
     out: dict[str, dict] = {}
-    for t in set(pv) | set(real_by) | set(div_by) | set(cost_by):
+    for t in set(pv) | set(real_by) | set(div_by) | set(cost_by) | set(inctax_by):
         p = pv.get(t, {})
         unreal = p.get("unrealized_gain_loss") or 0.0
         realg  = real_by.get(t, 0.0)
         divg   = div_by.get(t, 0.0)
         costg  = cost_by.get(t, 0.0)
+        inctax = inctax_by.get(t, 0.0)
+        perfb  = perfbasis_by.get(t, 0.0)
+        net_total = unreal + realg + divg - costg
         out[t] = {
             "quantity":      p.get("quantity") or 0.0,
             "current_value": p.get("current_value") or 0.0,
@@ -187,9 +197,19 @@ def per_asset_result(overview: dict, year=None, accounts=None) -> dict:
             "total":         unreal + realg,
             "dividends":     divg,
             "costs":         costg,
-            "net_total":     unreal + realg + divg - costg,
+            "income_tax":    inctax,
+            "perf_basis":    perfb,
+            "net_total":     net_total,                         # zuivere W/V-zienswijze (toekenningswaarde als basis)
+            "net_real":      net_total + perfb - inctax,        # reële zienswijze (betaalde belasting als kost)
         }
     return out
+
+
+def perf_net(r: dict, real_model: bool = True) -> float:
+    """Netto resultaat van een activum volgens de gekozen zienswijze voor performance shares.
+    real_model=True: reële winst (huidige waarde − betaalde personenbelasting).
+    real_model=False: zuivere meerwaarde t.o.v. de toekenningswaarde."""
+    return r["net_real"] if real_model else r["net_total"]
 
 
 def render_realized_history(realized_list, names=None, empty_msg="Nog geen gerealiseerde meer-/minwaarden."):
@@ -252,6 +272,27 @@ def df_row_select(df, key: str):
     return None
 
 
+def delete_with_confirm(btn_label, state_key, target_id, warning, do_delete, btn_container=None):
+    """Wis-knop met expliciete bevestigingsstap. do_delete() draait pas na bevestiging.
+    Voorkomt dat één klik onmiddellijk (onomkeerbaar) data wist."""
+    container = btn_container if btn_container is not None else st
+    if st.session_state.get(state_key) == target_id:
+        st.warning(warning)
+        cc1, cc2 = st.columns(2)
+        if cc1.button("✅ Ja, definitief verwijderen", key=f"{state_key}_yes", width="stretch"):
+            do_delete()
+            st.session_state.pop(state_key, None)
+            clear_cache()
+            st.rerun()
+        if cc2.button("✖️ Annuleren", key=f"{state_key}_no", width="stretch"):
+            st.session_state.pop(state_key, None)
+            st.rerun()
+        return True   # bevestiging staat open
+    if container.button(btn_label, key=f"{state_key}_btn", width="stretch"):
+        st.session_state[state_key] = target_id
+        st.rerun()
+    return False
+
 
 def backfill_eur(force: bool = False) -> int:
     """Reken bestaande transacties + dividenden om naar EUR (historische koers)."""
@@ -288,6 +329,16 @@ def page_dashboard():
         period = st.radio("Periode", ["YTD (dit jaar)", "Sinds start (all-time)"],
                           horizontal=True, key="dash_period", label_visibility="collapsed")
     all_time = period.startswith("Sinds")
+    # Toggle: hoe performance shares meetellen in het resultaat
+    has_inctax = any((t.get("income_tax_eur") or 0) > 0 for t in db.get_transactions())
+    real_perf = True
+    if has_inctax:
+        real_perf = st.checkbox(
+            "Performance shares doorrekenen aan betaalde personenbelasting",
+            value=True, key="dash_real_perf",
+            help="AAN: reële winst = huidige waarde − betaalde personenbelasting (de toekenningswaarde "
+                 "telt niet als kost; je investeerde in feite enkel de belasting). UIT: zuivere "
+                 "meerwaarde t.o.v. de toekenningswaarde. Beïnvloedt enkel de weergave, niet de meerwaardebelasting.")
     if acct:
         st.caption(f"📂 Gefilterd op: **{', '.join(acct)}** — belastingcijfers blijven globaal (vrijstelling geldt per persoon).")
 
@@ -342,6 +393,9 @@ def page_dashboard():
                help="Winst/verlies uit verkopen, over alle geselecteerde rekeningen heen — "
                     "ook van posities die elders heraangekocht zijn.")
     rc3.metric("Totale W/V (gereal. + ongereal.)", eur(totale_wv), delta_color=delta_color(totale_wv))
+    _cash_avail = db.compute_cash_positions(accset)["totals"]["available"]
+    st.caption(f"💶 **Beschikbare cash** (deze selectie): **{eur(_cash_avail)}** — om aandelen mee te "
+               "kopen. Stortingen/opnames beheer je op de **💶 Cash**-pagina.")
 
     st.divider()
 
@@ -376,14 +430,15 @@ def page_dashboard():
         names = asset_name_map()
         result = per_asset_result(overview, year=None if all_time else year, accounts=accset)
         if result:
-            tickers_sorted = sorted(result.keys(), key=lambda t: result[t]["net_total"])
-            net_vals  = [result[t]["net_total"] for t in tickers_sorted]
+            tickers_sorted = sorted(result.keys(), key=lambda t: perf_net(result[t], real_perf))
+            net_vals  = [perf_net(result[t], real_perf) for t in tickers_sorted]
             wv_vals   = [result[t]["total"] for t in tickers_sorted]
             div_vals  = [result[t]["dividends"] for t in tickers_sorted]
             cost_vals = [result[t]["costs"] for t in tickers_sorted]
+            tax_vals  = [result[t]["income_tax"] for t in tickers_sorted]
             labels    = [names.get(t, t) for t in tickers_sorted]
             colors    = ["#00b894" if v >= 0 else "#d63031" for v in net_vals]
-            customdata = list(zip(tickers_sorted, wv_vals, div_vals, cost_vals))
+            customdata = list(zip(tickers_sorted, wv_vals, div_vals, cost_vals, tax_vals))
 
             fig_bar = go.Figure(go.Bar(
                 x=labels, y=net_vals, marker_color=colors,
@@ -392,7 +447,8 @@ def page_dashboard():
                 hovertemplate="<b>%{x}</b> (%{customdata[0]})<br>Netto resultaat: €%{y:,.2f}"
                               "<br>W/V (gereal.+ongereal.): €%{customdata[1]:,.2f}"
                               "<br>Dividenden: €%{customdata[2]:,.2f}"
-                              "<br>Kosten (txn + TOB): −€%{customdata[3]:,.2f}<extra></extra>",
+                              "<br>Kosten (txn + TOB): −€%{customdata[3]:,.2f}"
+                              "<br>Personenbelasting: −€%{customdata[4]:,.2f}<extra></extra>",
             ))
             fig_bar.add_hline(y=0, line_dash="dot", line_color="rgba(200,200,200,0.3)")
             fig_bar.update_layout(
@@ -402,8 +458,17 @@ def page_dashboard():
                 plot_bgcolor="rgba(0,0,0,0)", paper_bgcolor="rgba(0,0,0,0)",
             )
             st.plotly_chart(fig_bar, width='stretch')
-            st.caption("Netto = ongerealiseerde + gerealiseerde W/V + ontvangen dividenden − "
-                       "de aan het aandeel gelinkte kosten (transactiekosten + TOB).")
+            tot_inctax = sum(r["income_tax"] for r in result.values())
+            tot_net    = sum(perf_net(r, real_perf) for r in result.values())
+            if tot_inctax and real_perf:
+                cap = ("Performance shares gerekend aan de betaalde personenbelasting "
+                       "(reële winst = huidige waarde − belasting).")
+            elif tot_inctax:
+                cap = "Performance shares gerekend aan de toekenningswaarde (zuivere meerwaarde)."
+            else:
+                cap = "Netto = ongerealiseerde + gerealiseerde W/V + dividenden − kosten (txn + TOB)."
+            st.caption(cap + f"  **Totaal netto: {eur(tot_net)}**"
+                       + (f"  ·  betaalde personenbelasting: {eur(tot_inctax)}" if tot_inctax else ""))
 
     with col_r:
         # Belastingstatus
@@ -452,7 +517,7 @@ def page_dashboard():
             st.caption("**Advieswijzigingen sinds de vorige ronde** — " + "  ·  ".join(parts))
 
         if st.button("➡️ Naar AI Advisor", key="dash_to_ai", width="stretch"):
-            st.session_state["nav_menu"] = "🤖 AI Advisor"
+            st.session_state["nav_goto"] = "🤖 AI Advisor"
             st.rerun()
 
     st.divider()
@@ -527,19 +592,22 @@ def page_portfolio():
 
     def render_per_asset():
         st.subheader("📊 Totaal resultaat per activum")
-        st.caption("Per activum: ongerealiseerde + gerealiseerde W/V (over alle geselecteerde "
-                   "rekeningen, alle jaren), de ontvangen dividenden en de gelinkte kosten "
-                   "(transactiekosten + TOB). 'Netto resultaat' telt dat alles samen.")
+        st.caption("Per activum: ongerealiseerde + gerealiseerde W/V, ontvangen dividenden, gelinkte "
+                   "kosten (transactiekosten + TOB) en — voor performance shares — de betaalde "
+                   "personenbelasting. Voor performance shares is het 'Netto resultaat' de reële winst: "
+                   "huidige waarde − betaalde personenbelasting (de toekenningswaarde telt niet als kost).")
         result = per_asset_result(overview, year=None, accounts=accset)
         if not result:
             st.info("Nog geen posities of historiek voor deze selectie.")
             return
+        any_inctax = any(r["income_tax"] for r in result.values())
         rrows = []
-        for t in sorted(result.keys(), key=lambda x: result[x]["net_total"], reverse=True):
+        for t in sorted(result.keys(), key=lambda x: result[x]["net_real"], reverse=True):
             r = result[t]
             rec = synth.get(t, {}).get("consensus")
-            rrows.append({
-                "W/V":                 sign_icon(r["net_total"]),
+            net = r["net_real"]
+            row = {
+                "W/V":                 sign_icon(net),
                 "Activum":             asset_label(t, nmap),
                 "Aantal (nu)":         f"{r['quantity']:.4f}" if r["quantity"] else "0",
                 "Huidige waarde":      eur(r["current_value"]),
@@ -547,17 +615,25 @@ def page_portfolio():
                 "Gerealiseerd":        eur(r["realized"]),
                 "Dividenden":          eur(r["dividends"]),
                 "Kosten":              eur(r["costs"]),
-                "Netto resultaat":     eur(r["net_total"]),
-                "AI-advies":           ai_badge(rec, changes.get(t)),
-            })
+            }
+            if any_inctax:
+                row["Personenbel."] = eur(r["income_tax"]) if r["income_tax"] else "—"
+            row["Netto resultaat"] = eur(net)
+            row["AI-advies"]       = ai_badge(rec, changes.get(t))
+            rrows.append(row)
         st.dataframe(pd.DataFrame(rrows), width="stretch", hide_index=True)
         tu = sum(r["unrealized"] for r in result.values())
         tr = sum(r["realized"] for r in result.values())
         tdv = sum(r["dividends"] for r in result.values())
         tc = sum(r["costs"] for r in result.values())
-        st.caption(f"**Netto resultaat — ongerealiseerd {eur(tu)} + gerealiseerd {eur(tr)} "
-                   f"+ dividenden {eur(tdv)} − kosten {eur(tc)} = {eur(tu + tr + tdv - tc)}**  ·  "
-                   "🟢 = positief, 🔴 = negatief.  🔺/🔻 = advies gewijzigd sinds de vorige ronde.")
+        tpb = sum(r["income_tax"] for r in result.values())
+        net_all = sum(r["net_real"] for r in result.values())
+        extra = (f"  Voor performance shares geldt: reële winst = huidige waarde − personenbelasting "
+                 f"(totaal betaalde personenbelasting {eur(tpb)})." if tpb else "")
+        st.caption(f"**Totaal netto resultaat: {eur(net_all)}** "
+                   f"(ongerealiseerd {eur(tu)} + gerealiseerd {eur(tr)} + dividenden {eur(tdv)} − kosten {eur(tc)}"
+                   + (" + performance-aanpassing" if tpb else "") + ").  "
+                   "🟢 = positief, 🔴 = negatief.  🔺/🔻 = advies gewijzigd sinds de vorige ronde." + extra)
 
     def render_positions():
         st.subheader("📋 Open posities")
@@ -610,6 +686,9 @@ def page_portfolio():
         st.caption(f"💡 Nettorendement na kosten: **{eur(net_return)}**  "
                    f"(ongerealiseerde W/V + dividenden − kosten). "
                    f"Waarvan transactiekosten {eur(txn_costs)} en rekeningkosten {eur(acct_costs)}.")
+        _cash = db.compute_cash_positions(accset)["totals"]["available"]
+        st.caption(f"💶 **Beschikbare cash** (deze selectie): **{eur(_cash)}** — beheer stortingen en "
+                   "opnames via de **💶 Cash**-pagina.")
 
     def render_realized():
         st.subheader("📊 Gerealiseerde meer-/minwaarden (historiek)")
@@ -622,19 +701,29 @@ def page_portfolio():
 
     def render_ai_synth():
         sc1, sc2 = st.columns([3, 1])
-        sc1.subheader(f"🤖 AI-advies — synthese ({n_rounds} ronde(s))")
+        sc1.subheader(f"🤖 AI-advies — synthese ({n_rounds} dag(en))")
         with sc2:
-            if st.button("🔄 Genereer AI-advies", key="gen_ratings"):
+            if st.button("🔄 Genereer advies", key="gen_ratings",
+                         help="Genereert het volledige dagelijkse portefeuilleadvies (tekst + ratings)."):
                 if not db.get_setting("openai_api_key", ""):
                     st.warning("Geen OpenAI-sleutel — stel die in via ⚙️ Instellingen.")
                 else:
                     with st.spinner("AI beoordeelt je portefeuille..."):
-                        res = ai_advisor.generate_portfolio_ratings()
+                        res = ai_advisor.generate_daily_portfolio_advice()
                     if res.get("error"):
                         st.error(res["error"])
                     else:
-                        st.success(f"✅ {res['stored']} ratings gegenereerd.")
+                        st.success(f"✅ Advies gegenereerd ({res['stored']} ratings).")
                         st.rerun()
+
+        # Tekstadvies uit het laatste dagelijkse advies
+        latest = db.get_ai_evaluations("daily_advice", limit=1)
+        if latest and (latest[0].get("content") or "").strip():
+            ev = latest[0]
+            with st.expander("📝 Volledig tekstadvies (laatste dag)", expanded=False):
+                st.caption(f"📅 {ev['created_at'][:16]}")
+                st.markdown(ev["content"])
+
         if synth:
             srows = []
             for tk in pv:
@@ -660,11 +749,12 @@ def page_portfolio():
                     "Koersdoel":      f"{s['latest_target']:.2f} {s['currency']}" if s.get("latest_target") else "—",
                 })
             st.dataframe(pd.DataFrame(srows), width="stretch", hide_index=True)
-            st.caption(f"Telling van de ratings over de laatste {n_rounds} (max 9) adviesronde(s) per ticker. "
-                       "Consensus = meest voorkomende rating. Δ 🔺/🔻 = advies bullisher/bearisher dan de "
-                       "vorige ronde. Afgestemd op je profiel per rekening en je investeringsvolume.")
+            st.caption(f"Synthese van de ratings uit de laatste {n_rounds} (max 9) dagelijkse adviezen per ticker. "
+                       "Consensus = meest voorkomende rating. Δ 🔺/🔻 = bullisher/bearisher dan de vorige dag. "
+                       "Het advies wordt elke werkdag automatisch gegenereerd; met de knop kun je het meteen vernieuwen.")
         else:
-            st.info("Nog geen AI-adviezen gegenereerd. Klik op '🔄 Genereer AI-advies' om de eerste ronde te maken.")
+            st.info("Nog geen AI-advies. Klik op '🔄 Genereer advies' voor het eerste dagelijkse advies "
+                    "(of wacht op de automatische dagelijkse run).")
 
     def render_price_history():
         st.subheader("📈 Prijsgeschiedenis")
@@ -960,10 +1050,11 @@ def page_assets():
             if b1.button("✏️ Bewerk", key="asset_action_edit", width="stretch"):
                 st.session_state["edit_asset"] = sel_tk
                 st.rerun()
-            if b2.button("🗑️ Wis (incl. transacties)", key="asset_action_del", width="stretch"):
-                db.delete_asset(sel_tk)
-                clear_cache()
-                st.rerun()
+            delete_with_confirm(
+                "🗑️ Wis (incl. transacties)", "confirm_del_asset", sel_tk,
+                f"⚠️ **{asset_label(sel_tk, a_names)}** verwijderen wist óók ALLE transacties, "
+                "dividenden en splitsingen van dit activum. Dit is onomkeerbaar. Doorgaan?",
+                lambda: db.delete_asset(sel_tk), btn_container=b2)
 
     with tab_splits:
         st.subheader("🔀 Aandelensplitsingen")
@@ -1115,19 +1206,49 @@ def page_transactions():
                                           key=kk("costs_cur"))
         costs = costs or 0.0
 
+        # Performance shares (vesting): gekregen i.p.v. gekocht. Kostbasis = waarde bij
+        # toekenning (waarop je al personenbelasting betaalde); geen TOB, geen cash.
+        is_perf = False
+        income_tax_eur = 0.0
+        if txn_type == "buy":
+            is_perf = st.checkbox(
+                "🎁 Performance shares (toekenning / vesting)", key=kk("perf"),
+                help="Aandelen die je kreeg i.p.v. kocht (bv. via je werkgever). Voer het aantal en de "
+                     "koers op de toekenningsdatum in — die waarde wordt je kostbasis voor de "
+                     "meerwaarde (je betaalde er al personenbelasting op). Geen TOB en geen cash-uitgave.")
+            if is_perf:
+                _, _vest_eur = compute_eur(total_amount, currency, txn_date)
+                pb_pct = st.number_input(
+                    "Personenbelasting bij toekenning (%)", min_value=0.0, max_value=100.0,
+                    value=53.5, step=0.5, key=kk("perf_pct"),
+                    help="Marginaal tarief waartegen de toekenning als beroepsinkomen belast werd "
+                         "(vaak ± 53,5%). Dit bedrag wordt apart bijgehouden als personenbelasting.")
+                income_tax_eur = round(_vest_eur * pb_pct / 100, 2)
+                if st.checkbox("Bedrag personenbelasting manueel ingeven", key=kk("perf_man")):
+                    income_tax_eur = st.number_input(
+                        "Personenbelasting (€)", min_value=0.0, value=income_tax_eur,
+                        step=0.01, format="%.2f", key=kk("perf_taxval"))
+                st.caption(f"📌 Kostbasis ≈ **€{_vest_eur:,.2f}** | personenbelasting "
+                           f"**€{income_tax_eur:,.2f}** (apart bijgehouden, toggle op dashboard). "
+                           "Geen TOB, geen cash-uitgave.")
+
         asset_info = assets_map.get(ticker, {})
         _fx_prev, _eur_prev = compute_eur(total_amount, currency, txn_date)
-        tob_amount = tax_mod.calculate_tob(asset_info.get("asset_type", "stock"),
-                                           asset_info.get("etf_subtype", "distributing"),
-                                           _eur_prev,
-                                           bool(asset_info.get("belgian_registered", 1)),
-                                           txn_date=txn_date)
-        eur_hint = "" if currency == "EUR" else f" ≈ **€{_eur_prev:,.2f}** (koers {_fx_prev:.4f})"
-        st.info(f"**Totaalwaarde:** {currency} {total_amount:,.4f}{eur_hint} | **TOB:** €{tob_amount:,.2f}")
-
-        if st.checkbox("TOB manueel aanpassen", key=kk("tob_man")):
-            tob_amount = st.number_input("TOB (€)", min_value=0.0, value=tob_amount,
-                                         step=0.01, format="%.2f", key=kk("tob_val"))
+        if is_perf:
+            tob_amount = 0.0
+            st.info(f"**Waarde bij toekenning:** {currency} {total_amount:,.4f}"
+                    f"{'' if currency == 'EUR' else f' ≈ €{_eur_prev:,.2f}'} | **TOB:** €0,00 (toekenning)")
+        else:
+            tob_amount = tax_mod.calculate_tob(asset_info.get("asset_type", "stock"),
+                                               asset_info.get("etf_subtype", "distributing"),
+                                               _eur_prev,
+                                               bool(asset_info.get("belgian_registered", 1)),
+                                               txn_date=txn_date)
+            eur_hint = "" if currency == "EUR" else f" ≈ **€{_eur_prev:,.2f}** (koers {_fx_prev:.4f})"
+            st.info(f"**Totaalwaarde:** {currency} {total_amount:,.4f}{eur_hint} | **TOB:** €{tob_amount:,.2f}")
+            if st.checkbox("TOB manueel aanpassen", key=kk("tob_man")):
+                tob_amount = st.number_input("TOB (€)", min_value=0.0, value=tob_amount,
+                                             step=0.01, format="%.2f", key=kk("tob_val"))
         notes = st.text_area("Notities (optioneel)", height=60, key=kk("notes"))
 
         if st.button("✅ Transactie toevoegen", type="primary", key=kk("submit")):
@@ -1150,7 +1271,9 @@ def page_transactions():
                                        notes or None, account=account, costs=costs,
                                        costs_currency=costs_currency, fx_rate=fx_rate,
                                        total_amount_eur=tot_eur, costs_eur=costs_eur,
-                                       price_target=(price_target or None))
+                                       price_target=(price_target or None),
+                                       is_performance_share=int(is_perf),
+                                       income_tax_eur=income_tax_eur)
                     clear_cache()
                     # Volledige reset: bump formulier-nonce + koersdoel-staging leeg
                     st.session_state["txn_add_nonce"] = txn_n + 1
@@ -1200,6 +1323,21 @@ def page_transactions():
                         e_costs = st.number_input("Kosten", min_value=0.0, value=float(et.get("costs") or 0.0), step=0.01, format="%.2f")
                         e_costs_cur = st.selectbox("Kostenmunt", CUR, index=CUR.index(et.get("costs_currency") or "EUR") if (et.get("costs_currency") or "EUR") in CUR else 0)
                     e_notes = st.text_area("Notities", value=et.get("notes") or "", height=60)
+
+                    # Performance shares — ook om bestaande transacties om te vormen
+                    _cur_inctax = float(et.get("income_tax_eur") or 0.0)
+                    _cur_baseeur = float(et.get("total_amount_eur") or 0.0)
+                    _def_pct = round(_cur_inctax / _cur_baseeur * 100, 1) if (_cur_inctax and _cur_baseeur) else 53.5
+                    st.markdown("**🎁 Performance shares (toekenning / vesting)**")
+                    pf1, pf2, pf3 = st.columns(3)
+                    e_perf = pf1.checkbox("Is een toekenning", value=bool(et.get("is_performance_share")),
+                                          help="Vink aan om deze (reeds ingevoerde) transactie om te vormen tot "
+                                               "performance shares. De kostbasis blijft de ingevulde waarde; TOB wordt op €0 gezet.")
+                    e_pb_pct = pf2.number_input("Personenbelasting (%)", min_value=0.0, max_value=100.0,
+                                                value=_def_pct, step=0.5)
+                    e_inctax = pf3.number_input("of exact bedrag (€)", min_value=0.0, value=_cur_inctax,
+                                                step=0.01, format="%.2f",
+                                                help="Laat op 0 om uit het % te berekenen; vul in voor een exact bedrag.")
                     s1, s2 = st.columns(2)
                     save = s1.form_submit_button("💾 Opslaan", type="primary")
                     cancel = s2.form_submit_button("✖️ Annuleren")
@@ -1207,16 +1345,24 @@ def page_transactions():
                         e_total = e_qty * e_price
                         fx, tot_eur = compute_eur(e_total, e_cur, e_date)
                         _, ce = compute_eur(e_costs, e_costs_cur, e_date)
+                        if e_perf:
+                            inc_tax = e_inctax if e_inctax > 0 else round(tot_eur * e_pb_pct / 100, 2)
+                            tob_final = 0.0
+                        else:
+                            inc_tax = 0.0
+                            tob_final = e_tob
                         db.update_transaction(edit_id, ticker=e_ticker, transaction_type=e_type,
                                               date=str(e_date), quantity=e_qty, price_per_unit=e_price,
-                                              total_amount=e_total, currency=e_cur, tob_tax=e_tob,
+                                              total_amount=e_total, currency=e_cur, tob_tax=tob_final,
                                               notes=e_notes or None, account=e_acct, costs=e_costs,
                                               costs_currency=e_costs_cur, fx_rate=fx,
                                               total_amount_eur=tot_eur, costs_eur=ce,
-                                              price_target=(e_tgt or None))
+                                              price_target=(e_tgt or None),
+                                              is_performance_share=int(e_perf), income_tax_eur=inc_tax)
                         clear_cache()
                         st.session_state.pop("edit_txn", None)
-                        st.success("✅ Transactie bijgewerkt!")
+                        st.success("✅ Transactie bijgewerkt!"
+                                   + (" Omgevormd tot performance shares." if e_perf else ""))
                         st.rerun()
                     if cancel:
                         st.session_state.pop("edit_txn", None)
@@ -1287,10 +1433,11 @@ def page_transactions():
             if a2.button("✏️ Bewerk", key="txn_action_edit", width="stretch"):
                 st.session_state["edit_txn"] = sel_id
                 st.rerun()
-            if a3.button("🗑️ Wis", key="txn_action_del", width="stretch"):
-                db.delete_transaction(sel_id)
-                clear_cache()
-                st.rerun()
+            delete_with_confirm(
+                "🗑️ Wis", "confirm_del_txn", sel_id,
+                f"Transactie #{sel_id} ({asset_label(sel_t['ticker'], names)}, {sel_t['date'][:10]}) "
+                "definitief verwijderen? Dit kan niet ongedaan gemaakt worden.",
+                lambda: db.delete_transaction(sel_id), btn_container=a3)
 
     with tab_costs:
         st.subheader("🏦 Algemene rekeningkosten")
@@ -1628,10 +1775,11 @@ def page_dividends():
             if da2.button("✏️ Bewerk", key="div_action_edit", width="stretch"):
                 st.session_state["edit_div"] = sel_did
                 st.rerun()
-            if da3.button("🗑️ Wis", key="div_action_del", width="stretch"):
-                db.delete_dividend(sel_did)
-                clear_cache()
-                st.rerun()
+            delete_with_confirm(
+                "🗑️ Wis", "confirm_del_div", sel_did,
+                f"Dividend #{sel_did} ({asset_label(sel_d['ticker'], names_map)}, {sel_d['date'][:10]}) "
+                "definitief verwijderen? Dit kan niet ongedaan gemaakt worden.",
+                lambda: db.delete_dividend(sel_did), btn_container=da3)
 
 
 # ── PAGINA: Belgische belasting ────────────────────────────────────────────────
@@ -1811,8 +1959,9 @@ def page_ai_advisor():
             if usage["by_function"]:
                 st.caption("Per functie")
                 func_labels = {"tax_optimization": "Belastingadvies",
-                               "market_evaluation": "Marktevaluatie",
-                               "portfolio_ratings": "Portefeuille-ratings",
+                               "daily_advice": "Dagelijks advies",
+                               "market_evaluation": "Marktevaluatie (oud)",
+                               "portfolio_ratings": "Portefeuille-ratings (oud)",
                                "price_target": "Koersdoel", "chat": "Overig",
                                "price_refresh": "Prijsverversing"}
                 st.dataframe(pd.DataFrame([{
@@ -1846,39 +1995,34 @@ def page_ai_advisor():
                        "Controleer je OpenAI-dashboard voor de exacte factuur.")
         st.divider()
 
-    tab_tax, tab_open, tab_mid, tab_close = st.tabs([
-        "💡 Belastingoptimalisatie",
-        "🔔 Marktopening",
-        "☀️ Middag",
-        "🔕 Slotring",
+    # Actieve privacymodus tonen
+    _plvl = ai_advisor.privacy_level()
+    if _plvl != "off":
+        _pl = "bedragen verborgen (percentages)" if _plvl == "amounts" else "volledig anoniem (ook tickers)"
+        st.caption(f"🔒 Privacymodus actief: **{_pl}**. Pas aan via ⚙️ Instellingen → AI.")
+
+    tab_tax, tab_daily = st.tabs([
+        "💡 Belastingoptimalisatie (maandelijks)",
+        "🤖 Dagelijks portefeuilleadvies",
     ])
 
-    def render_eval_tab(eval_type: str, timing_filter: str | None,
-                        button_label: str, manual_args: dict):
-        evals = db.get_ai_evaluations(eval_type, limit=10)
-        if timing_filter:
-            evals = [e for e in evals if e.get("timing") == timing_filter]
-
-        latest = evals[0] if evals else None
-        if latest:
-            st.caption(f"📅 Gegenereerd op: {latest['created_at'][:16]}")
-            if latest.get("tickers"):
-                st.caption(f"📊 Tickers: {latest['tickers']}")
-            st.markdown(latest["content"])
+    with tab_tax:
+        st.subheader("💡 Belastingoptimalisatieadvies")
+        st.caption("Automatisch gegenereerd op de 1e van de maand om 08:00. Gebaseerd op je actuele "
+                   "portefeuille en de Belgische fiscale regels.")
+        if not ai_advisor.ai_function_enabled("tax"):
+            st.warning("Deze functie staat uit. Schakel ze in via ⚙️ Instellingen → AI.")
+        evals = db.get_ai_evaluations("tax_optimization", limit=10)
+        if evals:
+            st.caption(f"📅 Laatste: {evals[0]['created_at'][:16]}")
+            st.markdown(evals[0]["content"])
         else:
-            st.info("Nog geen evaluatie beschikbaar. Klik op de knop hieronder of wacht op de dagelijkse scheduler.")
-
-        st.divider()
-        if st.button(button_label, type="primary", key=f"gen_{eval_type}_{timing_filter}"):
-            with st.spinner("GPT analyseert uw portefeuille..."):
-                if eval_type == "tax_optimization":
-                    ai_advisor.generate_tax_optimization()
-                else:
-                    ai_advisor.generate_market_evaluation(
-                        manual_args["timing"], manual_args["exchanges"])
+            st.info("Nog geen belastingadvies. Klik hieronder of wacht op de maandelijkse run.")
+        if st.button("💡 Genereer belastingadvies nu", type="primary", key="gen_tax"):
+            with st.spinner("AI analyseert je portefeuille..."):
+                ai_advisor.generate_tax_optimization()
             clear_cache()
             st.rerun()
-
         if len(evals) > 1:
             with st.expander("📚 Historiek"):
                 for ev in evals[1:]:
@@ -1886,33 +2030,37 @@ def page_ai_advisor():
                     st.markdown(ev["content"])
                     st.divider()
 
-    with tab_tax:
-        st.subheader("💡 Dagelijks belastingoptimalisatieadvies")
-        st.caption("Automatisch gegenereerd op werkdagen om 08:00. Gebaseerd op actuele portefeuille en Belgische fiscale regels.")
-        render_eval_tab("tax_optimization", None,
-                        "💡 Genereer belastingadvies nu",
-                        {})
-
-    with tab_open:
-        st.subheader("🔔 Evaluatie bij marktopening")
-        st.caption("Euronext: 09:05 | NYSE/NASDAQ: 15:35 (Brussels Time)")
-        render_eval_tab("market_evaluation", "open",
-                        "🔔 Genereer opening-evaluatie nu",
-                        {"timing": "open", "exchanges": ["Euronext", "NYSE", "NASDAQ"]})
-
-    with tab_mid:
-        st.subheader("☀️ Evaluatie midden van de beursdag")
-        st.caption("Euronext: 13:15 | NYSE/NASDAQ: 18:45 (Brussels Time)")
-        render_eval_tab("market_evaluation", "midday",
-                        "☀️ Genereer middag-evaluatie nu",
-                        {"timing": "midday", "exchanges": ["Euronext", "NYSE", "NASDAQ"]})
-
-    with tab_close:
-        st.subheader("🔕 Evaluatie bij slotring")
-        st.caption("Euronext: 17:35 | NYSE/NASDAQ: 22:05 (Brussels Time)")
-        render_eval_tab("market_evaluation", "close",
-                        "🔕 Genereer slotring-evaluatie nu",
-                        {"timing": "close", "exchanges": ["Euronext", "NYSE", "NASDAQ"]})
+    with tab_daily:
+        st.subheader("🤖 Dagelijks portefeuilleadvies")
+        st.caption("Eén advies per werkdag (18:00) voor de hele portefeuille. Levert zowel dit "
+                   "tekstadvies als de koop/houden/verkoop-ratings die de tabellen op de "
+                   "**💼 Portefeuille**-pagina voeden.")
+        if not ai_advisor.ai_function_enabled("daily"):
+            st.warning("Deze functie staat uit. Schakel ze in via ⚙️ Instellingen → AI.")
+        devals = db.get_ai_evaluations("daily_advice", limit=10)
+        if devals and (devals[0].get("content") or "").strip():
+            st.caption(f"📅 Laatste: {devals[0]['created_at'][:16]}")
+            st.markdown(devals[0]["content"])
+        else:
+            st.info("Nog geen dagelijks advies. Klik hieronder of wacht op de dagelijkse run.")
+        if st.button("🤖 Genereer dagelijks advies nu", type="primary", key="gen_daily"):
+            with st.spinner("AI beoordeelt je portefeuille..."):
+                res = ai_advisor.generate_daily_portfolio_advice()
+            if res.get("error"):
+                st.error(res["error"])
+            else:
+                st.success(f"✅ Advies gegenereerd ({res['stored']} ratings). "
+                           "De portefeuille-tabellen zijn bijgewerkt.")
+            clear_cache()
+            st.rerun()
+        if len(devals) > 1:
+            with st.expander("📚 Historiek"):
+                for ev in devals[1:]:
+                    if not (ev.get("content") or "").strip():
+                        continue
+                    st.caption(f"📅 {ev['created_at'][:16]}")
+                    st.markdown(ev["content"])
+                    st.divider()
 
 
 # ── PAGINA: Instellingen ──────────────────────────────────────────────────────
@@ -1955,12 +2103,37 @@ def page_settings():
             vol_y = st.number_input("Geschat bedrag per jaar (€)", min_value=0.0, step=500.0,
                                     value=float(db.get_setting("investment_volume_year", "0") or 0))
 
+        st.divider()
+        st.markdown("**🔒 Privacy & AI-functies**")
+        st.caption("Bepaal hoeveel van je financiële data naar OpenAI gestuurd wordt en welke "
+                   "AI-functies actief zijn. OpenAI gebruikt API-invoer standaard niet om modellen "
+                   "te trainen; deze instellingen beperken de data extra.")
+        priv_opts = ["off", "amounts", "full"]
+        priv_lbl = {"off": "Uit — volledige data (tickers + bedragen)",
+                    "amounts": "Bedragen verbergen — enkel gewichten in %, tickers blijven",
+                    "full": "Volledig anoniem — ook tickers/namen vervangen door POS1, POS2, ..."}
+        cur_priv = db.get_setting("ai_privacy_mode", "off")
+        privacy = st.selectbox("Privacymodus", priv_opts,
+                               index=priv_opts.index(cur_priv) if cur_priv in priv_opts else 0,
+                               format_func=lambda k: priv_lbl[k])
+        st.caption("Bij 'volledig anoniem' krijgt de AI geen tickers, namen of bedragen — enkel type, "
+                   "profiel en gewicht. Het advies blijft bruikbaar maar is iets minder specifiek; de "
+                   "ratings worden achteraf weer aan je echte aandelen gekoppeld.")
+        en1, en2 = st.columns(2)
+        enable_tax = en1.checkbox("Maandelijks belastingadvies actief",
+                                  value=db.get_setting("ai_enable_tax", "1") != "0")
+        enable_daily = en2.checkbox("Dagelijks portefeuilleadvies actief",
+                                    value=db.get_setting("ai_enable_daily", "1") != "0")
+
         if st.button("💾 Opslaan", key="save_api"):
             db.set_setting("openai_api_key", new_key.strip())
             db.set_setting("openai_model", model)
             db.set_setting("openai_price_target_model", pt_model)
             db.set_setting("investment_volume_month", str(vol_m))
             db.set_setting("investment_volume_year", str(vol_y))
+            db.set_setting("ai_privacy_mode", privacy)
+            db.set_setting("ai_enable_tax", "1" if enable_tax else "0")
+            db.set_setting("ai_enable_daily", "1" if enable_daily else "0")
             st.success("✅ Instellingen opgeslagen!")
         if current:
             st.success("✅ API-sleutel is geconfigureerd.")
@@ -2241,9 +2414,122 @@ def page_evolution():
 
 # ── Navigatie ─────────────────────────────────────────────────────────────────
 
+# ── PAGINA: Cash-grootboek ────────────────────────────────────────────────────
+
+def page_cash():
+    st.title("💶 Cash")
+    st.caption("Volwaardig cash-grootboek per rekening. **Beschikbare cash** = stortingen − opnames "
+               "+ verkopen − aankopen + dividenden − rekeningkosten. Toekenningen (performance shares) "
+               "kosten geen brokergeld en tellen hier voor €0.")
+
+    tab_pos, tab_add, tab_log = st.tabs(["📊 Posities", "➕ Storting / opname", "📜 Bewegingen"])
+
+    with tab_pos:
+        pos = db.compute_cash_positions()
+        per, tot = pos["per_account"], pos["totals"]
+        c1, c2, c3 = st.columns(3)
+        c1.metric("💰 Totaal gestort (cash in)", eur(tot["deposits"]))
+        c2.metric("🏧 Totaal opgenomen (cash out)", eur(tot["withdrawals"]))
+        c3.metric("🟢 Beschikbare cash", eur(tot["available"]),
+                  help="Cash die je nu beschikbaar hebt om aandelen mee te kopen (over alle rekeningen).")
+        if not per:
+            st.info("Nog geen cashbewegingen. Begin met een storting via '➕ Storting / opname'.")
+        else:
+            rows = []
+            for a, r in sorted(per.items()):
+                rows.append({
+                    "Rekening":       a,
+                    "Stortingen":     eur(r["deposits"]),
+                    "Opnames":        eur(-r["withdrawals"]),
+                    "Aankopen":       eur(-r["buys"]),
+                    "Verkopen":       eur(r["sells"]),
+                    "Dividenden":     eur(r["dividends"]),
+                    "Rekeningkosten": eur(-r["costs"]),
+                    "Beschikbaar":    eur(r["available"]),
+                })
+            st.dataframe(pd.DataFrame(rows), width="stretch", hide_index=True)
+            st.caption("Aankopen en rekeningkosten verlagen de cash (−); verkopen en dividenden verhogen ze (+). "
+                       "Een negatieve beschikbare cash betekent dat er meer is uitgegeven dan gestort — "
+                       "registreer dan je ontbrekende stortingen. Betaalde je de personenbelasting op "
+                       "performance shares vanaf je beleggingsrekening, boek die dan als een opname.")
+
+    with tab_add:
+        accts = db.get_accounts()
+        if not accts:
+            st.warning("Maak eerst een rekening aan via ⚙️ Instellingen.")
+        else:
+            with st.form("cash_form", clear_on_submit=True):
+                cc1, cc2, cc3 = st.columns(3)
+                cm_acct = cc1.selectbox("Rekening", accts)
+                cm_type = cc2.selectbox("Type", ["Storting (cash in)", "Opname (cash out)"])
+                cm_date = cc3.date_input("Datum", value=date.today(),
+                                         min_value=date(2000, 1, 1), max_value=date.today())
+                cc4, cc5 = st.columns(2)
+                cm_amt = cc4.number_input("Bedrag", min_value=0.0, step=0.01, format="%.2f", value=None)
+                cm_cur = cc5.selectbox("Munt", ["EUR", "USD", "GBP", "CHF"])
+                cm_note = st.text_input("Notitie (optioneel)",
+                                        placeholder="bv. startkapitaal, winstopname, bijstorting")
+                if st.form_submit_button("✅ Toevoegen", type="primary"):
+                    if not cm_amt or cm_amt <= 0:
+                        st.error("Vul een bedrag groter dan 0 in.")
+                    else:
+                        fx, eur_amt = compute_eur(cm_amt, cm_cur, cm_date)
+                        mtype = "deposit" if cm_type.startswith("Storting") else "withdrawal"
+                        db.add_cash_movement(cm_acct, str(cm_date), mtype, cm_amt, cm_cur,
+                                             fx, eur_amt, cm_note or None)
+                        clear_cache()
+                        st.success(f"✅ {cm_type.split(' ')[0]} van {cm_cur} {cm_amt:,.2f} "
+                                   f"op {cm_acct} toegevoegd!")
+                        st.rerun()
+        st.info("💡 Aankopen, verkopen, dividenden en rekeningkosten hoef je hier **niet** in te geven — "
+                "die worden automatisch uit je transacties, dividenden en kosten afgeleid. Registreer hier "
+                "enkel echte geldstortingen en -opnames.")
+
+    with tab_log:
+        laccts = db.get_accounts()
+        lsel = st.multiselect("Rekeningen", laccts, default=[], key="cash_log_acct",
+                              placeholder="Alle rekeningen")
+        ledger = db.cash_ledger(tuple(lsel) if lsel else None)
+        if not ledger:
+            st.info("Nog geen cashbewegingen. Voeg een storting toe of registreer transacties.")
+        else:
+            lbl = {"Storting": "🟢 Storting", "Opname": "🔴 Opname", "Aankoop": "🔻 Aankoop",
+                   "Verkoop": "🔺 Verkoop", "Dividend": "💰 Dividend",
+                   "Rekeningkost": "🧾 Rekeningkost", "Toekenning": "🎁 Toekenning"}
+            rows = [{
+                "Datum":    it["date"],
+                "Rekening": it["account"],
+                "Type":     lbl.get(it["label"], it["label"]),
+                "Omschrijving": it["desc"],
+                "Mutatie":  eur(it["delta"]),
+                "Saldo":    eur(it["balance"]),
+            } for it in reversed(ledger)]   # nieuwste bovenaan
+            st.dataframe(pd.DataFrame(rows), width="stretch", hide_index=True)
+            st.caption("Volledig grootboek: stortingen/opnames samen met de automatisch afgeleide "
+                       "bewegingen uit aankopen (−), verkopen (+), dividenden (+) en rekeningkosten (−). "
+                       "'Saldo' is het lopende cashsaldo per rekening. Toekenningen (performance shares) "
+                       "staan als €0 (geen cash).")
+
+            # Enkel handmatige bewegingen kunnen verwijderd worden
+            manual = [it for it in ledger if it["source"] == "manual"]
+            if manual:
+                st.divider()
+                st.caption("Een handmatige storting/opname verwijderen:")
+                opts = {it["ref"]: f"{it['date']} · {it['account']} · {it['label']} · {eur(it['delta'])}"
+                        for it in reversed(manual)}
+                dsel = st.selectbox("Beweging", list(opts.keys()),
+                                    format_func=lambda i: opts[i], key="cash_del_sel",
+                                    label_visibility="collapsed")
+                delete_with_confirm(
+                    "🗑️ Wis beweging", "confirm_del_cash", dsel,
+                    f"Handmatige cashbeweging #{dsel} definitief verwijderen?",
+                    lambda: db.delete_cash_movement(dsel))
+
+
 PAGES = {
     "📊 Dashboard":            page_dashboard,
     "💼 Portefeuille":         page_portfolio,
+    "💶 Cash":                 page_cash,
     "📈 Evolutie":             page_evolution,
     "🏢 Activa":               page_assets,
     "➕ Transacties":          page_transactions,
@@ -2257,6 +2543,10 @@ with st.sidebar:
     st.title("📈 Portfolio Tracker")
     st.caption("Belgische belegger 🇧🇪")
 
+    # Programmatische paginawissel (bv. via knop): toepassen VÓÓR de radio bestaat,
+    # anders werpt Streamlit een fout (widgetstate na instantiatie wijzigen).
+    if st.session_state.get("nav_goto") in PAGES:
+        st.session_state["nav_menu"] = st.session_state.pop("nav_goto")
     selected = st.radio("Menu", list(PAGES.keys()), label_visibility="collapsed", key="nav_menu")
 
     st.divider()

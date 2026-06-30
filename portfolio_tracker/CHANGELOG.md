@@ -2,6 +2,77 @@
 
 Alle noemenswaardige wijzigingen aan de Portfolio Tracker add-on.
 
+## 0.20.0
+- AI-privacymodus (nieuw). In ⚙️ Instellingen → AI kies je hoeveel data naar OpenAI gaat:
+  - Uit — volledige data (tickers + bedragen), zoals voorheen.
+  - Bedragen verbergen — enkel gewichten in %, geen eurobedragen; tickers blijven.
+  - Volledig anoniem — ook tickers en namen worden vervangen door POS1, POS2, ...; de
+ratings worden achteraf weer aan je echte aandelen gekoppeld. Het advies blijft bruikbaar
+maar is iets minder specifiek.
+Daarnaast kun je elke AI-functie apart in- of uitschakelen (maandelijks belastingadvies,
+dagelijks portefeuilleadvies). Een uitgeschakelde functie doet geen enkele AI-oproep.
+- AI-advies geherstructureerd. De drie losse markt-evaluaties per dag (opening/middag/slot)
+zijn vervangen door één volledig portefeuilleadvies per werkdag (18:00). Dat ene advies
+levert zowel een tekstadvies als de koop/houden/verkoop-ratings. Die ratings voeden de
+synthese-tabellen op de 💼 Portefeuille-pagina, en het tekstadvies verschijnt daar nu ook
+(uitklapbaar) naast de tabel. Het maandelijkse belastingadvies blijft op de 🤖 AI Advisor-pagina.
+- De 🤖 AI Advisor-pagina heeft nu twee tabbladen: Belastingoptimalisatie (maandelijks) en
+Dagelijks portefeuilleadvies, met telkens een knop om meteen te genereren.
+- Bugfix: de knop "Naar AI Advisor" (vanuit dashboard/portefeuille) gaf een foutmelding door
+de manier waarop de paginakeuze werd gewijzigd. De navigatie gebeurt nu via een tussenstap
+zodat Streamlit geen widget-fout meer werpt.
+
+
+## 0.19.0
+- Volwaardig cash-grootboek (nieuwe pagina 💶 Cash). Per rekening wordt een cashpositie
+bijgehouden:
+  - Stortingen (cash in) en opnames (cash out) geef je handmatig in.
+  - Aankopen (− incl. kosten en TOB), verkopen (+ netto), dividenden (+ netto) en
+rekeningkosten (−) worden automatisch uit je bestaande data afgeleid.
+  - Beschikbare cash = stortingen − opnames + verkopen − aankopen + dividenden −
+rekeningkosten. Dit cijfer verschijnt ook op het dashboard en de portefeuille.
+  - Een volledig chronologisch grootboek toont elke beweging met een lopend saldo per
+rekening; handmatige stortingen/opnames kun je verwijderen (met bevestiging).
+- Performance shares en cash. Een toekenning (vesting) kost geen brokergeld en telt in
+de cashpositie voor €0 — anders dan een gewone aankoop die cash afroomt. De personenbelasting
+wordt doorgaans via je loon ingehouden en is dus géén beweging op je beleggingsrekening;
+betaalde je ze tóch vanaf de rekening, dan boek je dat als een opname. Bij latere verkoop
+komt de cash gewoon binnen.
+Geld uit het systeem halen is in België geen belastbaar feit (de meerwaardebelasting valt op
+de verkoop); een opname verlaagt enkel je beschikbare cash.
+- Beschikbare cash verschijnt nu ook als regel op het dashboard en de portefeuille (rekening-bewust).
+
+## 0.18.0
+- Performance shares — reële winst-zienswijze. Het netto resultaat van performance shares
+is nu de reële winst: huidige waarde − betaalde personenbelasting. De toekenningswaarde telt
+niet langer als kost (je investeerde in feite enkel de betaalde belasting). De dashboard-toggle
+schakelt tussen deze reële zienswijze (standaard) en de zuivere meerwaarde t.o.v. de
+toekenningswaarde. De meerwaardebelasting zelf blijft op de kostbasis (toekenningswaarde) berekend.
+- Bestaande transacties omvormen tot performance shares. In het bewerkformulier van een
+transactie kun je nu "🎁 Is een toekenning" aanvinken en de personenbelasting (% of exact bedrag)
+ingeven; de TOB wordt dan op €0 gezet. Handig om reeds ingevoerde aandelen alsnog correct te markeren.
+
+
+## 0.17.0
+- Bevestiging bij verwijderen. De wis-knoppen in de overzichten van transacties, activa en
+dividenden vragen nu eerst een expliciete bevestiging (met annuleren). Eén klik wist dus niet
+langer onmiddellijk data — extra belangrijk bij "Wis (incl. transacties)" op een activum.
+- Performance shares (toekenning / vesting). Bij het toevoegen van een aankoop kun je nu
+"🎁 Performance shares" aanvinken. Je voert het aantal en de koers op de toekenningsdatum in:
+die waarde wordt de kostbasis voor de meerwaarde (je betaalde er al personenbelasting op), er
+wordt géén TOB aangerekend en er is geen cash-uitgave.
+- Personenbelasting als apart gegeven. Bij een toekenning geef je het marginale tarief
+(± 53,5%) of een exact bedrag in; dit wordt apart bijgehouden, los van de broker-/beurskosten.
+- Dashboard-toggle personenbelasting. Wanneer er performance shares zijn, verschijnt op het
+dashboard een schakelaar om de invloed van de betaalde personenbelasting op het netto resultaat
+aan of uit te zetten (zowel in het staafdiagram als in het totaal). De meerwaardebelasting zelf
+blijft ongewijzigd berekend op de kostbasis (toekenningswaarde).
+- De resultaattabel per activum (portefeuille) toont nu ook een kolom "Personenbel." en verrekent
+die in het netto resultaat.
+
+## 0.16.0
+overgeslagen versienummer, anders werd AI gek
+
 ## 0.15.0
 - Dashboard — AI-kooptips i.p.v. lange tekst: het AI-blok toont nu enkel de aandelen met
 een koopadvies (sterk kopen / kopen), zonder de uitleg, plus een knop "➡️ Naar AI Advisor".

@@ -300,16 +300,75 @@ def _parse_json(text: str):
 
 
 def _profiel_blok(ctx: dict) -> str:
-    iv = ctx["investeringsvolume"]
-    return f"""PROFIEL PARTICULIERE BELEGGER:
-• Geschat investeringsvolume: €{iv['per_maand']:,.0f}/maand, €{iv['per_jaar']:,.0f}/jaar
-• Beleggingsprofiel per rekening:
-{json.dumps(ctx['per_rekening'], indent=2, ensure_ascii=False)}"""
+    iv = ctx.get("investeringsvolume")
+    vol = (f"• Geschat investeringsvolume: €{iv['per_maand']:,.0f}/maand, €{iv['per_jaar']:,.0f}/jaar\n"
+           if iv else "")
+    return ("PROFIEL PARTICULIERE BELEGGER:\n" + vol +
+            "• Beleggingsprofiel per rekening:\n" +
+            json.dumps(ctx.get("per_rekening", []), indent=2, ensure_ascii=False))
+
+
+# ── Privacy ────────────────────────────────────────────────────────────────────
+
+def privacy_level() -> str:
+    """'off' (alles), 'amounts' (bedragen verbergen, tickers blijven) of
+    'full' (ook tickers/namen anonimiseren)."""
+    lvl = db.get_setting("ai_privacy_mode", "off")
+    return lvl if lvl in ("off", "amounts", "full") else "off"
+
+
+def ai_function_enabled(fn: str) -> bool:
+    """Is een AI-functie ingeschakeld? fn in {'tax','daily'}."""
+    return db.get_setting(f"ai_enable_{fn}", "1") != "0"
+
+
+def _anonymize_context(ctx: dict, level: str):
+    """Pas privacy toe op de context. Retourneert (nieuwe_ctx, alias_map).
+    'amounts': eurobedragen -> gewichten in %, tickers blijven.
+    'full': bovendien tickers/namen vervangen door POS1, POS2, ... (alias_map mapt terug)."""
+    if level == "off":
+        return ctx, {}
+    ctx = json.loads(json.dumps(ctx))  # diepe kopie
+    posities = ctx.get("posities", [])
+    total = sum((p.get("huidige_waarde_eur") or 0) for p in posities) or 1.0
+    alias_map = {}
+    for i, p in enumerate(posities, 1):
+        p["gewicht_pct"] = round((p.get("huidige_waarde_eur") or 0) / total * 100, 1)
+        for k in ("gem_kostprijs_eur", "huidige_waarde_eur", "netto_dividend_ytd"):
+            p.pop(k, None)
+        if level == "full":
+            alias = f"POS{i}"
+            alias_map[alias] = p["ticker"]
+            p["ticker"] = alias
+            p["naam"] = f"Positie {i}"
+            p.pop("huidige_koers", None)
+    for a in ctx.get("per_rekening", []):
+        for k in ("kostenbasis_eur", "huidige_waarde_eur"):
+            a.pop(k, None)
+    bel = ctx.get("belasting", {})
+    for k in ("totale_portefeuillewaarde", "totale_kostbasis", "netto_dividenden_ytd",
+              "transactiekosten_eur", "rekeningkosten_eur", "ongerealiseerde_wv"):
+        bel.pop(k, None)
+    ctx.pop("investeringsvolume", None)
+    return ctx, alias_map
+
+
+def _privacy_note(level: str) -> str:
+    if level == "amounts":
+        return ("\nPRIVACY: eurobedragen zijn weggelaten; posities zijn aangeduid met een gewicht in % "
+                "van de portefeuille. Redeneer op basis van gewichten en percentages.")
+    if level == "full":
+        return ("\nPRIVACY: eurobedragen zijn weggelaten en posities zijn geanonimiseerd "
+                "(POS1, POS2, ...). Gebruik in je antwoord EXACT diezelfde labels (POS1, ...), "
+                "niet de echte namen, en redeneer op basis van type/profiel/gewicht.")
+    return ""
 
 
 # ── Belastingadvies ────────────────────────────────────────────────────────────
 
 def generate_tax_optimization(year: int | None = None) -> str:
+    if not ai_function_enabled("tax"):
+        return "ℹ️ Het maandelijkse belastingadvies staat uit. Schakel het in via ⚙️ Instellingen → AI."
     client, model = _get_client()
     if not client:
         return ("❌ Geen OpenAI API-sleutel geconfigureerd.\n"
@@ -318,17 +377,19 @@ def generate_tax_optimization(year: int | None = None) -> str:
         year = datetime.now().year
 
     ctx   = _build_portfolio_context(year)
+    level = privacy_level()
+    actx, _ = _anonymize_context(ctx, level)
     today = datetime.now().strftime("%d/%m/%Y")
 
-    user = f"""DATUM: {today}  |  BOEKJAAR: {year}  |  MODEL: {model}
+    user = f"""DATUM: {today}  |  BOEKJAAR: {year}  |  MODEL: {model}{_privacy_note(level)}
 
 PORTEFEUILLE (actuele data):
-{json.dumps(ctx["posities"], indent=2, ensure_ascii=False)}
+{json.dumps(actx["posities"], indent=2, ensure_ascii=False)}
 
-{_profiel_blok(ctx)}
+{_profiel_blok(actx)}
 
 BELGISCHE BELASTINGSTATUS {year}:
-{json.dumps(ctx["belasting"], indent=2, ensure_ascii=False)}
+{json.dumps(actx["belasting"], indent=2, ensure_ascii=False)}
 
 BELGISCHE FISCALE REGELS (samenvatting):
 • 10% meerwaardebelasting op NETTO gerealiseerde meerwaarden boven €{ctx["belasting"]["jaarlijkse_vrijstelling"]:,.0f}/jaar
@@ -346,7 +407,7 @@ Houd rekening met het profiel per rekening. Gebruik vetgedrukte koppen en verwij
 """
     try:
         content = _chat(client, model, ADVISOR_PERSONA, user, track_as="tax_optimization")
-        db.save_ai_evaluation("tax_optimization", content, timing="daily",
+        db.save_ai_evaluation("tax_optimization", content, timing="monthly",
                               tickers=",".join(p["ticker"] for p in ctx["posities"]))
         return content
     except OpenAIError as exc:
@@ -495,6 +556,95 @@ Antwoord UITSLUITEND met geldige JSON in exact dit formaat (geen markdown):
         return {"error": f"OpenAI-fout: {exc}"}
     except Exception as exc:
         logger.error(f"generate_portfolio_ratings: {exc}")
+        return {"error": f"Kon AI-antwoord niet verwerken: {exc}"}
+
+
+# ── Dagelijks portefeuilleadvies (ratings + tekst in één) ─────────────────────
+
+def generate_daily_portfolio_advice() -> dict:
+    """Eén dagelijks advies voor de hele portefeuille: produceert zowel een tekstadvies
+    als per-ticker ratings (buy/hold/sell). De ratings voeden de synthese-tabellen op de
+    portefeuillepagina; de tekst vult het tekstgedeelte daar. Privacy-bewust."""
+    if not ai_function_enabled("daily"):
+        return {"error": "Het dagelijkse portefeuilleadvies staat uit. Schakel het in via ⚙️ Instellingen → AI."}
+    client, model = _get_client()
+    if not client:
+        return {"error": "Geen OpenAI API-sleutel geconfigureerd."}
+
+    ctx = _build_portfolio_context()
+    if not ctx["posities"]:
+        return {"error": "Geen open posities om te beoordelen."}
+
+    level = privacy_level()
+    actx, alias_map = _anonymize_context(ctx, level)
+    today = datetime.now().strftime("%d/%m/%Y")
+    valid = ", ".join(RATING_ORDER)
+
+    user = f"""DATUM: {today}  |  MODEL: {model}{_privacy_note(level)}
+
+PORTEFEUILLE:
+{json.dumps(actx["posities"], indent=2, ensure_ascii=False)}
+
+{_profiel_blok(actx)}
+
+OPDRACHT:
+Geef één volledig dagelijks portefeuilleadvies. Antwoord UITSLUITEND met geldige JSON (geen markdown errond), in exact dit formaat:
+{{
+  "advies_tekst": "Markdown met de koppen: **📊 Marktoverzicht** (2-3 zinnen macro + tech/sector), **📋 Posities** (per positie: korte situatie + duidelijke aanbeveling BIJKOPEN/HOUDEN/VERKOPEN + reden), **🎯 Koopopportuniteiten** (1-3 ideeën passend bij profiel en volume), **📌 Conclusie** (1-2 zinnen). Sluit af met een korte disclaimer dat dit geen gepersonaliseerd financieel advies is.",
+  "ratings": [
+    {{"ticker": "<exact het label uit de portefeuille hierboven>", "rating": "<één van: {valid}>", "price_target": 0.0, "currency": "EUR", "rationale": "max 1-2 zinnen, profiel-bewust"}}
+  ]
+}}
+Geef voor ELKE positie een rating.
+"""
+    try:
+        raw = _chat(client, model, ADVISOR_PERSONA, user, max_tokens=2200,
+                    temperature=0.3, track_as="daily_advice")
+        data = _parse_json(raw)
+        if not isinstance(data, dict):
+            return {"error": "AI-antwoord niet bruikbaar."}
+        text    = data.get("advies_tekst", "") or ""
+        ratings = data.get("ratings", []) or []
+
+        # De-anonimiseren bij volledige privacy: aliassen -> echte tickers (in ratings én tekst)
+        if level == "full" and alias_map:
+            for r in ratings:
+                a = str(r.get("ticker", "")).upper()
+                if a in alias_map:
+                    r["ticker"] = alias_map[a]
+            for alias, real in alias_map.items():
+                text = text.replace(alias, real)
+
+        batch_id = datetime.now().strftime("%Y%m%d%H%M%S")
+        valid_tickers = {p["ticker"] for p in ctx["posities"]}
+        base_map = {}
+        for vt in valid_tickers:
+            base_map.setdefault(vt.split(".")[0], vt)
+
+        def _match(returned: str):
+            r = (returned or "").upper()
+            if r in valid_tickers:
+                return r
+            return base_map.get(r.split(".")[0])
+
+        stored = 0
+        for r in ratings:
+            tk = _match(str(r.get("ticker", "")))
+            rating = str(r.get("rating", "")).lower().replace(" ", "_")
+            if not tk or rating not in RATING_LABELS:
+                continue
+            db.save_ai_rating(batch_id, tk, rating, price_target=r.get("price_target"),
+                              currency=r.get("currency", "EUR"),
+                              rationale=r.get("rationale", ""), model=model)
+            stored += 1
+        db.save_ai_evaluation("daily_advice", text, timing="daily",
+                              tickers=",".join(valid_tickers))
+        return {"batch_id": batch_id, "stored": stored, "advies_tekst": text}
+    except OpenAIError as exc:
+        logger.error(f"generate_daily_portfolio_advice: {exc}")
+        return {"error": f"OpenAI-fout: {exc}"}
+    except Exception as exc:
+        logger.error(f"generate_daily_portfolio_advice: {exc}")
         return {"error": f"Kon AI-antwoord niet verwerken: {exc}"}
 
 

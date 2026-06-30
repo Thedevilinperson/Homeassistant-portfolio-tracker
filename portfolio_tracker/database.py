@@ -139,6 +139,20 @@ def init_db():
         );
         CREATE INDEX IF NOT EXISTS idx_splits_ticker ON splits(ticker);
 
+        CREATE TABLE IF NOT EXISTS cash_movements (
+            id            INTEGER PRIMARY KEY AUTOINCREMENT,
+            account       TEXT    NOT NULL,
+            date          TEXT    NOT NULL,
+            type          TEXT    NOT NULL,          -- 'deposit' (storting) | 'withdrawal' (opname)
+            amount_native REAL    NOT NULL,
+            currency      TEXT    DEFAULT 'EUR',
+            fx_rate       REAL    DEFAULT 1,
+            amount_eur    REAL    NOT NULL,
+            note          TEXT,
+            created_at    TEXT    DEFAULT (datetime('now'))
+        );
+        CREATE INDEX IF NOT EXISTS idx_cash_account ON cash_movements(account);
+
         CREATE TABLE IF NOT EXISTS settings (
             key        TEXT PRIMARY KEY,
             value      TEXT NOT NULL,
@@ -190,6 +204,8 @@ def _migrate(conn):
         ("total_amount_eur", "REAL"),       # NULL bij oude rijen -> backfillen
         ("fx_rate",          "REAL DEFAULT 1"),
         ("price_target",     "REAL"),       # koersdoel (native munt), optioneel
+        ("is_performance_share", "INTEGER DEFAULT 0"),  # toegekend (vesting) i.p.v. gekocht
+        ("income_tax_eur",       "REAL DEFAULT 0"),     # personenbelasting bij vesting (EUR)
     ]
     for col, ddl in txn_cols:
         if not _column_exists(cur, "transactions", col):
@@ -370,6 +386,172 @@ def delete_account_cost(cost_id: int):
     conn.execute("DELETE FROM account_costs WHERE id=?", (cost_id,))
     conn.commit()
     conn.close()
+
+
+# ── Cash-grootboek ───────────────────────────────────────────────────────────
+
+def add_cash_movement(account, date, mtype, amount_native, currency="EUR",
+                      fx_rate=1.0, amount_eur=None, note=None):
+    """mtype = 'deposit' (storting) of 'withdrawal' (opname)."""
+    if amount_eur is None:
+        amount_eur = amount_native * (fx_rate or 1.0)
+    conn = get_connection()
+    conn.execute(
+        """INSERT INTO cash_movements
+           (account,date,type,amount_native,currency,fx_rate,amount_eur,note)
+           VALUES (?,?,?,?,?,?,?,?)""",
+        (account, date, mtype, amount_native, currency, fx_rate, amount_eur, note))
+    conn.commit()
+    conn.close()
+
+
+def get_cash_movements(account=None) -> list[dict]:
+    conn = get_connection()
+    q, p = "SELECT * FROM cash_movements", []
+    if account:
+        q += " WHERE account=?"; p.append(account)
+    q += " ORDER BY date DESC, id DESC"
+    rows = conn.execute(q, p).fetchall()
+    conn.close()
+    return [dict(r) for r in rows]
+
+
+def delete_cash_movement(mov_id: int):
+    conn = get_connection()
+    conn.execute("DELETE FROM cash_movements WHERE id=?", (mov_id,))
+    conn.commit()
+    conn.close()
+
+
+def _div_net_eur(d: dict) -> float:
+    if d.get("net_eur") is not None:
+        return d["net_eur"]
+    g = d.get("gross_eur") if d.get("gross_eur") is not None else d["gross_amount"]
+    w = d.get("withholding_eur") if d.get("withholding_eur") is not None else d["withholding_tax"]
+    return (g or 0) - (w or 0)
+
+
+def compute_cash_positions(accounts=None) -> dict:
+    """Afgeleide cashpositie per rekening uit alle bewegingen.
+
+    beschikbare cash = stortingen − opnames + verkopen(netto) − aankopen(netto)
+                       + dividenden(netto) − rekeningkosten
+
+    Performance shares (toekenningen) kosten geen brokergeld: hun aankoop telt voor €0.
+    De personenbelasting erop is geen brokerbeweging (doorgaans via loon) en zit hier
+    dus niet in — betaalde je ze tóch vanaf de rekening, boek ze dan als een opname.
+    """
+    accs = set(accounts) if accounts else None
+
+    def _use(a):
+        return accs is None or (a or DEFAULT_ACCOUNT) in accs
+
+    per = {}
+    def _row(a):
+        a = a or DEFAULT_ACCOUNT
+        return per.setdefault(a, {"deposits": 0.0, "withdrawals": 0.0, "buys": 0.0,
+                                  "sells": 0.0, "dividends": 0.0, "costs": 0.0})
+
+    for m in get_cash_movements():
+        if not _use(m["account"]):
+            continue
+        r = _row(m["account"])
+        if m["type"] == "deposit":
+            r["deposits"] += m["amount_eur"] or 0.0
+        else:
+            r["withdrawals"] += m["amount_eur"] or 0.0
+
+    for t in get_transactions():
+        if not _use(t.get("account")):
+            continue
+        r = _row(t.get("account"))
+        tot = t.get("total_amount_eur") or 0.0
+        fees = (t.get("costs_eur") or 0.0) + (t.get("tob_tax") or 0.0)
+        if t["transaction_type"] == "buy":
+            if t.get("is_performance_share"):
+                continue                     # toekenning: geen cash-uitgave
+            r["buys"] += tot + fees          # cash uit
+        else:
+            r["sells"] += tot - fees         # cash in
+
+    for d in get_dividends():
+        if not _use(d.get("account")):
+            continue
+        _row(d.get("account"))["dividends"] += _div_net_eur(d)
+
+    for a in (accs if accs is not None else get_accounts()):
+        cost = total_account_costs_eur(account=a)
+        if cost:
+            _row(a)["costs"] += cost
+
+    totals = {"deposits": 0.0, "withdrawals": 0.0, "buys": 0.0,
+              "sells": 0.0, "dividends": 0.0, "costs": 0.0, "available": 0.0}
+    for a, r in per.items():
+        r["available"] = (r["deposits"] - r["withdrawals"] + r["sells"]
+                          - r["buys"] + r["dividends"] - r["costs"])
+        for k in totals:
+            if k != "available":
+                totals[k] += r[k]
+    totals["available"] = (totals["deposits"] - totals["withdrawals"] + totals["sells"]
+                           - totals["buys"] + totals["dividends"] - totals["costs"])
+    return {"per_account": per, "totals": totals}
+
+
+def cash_ledger(accounts=None) -> list[dict]:
+    """Volledig chronologisch cash-grootboek: handmatige stortingen/opnames + de
+    afgeleide bewegingen uit aankopen, verkopen, dividenden en rekeningkosten, elk met
+    een lopend saldo per rekening. Performance shares verschijnen als €0 (geen cash)."""
+    accs = set(accounts) if accounts else None
+    def _use(a):
+        return accs is None or (a or DEFAULT_ACCOUNT) in accs
+
+    items = []
+    for m in get_cash_movements():
+        if not _use(m["account"]):
+            continue
+        delta = (m["amount_eur"] or 0.0) * (1 if m["type"] == "deposit" else -1)
+        items.append({"date": m["date"][:10], "account": m["account"] or DEFAULT_ACCOUNT,
+                      "label": "Storting" if m["type"] == "deposit" else "Opname",
+                      "delta": delta, "desc": m.get("note") or "",
+                      "source": "manual", "ref": m["id"]})
+    for t in get_transactions():
+        if not _use(t.get("account")):
+            continue
+        tot  = t.get("total_amount_eur") or 0.0
+        fees = (t.get("costs_eur") or 0.0) + (t.get("tob_tax") or 0.0)
+        acc  = t.get("account") or DEFAULT_ACCOUNT
+        desc = f"{t['quantity']:g} × {t['ticker']}"
+        if t["transaction_type"] == "buy":
+            if t.get("is_performance_share"):
+                items.append({"date": t["date"][:10], "account": acc, "label": "Toekenning",
+                              "delta": 0.0, "desc": desc + " (geen cash)", "source": "txn", "ref": t["id"]})
+            else:
+                items.append({"date": t["date"][:10], "account": acc, "label": "Aankoop",
+                              "delta": -(tot + fees), "desc": desc, "source": "txn", "ref": t["id"]})
+        else:
+            items.append({"date": t["date"][:10], "account": acc, "label": "Verkoop",
+                          "delta": tot - fees, "desc": desc, "source": "txn", "ref": t["id"]})
+    for d in get_dividends():
+        if not _use(d.get("account")):
+            continue
+        items.append({"date": d["date"][:10], "account": d.get("account") or DEFAULT_ACCOUNT,
+                      "label": "Dividend", "delta": _div_net_eur(d), "desc": d["ticker"],
+                      "source": "div", "ref": d["id"]})
+    for c in get_account_costs():
+        if not _use(c.get("account")):
+            continue
+        items.append({"date": c["date"][:10], "account": c.get("account") or DEFAULT_ACCOUNT,
+                      "label": "Rekeningkost", "delta": -(c.get("amount_eur") or 0.0),
+                      "desc": c.get("description") or "", "source": "cost", "ref": c["id"]})
+
+    # Chronologisch oplopend; lopend saldo per rekening
+    order = {"manual": 0, "txn": 1, "div": 2, "cost": 3}
+    items.sort(key=lambda x: (x["date"], order.get(x["source"], 9)))
+    bals = {}
+    for it in items:
+        bals[it["account"]] = bals.get(it["account"], 0.0) + it["delta"]
+        it["balance"] = bals[it["account"]]
+    return items
 
 
 # ── AI-ratings (gestructureerde adviezen per ticker) ─────────────────────────
@@ -558,7 +740,7 @@ def add_transaction(ticker, transaction_type, date, quantity, price_per_unit,
                     total_amount, currency="EUR", tob_tax=0.0, notes=None,
                     account=DEFAULT_ACCOUNT, costs=0.0, costs_currency="EUR",
                     fx_rate=1.0, total_amount_eur=None, costs_eur=None,
-                    price_target=None):
+                    price_target=None, is_performance_share=0, income_tax_eur=0.0):
     if total_amount_eur is None:
         total_amount_eur = total_amount * (fx_rate or 1.0)
     if costs_eur is None:
@@ -568,11 +750,12 @@ def add_transaction(ticker, transaction_type, date, quantity, price_per_unit,
         """INSERT INTO transactions
            (ticker,transaction_type,date,quantity,price_per_unit,total_amount,
             currency,tob_tax,notes,account,costs,costs_currency,costs_eur,
-            total_amount_eur,fx_rate,price_target)
-           VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+            total_amount_eur,fx_rate,price_target,is_performance_share,income_tax_eur)
+           VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
         (ticker.upper(), transaction_type, date, quantity, price_per_unit,
          total_amount, currency, tob_tax, notes, account, costs, costs_currency,
-         costs_eur, total_amount_eur, fx_rate, price_target)
+         costs_eur, total_amount_eur, fx_rate, price_target,
+         int(is_performance_share or 0), income_tax_eur or 0.0)
     )
     conn.commit()
     conn.close()
@@ -583,7 +766,7 @@ def update_transaction(txn_id: int, **fields):
     allowed = {"ticker", "transaction_type", "date", "quantity", "price_per_unit",
                "total_amount", "currency", "tob_tax", "notes", "account", "costs",
                "costs_currency", "costs_eur", "total_amount_eur", "fx_rate",
-               "price_target"}
+               "price_target", "is_performance_share", "income_tax_eur"}
     sets, vals = [], []
     for k, v in fields.items():
         if k in allowed:

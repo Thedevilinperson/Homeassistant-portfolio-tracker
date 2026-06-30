@@ -65,14 +65,14 @@ def job_track_prices():
     db.cleanup_old_prices(keep_days=90)
 
 
-def job_market_eval(timing: str, exchanges: list[str]):
-    """Genereer en sla een marktevaluatie op."""
-    logger.info(f"🤖 Marktevaluatie ({timing}) voor {exchanges}...")
-    result = ai_advisor.generate_market_evaluation(timing, exchanges)
-    if result.startswith("❌"):
-        logger.warning(f"Marktevaluatie ({timing}) niet gegenereerd: {result[:80]}")
+def job_daily_advice():
+    """Genereer één keer per dag een volledig portefeuilleadvies (ratings + tekst)."""
+    logger.info("🤖 Dagelijks portefeuilleadvies genereren...")
+    res = ai_advisor.generate_daily_portfolio_advice()
+    if res.get("error"):
+        logger.warning(f"Dagelijks advies niet gegenereerd: {res['error'][:80]}")
     else:
-        logger.info(f"✅ Marktevaluatie ({timing}) opgeslagen")
+        logger.info(f"✅ Dagelijks advies opgeslagen ({res.get('stored', 0)} ratings)")
 
 
 def job_tax_optimization():
@@ -140,33 +140,14 @@ def main():
         misfire_grace_time=60,
     )
 
-    # ── Euronext Brussels/Amsterdam/Paris: 09:00–17:30 CET ──
-    for job_id, hour, minute, timing, exchanges in [
-        ("eu_open",   9,  5,  "open",   ["Euronext"]),
-        ("eu_midday", 13, 15, "midday", ["Euronext"]),
-        ("eu_close",  17, 35, "close",  ["Euronext"]),
-    ]:
-        scheduler.add_job(
-            job_market_eval,
-            trigger=CronTrigger(day_of_week="mon-fri", hour=hour,
-                                minute=minute, timezone=BRUSSELS),
-            id=job_id, args=[timing, exchanges],
-            replace_existing=True, misfire_grace_time=300,
-        )
-
-    # ── NYSE / NASDAQ: 09:30–16:00 ET = 15:30–22:00 CET ──
-    for job_id, hour, minute, timing, exchanges in [
-        ("us_open",   15, 35, "open",   ["NYSE", "NASDAQ"]),
-        ("us_midday", 18, 45, "midday", ["NYSE", "NASDAQ"]),
-        ("us_close",  22,  5, "close",  ["NYSE", "NASDAQ"]),
-    ]:
-        scheduler.add_job(
-            job_market_eval,
-            trigger=CronTrigger(day_of_week="mon-fri", hour=hour,
-                                minute=minute, timezone=BRUSSELS),
-            id=job_id, args=[timing, exchanges],
-            replace_existing=True, misfire_grace_time=300,
-        )
+    # ── Eén dagelijks portefeuilleadvies: elke werkdag om 18:00 (na EU-slot) ──
+    scheduler.add_job(
+        job_daily_advice,
+        trigger=CronTrigger(day_of_week="mon-fri", hour=18, minute=0, timezone=BRUSSELS),
+        id="daily_advice",
+        replace_existing=True,
+        misfire_grace_time=3600,
+    )
 
     # ── Maandelijks belastingadvies: 1e van de maand om 08:00 ──
     scheduler.add_job(
