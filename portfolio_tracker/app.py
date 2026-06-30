@@ -10,7 +10,6 @@ import pandas as pd
 import plotly.express as px
 import plotly.graph_objects as go
 import streamlit as st
-import streamlit.components.v1 as components
 
 import ai_advisor
 import belgian_tax as tax_mod
@@ -268,7 +267,11 @@ def df_row_select(df, key: str):
         except Exception:
             rows = None
     if isinstance(rows, (list, tuple)) and rows and isinstance(rows[0], int):
-        return rows[0]
+        idx = rows[0]
+        # Na filteren kan een eerder bewaarde selectie-index buiten de (kortere) lijst
+        # vallen -> negeer die i.p.v. een IndexError te veroorzaken.
+        if 0 <= idx < len(df):
+            return idx
     return None
 
 
@@ -1040,7 +1043,7 @@ def page_assets():
             })
         a_names = {a["ticker"]: (a.get("name") or a["ticker"]) for a in assets}
         sel_idx = df_row_select(pd.DataFrame(rows), "asset_table")
-        if sel_idx is None:
+        if sel_idx is None or sel_idx >= len(assets):
             st.caption("👆 Klik op een rij om dat activum te bewerken of verwijderen.")
         else:
             sel_a = assets[sel_idx]
@@ -1289,18 +1292,9 @@ def page_transactions():
         # ── Bewerkformulier (verschijnt bij klik op ✏️) ───────────────────────
         edit_id = st.session_state.get("edit_txn")
         if edit_id:
-            # Spring naar boven zodat het bewerkformulier meteen zichtbaar is
-            components.html(
-                """<script>
-                const doc = window.parent.document;
-                const el = doc.querySelector('section.main')
-                        || doc.querySelector('[data-testid="stMain"]')
-                        || doc.querySelector('[data-testid="stAppViewContainer"]')
-                        || doc.scrollingElement;
-                if (el) { el.scrollTo({top: 0, behavior: 'smooth'}); }
-                </script>""", height=0)
             et = next((x for x in db.get_transactions(adjusted=False) if x["id"] == edit_id), None)
             if et:
+                st.info("✏️ Bewerkformulier geopend — pas de transactie hieronder aan en klik op Opslaan.")
                 st.markdown(f"### ✏️ Transactie #{edit_id} bewerken")
                 with st.form("edit_txn_form"):
                     e1, e2, e3 = st.columns(3)
@@ -1412,7 +1406,7 @@ def page_transactions():
         sel_idx = df_row_select(pd.DataFrame(rows), "txn_table")
 
         # Acties voor de aangeklikte rij
-        if sel_idx is None:
+        if sel_idx is None or sel_idx >= len(ordered):
             st.caption("👆 Klik op een rij om die te bewerken, verwijderen of naar een andere rekening te verplaatsen.")
         else:
             sel_t = ordered[sel_idx]
@@ -1620,12 +1614,9 @@ def page_dividends():
         # ── Bewerkformulier (bij klik op ✏️) ──────────────────────────────────
         edit_did = st.session_state.get("edit_div")
         if edit_did:
-            components.html(
-                """<script>const d=window.parent.document;const el=d.querySelector('section.main')
-                ||d.querySelector('[data-testid="stMain"]')||d.scrollingElement;
-                if(el)el.scrollTo({top:0,behavior:'smooth'});</script>""", height=0)
             ed = next((x for x in db.get_dividends() if x["id"] == edit_did), None)
             if ed:
+                st.info("✏️ Bewerkformulier geopend — pas het dividend hieronder aan en klik op Opslaan.")
                 st.markdown(f"### ✏️ Dividend #{edit_did} ({ed['ticker']}) bewerken")
                 ecur = ed.get("currency") or "EUR"
                 ECUR = ["EUR", "USD", "GBP", "CHF"]
@@ -1755,7 +1746,7 @@ def page_dividends():
                 "Notities": d.get("notes") or "",
             })
         sel_idx = df_row_select(pd.DataFrame(rows), "div_table")
-        if sel_idx is None:
+        if sel_idx is None or sel_idx >= len(divs):
             st.caption("👆 Klik op een rij om dat dividend te bewerken, verwijderen of te verplaatsen.")
         else:
             sel_d = divs[sel_idx]
@@ -2580,6 +2571,6 @@ with st.sidebar:
     now = datetime.now()
     st.caption(f"📅 {now.strftime('%d/%m/%Y %H:%M')}")
     st.caption("⏱️ Koersen: elke 5 min")
-    st.caption("🤖 AI: 3× per dag + 08:00")
+    st.caption("🤖 AI: 1× per werkdag (18:00) + belastingadvies maandelijks")
 
 PAGES[selected]()
