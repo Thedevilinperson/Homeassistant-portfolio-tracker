@@ -2,6 +2,28 @@
 
 Alle noemenswaardige wijzigingen aan de Portfolio Tracker add-on.
 
+## 0.21.0
+- Bulk-import via Excel (⚙️ Instellingen → 🗃️ Data). Laad transacties, dividenden en
+rekeningkosten in bulk op:
+  - Download een ingevulde Excel-template met drie databladen (Transacties, Dividenden,
+Kosten), voorbeeldrijen en een instructieblad.
+  - Upload het ingevulde bestand: de app valideert elke rij, toont een samenvatting en de
+overgeslagen rijen met reden, en importeert pas na bevestiging.
+  - Onbekende activa worden automatisch aangemaakt (vul naam/type/munt in voor een correcte TOB).
+TOB en EUR-omrekening gebeuren automatisch (historische wisselkoers indien geen fx_koers
+opgegeven); de dividendketen wordt aangevuld zoals in het formulier; performance shares
+worden ondersteund (kolommen performance_share + personenbelasting_eur).
+- Simulatiemodule meerwaardebelasting (nieuwe pagina 🧮 Simulatie). Schat vooraf in hoe de
+Belgische meerwaardebelasting uitdraait:
+  - Een bewerkbare tabel met je huidige posities; geef per positie een te verkopen aantal
+(geheel of gedeeltelijk) en een verkoopprijs op, en optioneel een heraankoop (aantal + prijs).
+  - De simulatie berekent de gerealiseerde meerwaarde, de belastbare basis na de jaarlijkse
+vrijstelling (incl. opbouw en reeds gerealiseerde winst dit jaar), de extra meerwaardebelasting
+(10%), de TOB op verkopen én heraankopen, en het netto resultaat na belasting + TOB.
+  - Het fotomoment (slotkoers 31/12/2025) wordt correct toegepast op loten van vóór 2026.
+  - Er wordt niets opgeslagen of uitgevoerd — het is een zuivere doorrekening.
+- requirements: openpyxl toegevoegd (nodig voor het lezen/schrijven van Excel).
+
 ## 0.20.1
 - Bugfix: vervangen van de uitgefaseerde st.components.v1.html (scroll-naar-boven bij het openen van een bewerkformulier) — die werd na 2026-06-01 verwijderd en veroorzaakte waarschuwingen in de log. Het bewerkformulier toont nu een duidelijke banner i.p.v. de JS-scroll. Zijbalktekst over de AI-planning bijgewerkt naar het nieuwe dagelijkse advies.
 - Bugfix: in de overzichten van transacties, activa en dividenden gaf een rijselectie na het filteren soms een IndexError (de bewaarde selectie wees buiten de kortere lijst). Een buiten bereik vallende selectie wordt nu genegeerd (centraal én op elke oproepplaats).

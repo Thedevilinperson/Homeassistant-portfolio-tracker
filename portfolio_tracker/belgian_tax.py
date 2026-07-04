@@ -426,7 +426,8 @@ def available_exemption(gains_by_year: dict[int, float], target_year: int,
 
 def calculate_tax_overview(year: int | None = None,
                             current_prices: dict | None = None,
-                            account=None) -> dict:
+                            account=None,
+                            extra_transactions: list[dict] | None = None) -> dict:
     """
     Belastingoverzicht voor een boekjaar.
 
@@ -434,6 +435,10 @@ def calculate_tax_overview(year: int | None = None,
     rekeningen — de €-vrijstelling geldt per belastingplichtige. De 'account'-
     filter beïnvloedt alleen de getoonde posities/waarde (portefeuillekant).
     'account' mag None (alle), een string (één rekening) of een lijst/tuple zijn.
+
+    extra_transactions: optionele lijst hypothetische transacties (zelfde vorm als
+    db.get_transactions()) die mee verwerkt worden — gebruikt door de
+    simulatiemodule om verkopen/heraankopen vooraf door te rekenen.
     """
     if year is None:
         year = datetime.now().year
@@ -453,6 +458,8 @@ def calculate_tax_overview(year: int | None = None,
     exemption_count = 2 if regime == "community" else 1
 
     all_txns = db.get_transactions()                      # globaal -> belasting
+    if extra_transactions:
+        all_txns = all_txns + list(extra_transactions)
     # Fotomoment-waarden per ticker (slotkoers 31/12/2025, in EUR)
     snapshots = {a["ticker"]: a["snapshot_price_eur"]
                  for a in db.get_assets()
