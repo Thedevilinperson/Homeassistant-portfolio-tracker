@@ -147,6 +147,96 @@ def get_wht_rate(country: str | None) -> float:
     return get_wht_rates().get(country.upper(), 0.0) / 100.0
 
 
+# ── Dividendfiscaliteit (Belgische personenbelasting) ─────────────────────────
+
+def dividend_tax_benefit(year: int | None = None, accounts=None) -> dict:
+    """Bereken het fiscale voordeel op dividenden voor de Belgische personenbelasting:
+
+      1) Vrijstelling roerende voorheffing: de eerste schijf (standaard €833) 'gewone'
+         aandelendividenden per belastingplichtige is vrijgesteld -> je recupereert de
+         ingehouden Belgische RV daarop (max €833 × 30% = €249,90 p.p.). Geldt NIET voor
+         dividenden van fondsen/ETF's/beveks.
+      2) FBB (optioneel) voor Franse aandelen: forfaitair gedeelte buitenlandse belasting,
+         15% van het nettobedrag na Franse bronheffing (verdrag BE-FR).
+
+    accounts: None (alle) of set/lijst. year: None = alle jaren samengeteld (per jaar via
+    de 'per_year'-sleutel).
+    """
+    s = db.get_all_settings()
+    exemption_pp = float(s.get("dividend_exemption_per_person", "833"))
+    rv_rate      = float(s.get("withholding_tax_rate", "0.30"))
+    persons      = 2 if s.get("household_regime", "single") == "community" else 1
+    fbb_enabled  = s.get("fbb_enabled", "0") == "1"
+    fbb_rate     = float(s.get("fbb_rate", "0.15"))
+    cap_amount   = exemption_pp * persons
+
+    accset = set(accounts) if accounts else None
+    assets = {a["ticker"]: a for a in db.get_assets()}
+
+    # Groepeer per jaar
+    per_year: dict[int, dict] = {}
+    for d in db.get_dividends():
+        if accset is not None and (d.get("account") or db.DEFAULT_ACCOUNT) not in accset:
+            continue
+        yr = int(str(d["date"])[:4])
+        if year is not None and yr != year:
+            continue
+        a = assets.get(d["ticker"], {})
+        atype = a.get("asset_type", "stock")
+        country = (a.get("country") or "BE").upper()
+        fx = d.get("fx_rate") or 1.0
+        gross_eur = d.get("gross_eur") if d.get("gross_eur") is not None else (d.get("gross_amount") or 0.0)
+        foreign_wht_eur = (d.get("foreign_wht_amt") or 0.0) * fx
+        wh_eur = d.get("withholding_eur")
+        if wh_eur is None:
+            wh_eur = (d.get("withholding_tax") or 0.0) * fx
+        be_rv_eur = max(0.0, wh_eur - foreign_wht_eur)
+        net_after_foreign = max(0.0, gross_eur - foreign_wht_eur)   # ~ C (grondslag BE RV / FBB)
+
+        yd = per_year.setdefault(yr, {
+            "qualifying_gross": 0.0, "be_rv_qualifying": 0.0,
+            "fbb_base_fr": 0.0, "excluded_gross": 0.0})
+        # Enkel individuele aandelen komen in aanmerking voor de 833-vrijstelling
+        if atype == "stock":
+            yd["qualifying_gross"] += net_after_foreign
+            yd["be_rv_qualifying"] += be_rv_eur
+            if country == "FR":
+                yd["fbb_base_fr"] += net_after_foreign
+        else:
+            yd["excluded_gross"] += gross_eur
+
+    # Voordeel per jaar berekenen
+    out_years = {}
+    tot_reclaim = tot_fbb = 0.0
+    for yr, yd in per_year.items():
+        eligible_gross = min(yd["qualifying_gross"], cap_amount)
+        reclaim = min(yd["be_rv_qualifying"], eligible_gross * rv_rate)
+        fbb = (yd["fbb_base_fr"] * fbb_rate) if fbb_enabled else 0.0
+        out_years[yr] = {
+            **yd,
+            "cap_amount": cap_amount,
+            "eligible_gross": eligible_gross,
+            "reclaimable_rv": reclaim,
+            "fbb": fbb,
+            "total_benefit": reclaim + fbb,
+        }
+        tot_reclaim += reclaim
+        tot_fbb += fbb
+
+    return {
+        "per_year": out_years,
+        "persons": persons,
+        "exemption_per_person": exemption_pp,
+        "cap_amount": cap_amount,
+        "rv_rate": rv_rate,
+        "fbb_enabled": fbb_enabled,
+        "fbb_rate": fbb_rate,
+        "total_reclaimable_rv": tot_reclaim,
+        "total_fbb": tot_fbb,
+        "total_benefit": tot_reclaim + tot_fbb,
+    }
+
+
 # ── TOB berekening ────────────────────────────────────────────────────────────
 
 def calculate_tob(asset_type: str, etf_subtype: str, total_amount_eur: float,

@@ -206,11 +206,71 @@ def per_asset_result(overview: dict, year=None, accounts=None) -> dict:
     return out
 
 
-def perf_net(r: dict, real_model: bool = True) -> float:
+PERF_MODES = ["cost", "invested", "grant"]
+PERF_MODE_LABELS = {
+    "cost":     "Personenbelasting als kost (aandelen 'gratis', kostbasis €0)",
+    "invested": "Personenbelasting als investering (kostbasis = betaalde belasting)",
+    "grant":    "Personenbelasting negeren (meerwaarde t.o.v. toekenningsprijs)",
+}
+
+
+def perf_mode() -> str:
+    m = db.get_setting("perf_display_mode", "invested")
+    return m if m in PERF_MODES else "invested"
+
+
+def perf_net(r: dict, mode=None) -> float:
     """Netto resultaat van een activum volgens de gekozen zienswijze voor performance shares.
-    real_model=True: reële winst (huidige waarde − betaalde personenbelasting).
-    real_model=False: zuivere meerwaarde t.o.v. de toekenningswaarde."""
-    return r["net_real"] if real_model else r["net_total"]
+      - 'grant'    : zuivere meerwaarde t.o.v. de toekenningswaarde (personenbelasting genegeerd).
+      - 'invested' : personenbelasting = kostbasis -> reële winst (huidige waarde − belasting).
+      - 'cost'     : personenbelasting = kost, aandelen kostbasis €0 (zelfde netto als 'invested').
+    Backwards compat: mode kan ook een bool zijn (True=invested, False=grant)."""
+    if mode is None:
+        mode = perf_mode()
+    if isinstance(mode, bool):
+        mode = "invested" if mode else "grant"
+    if mode == "grant":
+        return r["net_total"]
+    # 'invested' en 'cost' geven hetzelfde netto; enkel de opsplitsing verschilt
+    return r["net_real"]
+
+
+def perf_held_summary(accounts=None) -> dict:
+    """Aggregaat voor de MOMENTEEL AANGEHOUDEN performance shares (voor dashboard-metrics).
+    Retourneert vesting-kostbasis en toegerekende personenbelasting van de aangehouden
+    stukken, plus de totale personenbelasting in de selectie.
+    Toerekening gebeurt pro rata (aangehouden aantal / toegekend aantal) per ticker."""
+    accset = set(accounts) if accounts else None
+    grant_qty, grant_vest, grant_tax = {}, {}, {}
+    for t in db.get_transactions():
+        if not (t.get("is_performance_share") and t["transaction_type"] == "buy"):
+            continue
+        if accset is not None and (t.get("account") or db.DEFAULT_ACCOUNT) not in accset:
+            continue
+        tk = t["ticker"]
+        grant_qty[tk]  = grant_qty.get(tk, 0.0)  + (t.get("quantity") or 0.0)
+        grant_vest[tk] = grant_vest.get(tk, 0.0) + (t.get("total_amount_eur") or 0.0)
+        grant_tax[tk]  = grant_tax.get(tk, 0.0)  + (t.get("income_tax_eur") or 0.0)
+
+    held_qty = {}
+    try:
+        assets = db.get_assets()
+        snaps = {a["ticker"]: a["snapshot_price_eur"] for a in assets if a.get("snapshot_price_eur") is not None}
+        pos_by_key, _, _ = tax_mod._fifo_core(db.get_transactions(), snaps)
+        for (tk, acct), pos in pos_by_key.items():
+            if accset is not None and (acct or db.DEFAULT_ACCOUNT) not in accset:
+                continue
+            held_qty[tk] = held_qty.get(tk, 0.0) + (pos.get("total_quantity") or 0.0)
+    except Exception:
+        pass
+
+    held_vest = held_tax = total_tax = 0.0
+    for tk, gq in grant_qty.items():
+        total_tax += grant_tax.get(tk, 0.0)
+        ratio = min(1.0, (held_qty.get(tk, 0.0) / gq)) if gq else 0.0
+        held_vest += grant_vest.get(tk, 0.0) * ratio
+        held_tax  += grant_tax.get(tk, 0.0) * ratio
+    return {"held_vesting": held_vest, "held_tax": held_tax, "total_tax": total_tax}
 
 
 def render_realized_history(realized_list, names=None, empty_msg="Nog geen gerealiseerde meer-/minwaarden."):
@@ -392,16 +452,19 @@ def page_dashboard():
         period = st.radio("Periode", ["YTD (dit jaar)", "Sinds start (all-time)"],
                           horizontal=True, key="dash_period", label_visibility="collapsed")
     all_time = period.startswith("Sinds")
-    # Toggle: hoe performance shares meetellen in het resultaat
+    # Zienswijze performance shares (3 modi) — gedeeld met de portefeuillepagina via een setting
     has_inctax = any((t.get("income_tax_eur") or 0) > 0 for t in db.get_transactions())
-    real_perf = True
+    pmode = perf_mode()
     if has_inctax:
-        real_perf = st.checkbox(
-            "Performance shares doorrekenen aan betaalde personenbelasting",
-            value=True, key="dash_real_perf",
-            help="AAN: reële winst = huidige waarde − betaalde personenbelasting (de toekenningswaarde "
-                 "telt niet als kost; je investeerde in feite enkel de belasting). UIT: zuivere "
-                 "meerwaarde t.o.v. de toekenningswaarde. Beïnvloedt enkel de weergave, niet de meerwaardebelasting.")
+        cur_i = PERF_MODES.index(pmode)
+        pmode = st.radio(
+            "🎁 Zienswijze performance shares (personenbelasting)", PERF_MODES, index=cur_i,
+            format_func=lambda m: PERF_MODE_LABELS[m], key="dash_perf_mode",
+            help="Bepaalt hoe de bij toekenning betaalde personenbelasting doorwerkt in totaal "
+                 "geïnvesteerd, de ongerealiseerde W/V en de kostenweergave. Beïnvloedt enkel de "
+                 "weergave van je rendement, niet de meerwaardebelasting.")
+        if pmode != db.get_setting("perf_display_mode", "invested"):
+            db.set_setting("perf_display_mode", pmode)
     if acct:
         st.caption(f"📂 Gefilterd op: **{', '.join(acct)}** — belastingcijfers blijven globaal (vrijstelling geldt per persoon).")
 
@@ -427,6 +490,19 @@ def page_dashboard():
 
     # Periode-afhankelijke cijfers
     accset = set(acct) if acct else None
+
+    # Performance-share aanpassingen op de aangehouden posities (afhankelijk van de modus)
+    _ph = perf_held_summary(accset) if has_inctax else {"held_vesting": 0.0, "held_tax": 0.0, "total_tax": 0.0}
+    inv_adj = wv_adj = pb_cost = 0.0
+    if pmode == "invested":
+        inv_adj = -_ph["held_vesting"] + _ph["held_tax"]   # kostbasis: vesting -> belasting
+        wv_adj  = _ph["held_vesting"] - _ph["held_tax"]
+    elif pmode == "cost":
+        inv_adj = -_ph["held_vesting"]                      # kostbasis -> 0
+        wv_adj  = _ph["held_vesting"]
+        pb_cost = _ph["held_tax"]                           # personenbelasting als kost
+    total_cost = (total_cost or 0) + inv_adj
+    unreal_gl  = (unreal_gl or 0) + wv_adj
     divs_period = db.get_dividends(year=None if all_time else year)
     div_net = dividends_net_eur(divs_period, accset)
     realized_period = (overview.get("selection_realized_total", 0.0) if all_time
@@ -440,11 +516,19 @@ def page_dashboard():
     c2.metric("💸 Totaal geïnvesteerd", eur(total_cost))
     c3.metric(f"📊 Gerealiseerde W/V ({period_lbl})", eur(realized_period),
               delta_color=delta_color(realized_period))
-    c4.metric(f"💰 Netto dividenden ({period_lbl})", eur(div_net))
-    _kosten = overview.get("selection_costs", 0) + overview.get("account_costs_selection", 0)
-    c5.metric("🧾 Kosten (txn + rekening)", eur(_kosten),
-              help="Transactiekosten + algemene rekeningkosten (bv. beheerskosten). "
-                   "Apart gehouden, niet in de meerwaardeberekening.")
+    _dben = tax_mod.dividend_tax_benefit(None if all_time else year, accset)
+    div_benefit = _dben["total_benefit"]
+    c4.metric(f"💰 Netto dividenden ({period_lbl})", eur(div_net),
+              delta=(f"+{eur(div_benefit)} recup." if div_benefit else None),
+              help="Netto ontvangen dividenden. De delta is de recupereerbare roerende voorheffing "
+                   "(vrijstelling €833 p.p.) plus eventuele FBB voor Franse aandelen die je via de "
+                   "belastingaangifte kunt terugkrijgen — zie 🧾 Belgische Belasting voor de uitwerking.")
+    _kosten = overview.get("selection_costs", 0) + overview.get("account_costs_selection", 0) + pb_cost
+    _klabel = "🧾 Kosten (txn + rekening" + (" + personenbel.)" if pb_cost else ")")
+    c5.metric(_klabel, eur(_kosten),
+              help="Transactiekosten + algemene rekeningkosten (bv. beheerskosten)"
+                   + (", plus de personenbelasting op performance shares (die je in deze modus als kost telt)."
+                      if pb_cost else ". Apart gehouden, niet in de meerwaardeberekening."))
 
     # ── Resultaat: ongerealiseerd + gerealiseerd + totaal (over de rekeningen heen) ──
     totale_wv = realized_period + (unreal_gl or 0)
@@ -493,8 +577,8 @@ def page_dashboard():
         names = asset_name_map()
         result = per_asset_result(overview, year=None if all_time else year, accounts=accset)
         if result:
-            tickers_sorted = sorted(result.keys(), key=lambda t: perf_net(result[t], real_perf))
-            net_vals  = [perf_net(result[t], real_perf) for t in tickers_sorted]
+            tickers_sorted = sorted(result.keys(), key=lambda t: perf_net(result[t], pmode))
+            net_vals  = [perf_net(result[t], pmode) for t in tickers_sorted]
             wv_vals   = [result[t]["total"] for t in tickers_sorted]
             div_vals  = [result[t]["dividends"] for t in tickers_sorted]
             cost_vals = [result[t]["costs"] for t in tickers_sorted]
@@ -522,12 +606,12 @@ def page_dashboard():
             )
             st.plotly_chart(fig_bar, width='stretch')
             tot_inctax = sum(r["income_tax"] for r in result.values())
-            tot_net    = sum(perf_net(r, real_perf) for r in result.values())
-            if tot_inctax and real_perf:
+            tot_net    = sum(perf_net(r, pmode) for r in result.values())
+            if tot_inctax and pmode == "grant":
+                cap = "Performance shares gerekend aan de toekenningswaarde (zuivere meerwaarde)."
+            elif tot_inctax:
                 cap = ("Performance shares gerekend aan de betaalde personenbelasting "
                        "(reële winst = huidige waarde − belasting).")
-            elif tot_inctax:
-                cap = "Performance shares gerekend aan de toekenningswaarde (zuivere meerwaarde)."
             else:
                 cap = "Netto = ongerealiseerde + gerealiseerde W/V + dividenden − kosten (txn + TOB)."
             st.caption(cap + f"  **Totaal netto: {eur(tot_net)}**"
@@ -654,30 +738,36 @@ def page_portfolio():
     # ── Renderblokken (volgorde wordt onderaan bepaald) ───────────────────────
 
     def render_per_asset():
+        _pm = perf_mode()
         st.subheader("📊 Totaal resultaat per activum")
+        _mnote = {"cost": "personenbelasting als kost (kostbasis €0)",
+                  "invested": "reële winst = huidige waarde − personenbelasting",
+                  "grant": "meerwaarde t.o.v. de toekenningsprijs (personenbelasting genegeerd)"}[_pm]
         st.caption("Per activum: ongerealiseerde + gerealiseerde W/V, ontvangen dividenden, gelinkte "
-                   "kosten (transactiekosten + TOB) en — voor performance shares — de betaalde "
-                   "personenbelasting. Voor performance shares is het 'Netto resultaat' de reële winst: "
-                   "huidige waarde − betaalde personenbelasting (de toekenningswaarde telt niet als kost).")
+                   "kosten (transactiekosten + TOB) en de personenbelasting op performance shares. "
+                   f"Zienswijze performance shares: **{_mnote}** (in te stellen op het dashboard).")
         result = per_asset_result(overview, year=None, accounts=accset)
         if not result:
             st.info("Nog geen posities of historiek voor deze selectie.")
             return
         any_inctax = any(r["income_tax"] for r in result.values())
         rrows = []
-        for t in sorted(result.keys(), key=lambda x: result[x]["net_real"], reverse=True):
+        for t in sorted(result.keys(), key=lambda x: perf_net(result[x], _pm), reverse=True):
             r = result[t]
             rec = synth.get(t, {}).get("consensus")
-            net = r["net_real"]
+            net = perf_net(r, _pm)
+            # In modus 'cost' toont de kostenkolom de personenbelasting mee
+            kosten_disp = r["costs"] + (r["income_tax"] if _pm == "cost" else 0)
             row = {
                 "W/V":                 sign_icon(net),
                 "Activum":             asset_label(t, nmap),
                 "Aantal (nu)":         f"{r['quantity']:.4f}" if r["quantity"] else "0",
                 "Huidige waarde":      eur(r["current_value"]),
-                "Ongerealiseerd":      eur(r["unrealized"]),
+                "Ongerealiseerd":      eur(r["unrealized"] + (r["perf_basis"] if _pm == "cost"
+                                           else (r["perf_basis"] - r["income_tax"]) if _pm == "invested" else 0)),
                 "Gerealiseerd":        eur(r["realized"]),
                 "Dividenden":          eur(r["dividends"]),
-                "Kosten":              eur(r["costs"]),
+                "Kosten":              eur(kosten_disp),
             }
             if any_inctax:
                 row["Personenbel."] = eur(r["income_tax"]) if r["income_tax"] else "—"
@@ -690,12 +780,10 @@ def page_portfolio():
         tdv = sum(r["dividends"] for r in result.values())
         tc = sum(r["costs"] for r in result.values())
         tpb = sum(r["income_tax"] for r in result.values())
-        net_all = sum(r["net_real"] for r in result.values())
-        extra = (f"  Voor performance shares geldt: reële winst = huidige waarde − personenbelasting "
-                 f"(totaal betaalde personenbelasting {eur(tpb)})." if tpb else "")
-        st.caption(f"**Totaal netto resultaat: {eur(net_all)}** "
-                   f"(ongerealiseerd {eur(tu)} + gerealiseerd {eur(tr)} + dividenden {eur(tdv)} − kosten {eur(tc)}"
-                   + (" + performance-aanpassing" if tpb else "") + ").  "
+        net_all = sum(perf_net(r, _pm) for r in result.values())
+        extra = (f"  Personenbelasting performance shares: {eur(tpb)} "
+                 f"({'als kost' if _pm=='cost' else 'als kostbasis' if _pm=='invested' else 'genegeerd'})." if tpb else "")
+        st.caption(f"**Totaal netto resultaat: {eur(net_all)}**  ·  "
                    "🟢 = positief, 🔴 = negatief.  🔺/🔻 = advies gewijzigd sinds de vorige ronde." + extra)
 
     def render_positions():
@@ -1309,10 +1397,12 @@ def page_transactions():
         income_tax_eur = 0.0
         if txn_type == "buy":
             is_perf = st.checkbox(
-                "🎁 Performance shares (toekenning / vesting)", key=kk("perf"),
-                help="Aandelen die je kreeg i.p.v. kocht (bv. via je werkgever). Voer het aantal en de "
-                     "koers op de toekenningsdatum in — die waarde wordt je kostbasis voor de "
-                     "meerwaarde (je betaalde er al personenbelasting op). Geen TOB en geen cash-uitgave.")
+                "🎁 Toegekend als loon (warrants, RSU, gratis/bonus aandelen)", key=kk("perf"),
+                help="Effecten die je kreeg i.p.v. kocht (warrants, performance shares/RSU, gratis "
+                     "aandelen uit een werknemersplan). Voer het aantal en de waarde per stuk op de "
+                     "toekenningsdatum in — die basiswaarde wordt je kostbasis voor de meerwaarde "
+                     "(je betaalde er al bedrijfsvoorheffing/personenbelasting op). Geen TOB, geen cash. "
+                     "Voor écht gratis aandelen zonder belasting: laat het belastingveld op 0.")
             if is_perf:
                 _, _vest_eur = compute_eur(total_amount, currency, txn_date)
                 pb_pct = st.number_input(
@@ -1863,6 +1953,15 @@ def page_dividends():
         c2.metric("Ingehouden voorheffingen", eur(total_wh))
         c3.metric("Netto ontvangen", eur(total_net))
 
+        # Fiscaal recupereerbaar (833-vrijstelling + FBB) voor de huidige selectie
+        _acc = (f_acct if f_acct != "Alle rekeningen" else None)
+        _ben = tax_mod.dividend_tax_benefit(int(f_year) if f_year != "Alle" else None, _acc)
+        if _ben["total_benefit"] > 0:
+            st.success(f"💡 Fiscaal recupereerbaar via de aangifte: **{eur(_ben['total_benefit'])}** "
+                       f"(RV-vrijstelling {eur(_ben['total_reclaimable_rv'])}"
+                       + (f" + FBB {eur(_ben['total_fbb'])}" if _ben["total_fbb"] else "")
+                       + "). Volledige uitwerking op de **🧾 Belgische Belasting**-pagina.")
+
         # Netto per rekening (EUR) — handig wanneer eenzelfde activum op meerdere rekeningen uitkeert
         if f_acct == "Alle rekeningen":
             per_acct = {}
@@ -2132,6 +2231,58 @@ def page_tax():
         if tob_rows:
             with st.expander("TOB-detail per transactie"):
                 st.dataframe(pd.DataFrame(tob_rows), width='stretch', hide_index=True)
+
+    # ── Dividendfiscaliteit ───────────────────────────────────────────────────
+    st.divider()
+    st.subheader(f"💰 Dividendfiscaliteit {sel_year} (personenbelasting)")
+    ben = tax_mod.dividend_tax_benefit(sel_year)
+    yd = ben["per_year"].get(sel_year)
+    persons = ben["persons"]
+    if not yd or (yd["qualifying_gross"] <= 0 and yd["excluded_gross"] <= 0 and yd["fbb_base_fr"] <= 0):
+        st.info("Geen dividenden geregistreerd voor dit jaar.")
+    else:
+        st.caption(f"Vrijstelling: **€{ben['exemption_per_person']:,.0f} per persoon** × {persons} persoon(en) "
+                   f"= **€{ben['cap_amount']:,.0f}** vrijgestelde 'gewone' aandelendividenden. "
+                   f"RV-tarief {ben['rv_rate']*100:.0f}%. Enkel individuele aandelen tellen mee "
+                   "(fondsen/ETF's niet).")
+        m1, m2, m3 = st.columns(3)
+        m1.metric("In aanmerking komende dividenden", eur(yd["qualifying_gross"]),
+                  help="Bruto (na eventuele buitenlandse bronheffing) van individuele aandelen.")
+        m2.metric("Recupereerbare roerende voorheffing", eur(yd["reclaimable_rv"]),
+                  help=f"Via codes 1437/2437. Max €{ben['exemption_per_person']*0.30*persons:,.2f} "
+                       f"({persons}× €{ben['exemption_per_person']*0.30:,.2f}).")
+        m3.metric("FBB Franse aandelen" + ("" if ben["fbb_enabled"] else " (uit)"),
+                  eur(yd["fbb"]),
+                  help="15% van het netto na Franse bronheffing. In/uit te schakelen in ⚙️ Instellingen.")
+
+        st.markdown(f"**Totaal fiscaal voordeel {sel_year}: {eur(yd['total_benefit'])}**")
+        # Uitwerking / optimalisatie
+        lines = []
+        if yd["qualifying_gross"] > yd["cap_amount"]:
+            lines.append(f"Je in aanmerking komende dividenden ({eur(yd['qualifying_gross'])}) overschrijden "
+                         f"de vrijstellingskorf ({eur(yd['cap_amount'])}). Vraag de vrijstelling aan voor de "
+                         "dividenden met het **hoogste** RV-tarief eerst; je recupereert dan het maximum "
+                         f"van {eur(yd['reclaimable_rv'])}.")
+        else:
+            lines.append(f"Al je in aanmerking komende dividenden ({eur(yd['qualifying_gross'])}) passen binnen "
+                         f"de korf ({eur(yd['cap_amount'])}); de volledige ingehouden RV van "
+                         f"{eur(yd['reclaimable_rv'])} is recupereerbaar.")
+        if yd["excluded_gross"] > 0:
+            lines.append(f"€{yd['excluded_gross']:,.2f} aan fonds-/ETF-dividenden komt **niet** in aanmerking "
+                         "voor deze vrijstelling.")
+        if ben["fbb_enabled"] and yd["fbb"] > 0:
+            lines.append(f"Voor je Franse aandelen kun je daarnaast een FBB van {eur(yd['fbb'])} verrekenen "
+                         "(vak VII, rubriek F) — dit is betwiste materie, bewaar bewijsstukken.")
+        elif yd["fbb_base_fr"] > 0 and not ben["fbb_enabled"]:
+            lines.append(f"Je hebt Franse aandelendividenden (basis {eur(yd['fbb_base_fr'])}); zet de FBB aan "
+                         "in ⚙️ Instellingen om die mogelijke verrekening te zien.")
+        if persons == 1:
+            lines.append("Ben je gehuwd/wettelijk samenwonend? Zet het huwelijksstelsel op 'gemeenschap van "
+                         "goederen' om de korf te verdubbelen.")
+        for ln in lines:
+            st.markdown("- " + ln)
+        st.caption("ℹ️ Vermeld in de aangifte de **ingehouden roerende voorheffing** (niet het dividendbedrag) "
+                   "onder de codes **1437/2437**. Dit is een schatting; bewaar je rekeninguittreksels als bewijs.")
 
 
 # ── PAGINA: AI Advisor ────────────────────────────────────────────────────────
@@ -2419,6 +2570,32 @@ def page_settings():
             db.set_setting("household_regime", regime)
             clear_cache()
             st.success("✅ Belastinginstellingen opgeslagen!")
+
+        st.divider()
+        st.subheader("💰 Dividendvrijstelling (personenbelasting)")
+        st.caption("De eerste schijf 'gewone' aandelendividenden per belastingplichtige is vrijgesteld "
+                   "van roerende voorheffing; je recupereert die RV via de aangifte (codes 1437/2437). "
+                   "Geldt niet voor dividenden van fondsen/ETF's. Het bedrag is sinds 2025 niet "
+                   "geïndexeerd (t/m aanslagjaar 2030).")
+        div_exemp = st.number_input("Vrijgestelde dividenden per persoon (€)",
+                                    min_value=0.0, value=float(db.get_setting("dividend_exemption_per_person", "833")),
+                                    step=1.0,
+                                    help="Inkomstenjaar 2025/2026: €833 p.p. (max €249,90 recupereerbare RV p.p.). "
+                                         "Het aantal personen volgt uit het huwelijksstelsel hierboven.")
+        fbb_on = st.checkbox("FBB voor Franse aandelen toepassen",
+                             value=db.get_setting("fbb_enabled", "0") == "1",
+                             help="Forfaitair gedeelte buitenlandse belasting (verdrag BE-FR): 15% van het "
+                                  "nettobedrag na Franse bronheffing. De fiscus aanvaardt dit na rechtspraak "
+                                  "(Hof van Cassatie), maar het blijft betwist — raadpleeg een fiscalist.")
+        fbb_r = st.number_input("FBB-tarief (%)", min_value=0.0, max_value=100.0,
+                                value=float(db.get_setting("fbb_rate", "0.15")) * 100, step=0.5,
+                                disabled=not fbb_on)
+        if st.button("💾 Dividendvrijstelling opslaan", key="save_div_tax"):
+            db.set_setting("dividend_exemption_per_person", str(div_exemp))
+            db.set_setting("fbb_enabled", "1" if fbb_on else "0")
+            db.set_setting("fbb_rate", str(fbb_r / 100))
+            clear_cache()
+            st.success("✅ Dividendvrijstelling opgeslagen!")
 
     with tab_tob:
         st.subheader("Taks op Beursverrichtingen (TOB)")

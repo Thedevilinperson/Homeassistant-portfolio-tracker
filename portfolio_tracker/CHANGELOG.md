@@ -2,6 +2,30 @@
 
 Alle noemenswaardige wijzigingen aan de Portfolio Tracker add-on.
 
+## 0.24.0
+- Performance shares — drie zienswijzen (dashboard-brede toepassing). De vroegere aan/uit-toggle
+is vervangen door een keuze uit drie modi, die nu doorwerkt in totaal geïnvesteerd, de
+ongerealiseerde W/V, de kostenweergave én het staafdiagram (voorheen enkel het diagram):
+  -Personenbelasting als kost — de aandelen krijgen kostbasis €0 (ongerealiseerde W/V = volledige
+huidige waarde) en de personenbelasting verschijnt als kost ("Kosten (txn + rekening + personenbel.)").
+  - Personenbelasting als investering — kostbasis = betaalde belasting; de meerwaarde start vanaf
+die belasting (reële winst = huidige waarde − belasting). Geen aparte kost.
+  - Personenbelasting negeren — meerwaarde t.o.v. de toekenningsprijs; de belasting telt niet mee.
+De keuze wordt gedeeld met de portefeuillepagina. Toerekening gebeurt pro rata bij een gedeeltelijke
+verkoop.
+- Dividendvrijstelling in de personenbelasting (nieuw). De app houdt nu rekening met de
+vrijstelling van roerende voorheffing op 'gewone' aandelendividenden (instelbaar, standaard
+€833 per persoon — max €249,90 recupereerbare RV p.p.), inclusief het aantal personen uit je
+huwelijksstelsel. Fonds-/ETF-dividenden tellen niet mee. Optioneel: de FBB voor Franse aandelen
+(15% van het netto na Franse bronheffing, in te schakelen in ⚙️ Instellingen).
+  - Op het dashboard toont de dividendmetric het recupereerbare voordeel als delta.
+  - Op de dividendenpagina verschijnt per selectie/jaar het recupereerbare bedrag.
+  - Op de 🧾 Belgische Belasting-pagina staat een volledige uitwerking per jaar (in aanmerking
+komende dividenden, recupereerbare RV, FBB, optimalisatietips, codes 1437/2437).
+- Toegekende effecten breder ondersteund. De toekennings-optie in het transactieformulier heet nu
+"Toegekend als loon (warrants, RSU, gratis/bonus aandelen)" en dekt zo ook warrants (bonus van het
+werk met bedrijfsvoorheffing op de basiswaarde) en gratis aandelen (belasting op 0 = geen kost).
+
 ## 0.23.0
 - Meerdere rijen tegelijk verwijderen (alle tabellen). Elke tabel heeft nu een multiselect
 om één of meerdere rijen te kiezen, met een wis-knop die pas na een EXPLICIETE bevestiging
