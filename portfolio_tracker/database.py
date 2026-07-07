@@ -229,6 +229,8 @@ def _migrate(conn):
         ("net_received",         "REAL"),  # D: netto na alle voorheffingen
         ("net_received_cur",     "TEXT"),
         ("net_eur",              "REAL"),  # D in EUR (authoritatief voor totalen)
+        ("cash_basis",           "TEXT DEFAULT 'net'"),  # welk veld naar de cashbalans gaat: net/gross_after/gross_before
+        ("cash_eur",             "REAL"),                # het gekozen cashbedrag in EUR
     ]
     new_div_cols = []
     for col, ddl in div_cols:
@@ -243,6 +245,10 @@ def _migrate(conn):
     # Assets: ISIN-kolom
     if not _column_exists(cur, "assets", "isin"):
         cur.execute("ALTER TABLE assets ADD COLUMN isin TEXT")
+
+    # Assets: land van herkomst (voor buitenlandse bronbelasting op dividenden)
+    if not _column_exists(cur, "assets", "country"):
+        cur.execute("ALTER TABLE assets ADD COLUMN country TEXT DEFAULT 'BE'")
 
     # Assets: TOB — in België aangeboden/geregistreerd (FSMA)? (1=ja, default ja)
     if not _column_exists(cur, "assets", "belgian_registered"):
@@ -381,6 +387,23 @@ def total_account_costs_eur(account=None, year=None) -> float:
     return sum(c.get("amount_eur") or 0.0 for c in get_account_costs(account, year))
 
 
+def update_account_cost(cost_id: int, **fields):
+    """Werk een rekeningkost bij (whitelist)."""
+    allowed = {"account", "date", "description", "amount", "currency", "amount_eur", "fx_rate"}
+    sets, vals = [], []
+    for k, v in fields.items():
+        if k in allowed:
+            sets.append(f"{k}=?")
+            vals.append(v)
+    if not sets:
+        return
+    vals.append(cost_id)
+    conn = get_connection()
+    conn.execute(f"UPDATE account_costs SET {','.join(sets)} WHERE id=?", vals)
+    conn.commit()
+    conn.close()
+
+
 def delete_account_cost(cost_id: int):
     conn = get_connection()
     conn.execute("DELETE FROM account_costs WHERE id=?", (cost_id,))
@@ -431,6 +454,15 @@ def _div_net_eur(d: dict) -> float:
     return (g or 0) - (w or 0)
 
 
+def _div_cash_eur(d: dict) -> float:
+    """Cashbedrag (EUR) van een dividend voor het cash-grootboek.
+    Gebruikt het bij invoer gekozen veld (cash_basis: net/gross_after/gross_before);
+    valt terug op het netto-bedrag voor oudere rijen."""
+    if d.get("cash_eur") is not None:
+        return d["cash_eur"]
+    return _div_net_eur(d)
+
+
 def compute_cash_positions(accounts=None) -> dict:
     """Afgeleide cashpositie per rekening uit alle bewegingen.
 
@@ -477,7 +509,7 @@ def compute_cash_positions(accounts=None) -> dict:
     for d in get_dividends():
         if not _use(d.get("account")):
             continue
-        _row(d.get("account"))["dividends"] += _div_net_eur(d)
+        _row(d.get("account"))["dividends"] += _div_cash_eur(d)
 
     for a in (accs if accs is not None else get_accounts()):
         cost = total_account_costs_eur(account=a)
@@ -535,7 +567,7 @@ def cash_ledger(accounts=None) -> list[dict]:
         if not _use(d.get("account")):
             continue
         items.append({"date": d["date"][:10], "account": d.get("account") or DEFAULT_ACCOUNT,
-                      "label": "Dividend", "delta": _div_net_eur(d), "desc": d["ticker"],
+                      "label": "Dividend", "delta": _div_cash_eur(d), "desc": d["ticker"],
                       "source": "div", "ref": d["id"]})
     for c in get_account_costs():
         if not _use(c.get("account")):
@@ -659,21 +691,23 @@ def get_ai_usage_summary() -> dict:
 # ── Assets ──────────────────────────────────────────────────────────────────
 
 def add_asset(ticker, name, asset_type="stock", etf_subtype="distributing",
-              currency="EUR", exchange=None, isin=None, belgian_registered=1):
+              currency="EUR", exchange=None, isin=None, belgian_registered=1,
+              country="BE"):
     conn = get_connection()
     conn.execute(
         """INSERT OR IGNORE INTO assets
-           (ticker,name,asset_type,etf_subtype,currency,exchange,isin,belgian_registered)
-           VALUES (?,?,?,?,?,?,?,?)""",
+           (ticker,name,asset_type,etf_subtype,currency,exchange,isin,belgian_registered,country)
+           VALUES (?,?,?,?,?,?,?,?,?)""",
         (ticker.upper(), name, asset_type, etf_subtype, currency, exchange, isin,
-         int(belgian_registered))
+         int(belgian_registered), (country or "BE").upper())
     )
     conn.commit()
     conn.close()
 
 
 def update_asset(ticker, name=None, asset_type=None, etf_subtype=None,
-                 currency=None, exchange=None, isin=None, belgian_registered=None):
+                 currency=None, exchange=None, isin=None, belgian_registered=None,
+                 country=None):
     conn = get_connection()
     fields, vals = [], []
     if name        is not None: fields.append("name=?");        vals.append(name)
@@ -682,6 +716,7 @@ def update_asset(ticker, name=None, asset_type=None, etf_subtype=None,
     if currency    is not None: fields.append("currency=?");    vals.append(currency)
     if exchange    is not None: fields.append("exchange=?");    vals.append(exchange)
     if isin        is not None: fields.append("isin=?");        vals.append(isin)
+    if country     is not None: fields.append("country=?");     vals.append(country.upper())
     if belgian_registered is not None:
         fields.append("belgian_registered=?"); vals.append(int(belgian_registered))
     if fields:
@@ -902,12 +937,17 @@ def add_dividend(ticker, date, gross_amount, withholding_tax=0.0,
     d = details or {}
     if d.get("net_eur") is None:
         d["net_eur"] = gross_eur - withholding_eur
+    if d.get("cash_basis") is None:
+        d["cash_basis"] = "net"
+    if d.get("cash_eur") is None:
+        d["cash_eur"] = d["net_eur"]
     cols = ["ticker", "date", "gross_amount", "withholding_tax", "currency", "notes",
             "fx_rate", "gross_eur", "withholding_eur",
             "foreign_wht_withheld", "belgian_rv_withheld", "account",
             "gross_before_wht", "gross_before_wht_cur", "foreign_wht_amt",
             "foreign_wht_cur", "gross_after_wht", "gross_after_wht_cur",
-            "belgian_rv_amt", "net_received", "net_received_cur", "net_eur"]
+            "belgian_rv_amt", "net_received", "net_received_cur", "net_eur",
+            "cash_basis", "cash_eur"]
     vals = [ticker.upper(), date, gross_amount, withholding_tax, currency, notes,
             fx_rate, gross_eur, withholding_eur,
             int(foreign_wht_withheld), int(belgian_rv_withheld), account,
@@ -915,7 +955,8 @@ def add_dividend(ticker, date, gross_amount, withholding_tax=0.0,
             d.get("foreign_wht_amt"), d.get("foreign_wht_cur"),
             d.get("gross_after_wht"), d.get("gross_after_wht_cur"),
             d.get("belgian_rv_amt"), d.get("net_received"),
-            d.get("net_received_cur"), d.get("net_eur")]
+            d.get("net_received_cur"), d.get("net_eur"),
+            d.get("cash_basis"), d.get("cash_eur")]
     conn = get_connection()
     conn.execute(f"INSERT INTO dividends ({','.join(cols)}) VALUES ({','.join('?'*len(cols))})",
                  vals)
@@ -950,7 +991,7 @@ _DIV_EDITABLE = {
     "foreign_wht_withheld", "belgian_rv_withheld",
     "gross_before_wht", "gross_before_wht_cur", "foreign_wht_amt", "foreign_wht_cur",
     "gross_after_wht", "gross_after_wht_cur", "belgian_rv_amt",
-    "net_received", "net_received_cur",
+    "net_received", "net_received_cur", "cash_basis", "cash_eur",
 }
 
 

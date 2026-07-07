@@ -25,12 +25,12 @@ TXN_COLUMNS = [
     "ticker", "type", "datum", "aantal", "prijs_per_stuk", "munt",
     "totaalbedrag", "fx_koers", "kosten", "kosten_munt", "rekening",
     "koersdoel", "performance_share", "personenbelasting_eur",
-    "naam", "activumtype", "etf_type", "be_genoteerd",
+    "naam", "activumtype", "etf_type", "be_genoteerd", "land",
 ]
 DIV_COLUMNS = [
     "ticker", "datum", "munt", "fx_koers",
     "bruto_voor_bronbelasting", "buitenlandse_bronbelasting",
-    "bruto_na_bronbelasting", "netto", "rekening",
+    "bruto_na_bronbelasting", "netto", "rekening", "cash_basis",
 ]
 COST_COLUMNS = ["rekening", "datum", "omschrijving", "bedrag", "munt"]
 
@@ -50,14 +50,15 @@ INSTRUCTIONS = [
     ("Transacties", "koersdoel", "nee", "Optioneel koersdoel (native munt)"),
     ("Transacties", "performance_share", "nee", "ja/nee — toekenning i.p.v. aankoop (geen TOB)"),
     ("Transacties", "personenbelasting_eur", "nee", "Enkel bij performance_share: betaalde belasting in EUR"),
-    ("Transacties", "naam/activumtype/etf_type/be_genoteerd", "nee",
-     "Enkel gebruikt om een NIEUW activum aan te maken (type=stock/etf/bond, etf_type=distributing/accumulating, be_genoteerd=ja/nee)"),
+    ("Transacties", "naam/activumtype/etf_type/be_genoteerd/land", "nee",
+     "Enkel gebruikt om een NIEUW activum aan te maken (type=stock/etf/bond, etf_type=distributing/accumulating, be_genoteerd=ja/nee, land=2-letterige code bv. US)"),
     ("Dividenden", "ticker / datum", "ja", "Zoals bij transacties"),
     ("Dividenden", "munt / fx_koers", "nee", "Standaard EUR / historische koers"),
     ("Dividenden", "bruto_voor_bronbelasting", "nee", "A: bruto vóór buitenlandse bronbelasting"),
     ("Dividenden", "buitenlandse_bronbelasting", "nee", "B: buitenlandse bronbelasting"),
     ("Dividenden", "bruto_na_bronbelasting", "nee", "C: bruto na bronbelasting (= A − B)"),
     ("Dividenden", "netto", "nee", "D: netto na Belgische RV. Lege velden worden afgeleid."),
+    ("Dividenden", "cash_basis", "nee", "Welk veld naar het cash-grootboek gaat: netto (standaard), bruto_na of bruto_voor"),
     ("Kosten", "rekening / datum / bedrag", "ja", "Rekeningkost (beheerskosten e.d.)"),
     ("Kosten", "omschrijving / munt", "nee", "Standaard EUR"),
 ]
@@ -196,12 +197,14 @@ def parse_workbook(file) -> dict:
             }
             result["transacties"].append(rec)
             if tk not in known and tk not in result["new_assets"]:
+                _land = _s(row.get("land")).upper()
                 result["new_assets"][tk] = {
                     "name": _s(row.get("naam")) or tk,
                     "asset_type": (_s(row.get("activumtype")).lower() or "stock"),
                     "etf_subtype": (_s(row.get("etf_type")).lower() or "distributing"),
                     "currency": cur,
                     "belgian_registered": _yesno(row.get("be_genoteerd")) if not _is_blank(row.get("be_genoteerd")) else True,
+                    "country": _land if len(_land) == 2 and _land.isalpha() else "BE",
                 }
 
     # ── Dividenden ──
@@ -226,16 +229,22 @@ def parse_workbook(file) -> dict:
                 result["errors"].append(f"Dividenden rij {rn}: " + "; ".join(errs))
                 continue
             cur = _s(row.get("munt")).upper() or "EUR"
+            _cb = _s(row.get("cash_basis")).lower()
+            cash_basis = {"netto": "net", "net": "net", "bruto_na": "gross_after",
+                          "gross_after": "gross_after", "bruto_voor": "gross_before",
+                          "gross_before": "gross_before"}.get(_cb, "net")
             result["dividenden"].append({
                 "ticker": tk, "date": d, "currency": cur,
                 "fx_rate_in": _f(row.get("fx_koers")),
                 "A": A, "B": B, "C": C, "D": D,
                 "account": _s(row.get("rekening")) or default_acct,
+                "cash_basis": cash_basis,
             })
             if tk not in known and tk not in result["new_assets"]:
                 result["new_assets"][tk] = {"name": tk, "asset_type": "stock",
                                             "etf_subtype": "distributing",
-                                            "currency": cur, "belgian_registered": True}
+                                            "currency": cur, "belgian_registered": True,
+                                            "country": "BE"}
 
     # ── Kosten ──
     cdf = _read_sheet(xls, "Kosten")
@@ -275,7 +284,8 @@ def apply_import(parsed: dict) -> dict:
             db.add_asset(tk, info["name"], info.get("asset_type", "stock"),
                          info.get("etf_subtype", "distributing"),
                          currency=info.get("currency", "EUR"),
-                         belgian_registered=info.get("belgian_registered", True))
+                         belgian_registered=info.get("belgian_registered", True),
+                         country=info.get("country", "BE"))
             summary["assets"] += 1
         except Exception:
             pass  # bestaat mogelijk al
@@ -319,12 +329,18 @@ def apply_import(parsed: dict) -> dict:
         rv = ch["rv"] or 0.0
         withholding = wht_foreign + rv
         net = ch["d"] if ch["d"] is not None else (gross - withholding)
+        cbk = r.get("cash_basis") or "net"
+        cash_native = {"gross_before": ch["a"], "gross_after": ch["c"], "net": net}.get(cbk)
+        if cash_native is None:
+            cash_native = net
         details = {
             "gross_before_wht": ch["a"], "gross_before_wht_cur": cur,
             "foreign_wht_amt": ch["b"], "foreign_wht_cur": cur,
             "gross_after_wht": ch["c"], "gross_after_wht_cur": cur,
             "belgian_rv_amt": ch["rv"], "net_received": ch["d"], "net_received_cur": cur,
             "net_eur": (net or 0.0) * fx,
+            "cash_basis": cbk,
+            "cash_eur": (cash_native or 0.0) * fx,
         }
         db.add_dividend(r["ticker"], r["date"], gross, withholding, cur, None, fx,
                         gross_eur=(gross or 0.0) * fx, withholding_eur=(withholding or 0.0) * fx,
@@ -353,19 +369,21 @@ def build_template() -> bytes:
          "prijs_per_stuk": 180, "munt": "USD", "totaalbedrag": "", "fx_koers": "",
          "kosten": 5, "kosten_munt": "EUR", "rekening": acct, "koersdoel": "",
          "performance_share": "nee", "personenbelasting_eur": "",
-         "naam": "Apple Inc.", "activumtype": "stock", "etf_type": "", "be_genoteerd": "nee"},
+         "naam": "Apple Inc.", "activumtype": "stock", "etf_type": "", "be_genoteerd": "nee",
+         "land": "US"},
         {"ticker": "VWCE.DE", "type": "buy", "datum": "2026-04-01", "aantal": 5,
          "prijs_per_stuk": 110, "munt": "EUR", "totaalbedrag": "", "fx_koers": "",
          "kosten": 2, "kosten_munt": "EUR", "rekening": acct, "koersdoel": "",
          "performance_share": "nee", "personenbelasting_eur": "",
          "naam": "Vanguard FTSE All-World", "activumtype": "etf",
-         "etf_type": "accumulating", "be_genoteerd": "nee"},
+         "etf_type": "accumulating", "be_genoteerd": "nee", "land": "IE"},
     ], columns=TXN_COLUMNS)
 
     div_example = pd.DataFrame([
         {"ticker": "AAPL", "datum": "2026-05-15", "munt": "USD", "fx_koers": "",
          "bruto_voor_bronbelasting": 25, "buitenlandse_bronbelasting": 3.75,
-         "bruto_na_bronbelasting": 21.25, "netto": 14.88, "rekening": acct},
+         "bruto_na_bronbelasting": 21.25, "netto": 14.88, "rekening": acct,
+         "cash_basis": "netto"},
     ], columns=DIV_COLUMNS)
 
     cost_example = pd.DataFrame([

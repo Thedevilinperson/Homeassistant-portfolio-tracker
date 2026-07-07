@@ -2,6 +2,63 @@
 
 Alle noemenswaardige wijzigingen aan de Portfolio Tracker add-on.
 
+## 0.23.0
+- Meerdere rijen tegelijk verwijderen (alle tabellen). Elke tabel heeft nu een multiselect
+om één of meerdere rijen te kiezen, met een wis-knop die pas na een EXPLICIETE bevestiging
+uitvoert (overzicht van wat verwijderd wordt + "Ja, definitief verwijderen" / "Annuleren").
+Toegepast op: transacties, activa, dividenden, rekeningkosten, splitsingen en handmatige
+cash-bewegingen.
+- Inline bewerkbare tabellen overal. De vormgeving en functionaliteit van de dividenden- en
+kostentabellen (rechtstreeks in de tabel bewerken + "💾 Wijzigingen opslaan") is doorgetrokken:
+  - Transacties: datum, type (aankoop/verkoop), aantal, prijs, munt, rekening, kosten,
+koersdoel, performance shares (+ personenbelasting) en notities zijn inline bewerkbaar.
+  - Totaal, EUR-tegenwaarde en TOB worden bij het opslaan herberekend. Het aparte
+bewerkformulier en het klik-systeem zijn vervangen.
+  - Activa: naam, type, ETF-type, BE-registratie, munt, land, beurs, ISIN en de
+fotomomentwaarde zijn inline bewerkbaar (EUR-fotomomentwaarde wordt herberekend). Nieuwe
+knop "📸 Ophalen (ontbrekende)" haalt de slotkoers 31/12/2025 op voor alle activa zonder
+fotomoment. Ticker corrigeren zit in een aparte uitklapsectie.
+  - Splitsingen: overzicht in tabelvorm; verwijderen nu ook met bevestiging (voorheen wiste
+één klik direct).
+- Validatie bij het inline opslaan: ongeldige datums/bedragen en inconsistente rijen worden per
+rij gemeld en overgeslagen; de rest wordt gewoon opgeslagen.
+
+## 0.22.0
+- Dividenden — slimmer invoerformulier (gedetailleerde modus):
+  - Lege velden worden live berekend en getoond; met de knop "🪄 Vul lege velden in" worden de
+berekende bedragen in de invoervelden zelf gezet, zodat je ze kunt nakijken en aanpassen vóór
+het opslaan.
+  - Omgekeerde controle (④ → ③ → ② → ①) die de keten terugrekent en afwijkingen meldt, met
+een tolerantie van ± €0,02 voor afrondingsfouten.
+  - De munt volgt het gekozen activum: wissel je van activum, dan springen de muntvelden mee
+naar de munt van dat activum.
+  - Buitenlandse bronbelasting automatisch berekend op basis van het land van het activum en
+de heffingstarieven in ⚙️ Instellingen → 🏛️ TOB & bronbelasting (bewerkbare tabel per land,
+met indicatieve standaardtarieven). Het voorgestelde bedrag blijft aanpasbaar.
+  - Land van herkomst toegevoegd aan activa (toevoeg- en bewerkformulier + bulk-import); bij
+"Info ophalen" wordt het land afgeleid uit de ISIN.
+  - Help-icoontjes bij de vier bedragvelden die uitleggen wat elk veld is en wanneer je het
+invult (① enkel voor buitenlandse activa; ③ het brutodividend van Belgische aandelen; ④ wat
+er effectief overblijft; ② wordt automatisch voorgesteld).
+  - De Belgische roerende voorheffing is nu instelbaar in het invoerformulier (standaard 30%,
+bv. 15% voor VVPR-bis) en wordt gebruikt om ④ uit ③ af te leiden (of omgekeerd).
+  - Cash-boeking op basis van een gekozen veld: per dividend kies je exclusief of het netto
+(④, standaard), het bruto na bronbelasting (③) of het bruto vóór bronbelasting (①) als
+dividendregel in het cash-grootboek (💶 Cash) geboekt wordt — handig wanneer je broker bruto
+stort en belastingen later apart afhoudt.
+- Dividenden — inline bewerken in de tabel. Het overzicht is nu een bewerkbare tabel
+(datum, rekening, bedragen ①–④, munt, cash-basis, notities): pas rechtstreeks in de tabel aan
+en klik op "💾 Wijzigingen opslaan". De keten, RV en EUR-bedragen worden bij het opslaan
+herberekend en gecontroleerd (rijen met een inconsistente keten worden geweigerd met uitleg).
+- Het aparte bewerkformulier en het klik-systeem zijn vervangen; verwijderen gebeurt via een
+selectie met bevestiging.
+- Rekeningkosten — zelfde vormgeving en functionaliteit als dividenden: een inline bewerkbare
+tabel (datum, rekening, omschrijving, bedrag, munt) met "Wijzigingen opslaan" (EUR wordt
+herberekend) en verwijderen met bevestiging.
+- Bulk-import bijgewerkt: nieuwe kolommen land (Transacties — voor het aanmaken van nieuwe
+activa) en cash_basis (Dividenden — netto/bruto_na/bruto_voor); template en instructieblad
+aangepast.
+
 ## 0.21.0
 - Bulk-import via Excel (⚙️ Instellingen → 🗃️ Data). Laad transacties, dividenden en
 rekeningkosten in bulk op:

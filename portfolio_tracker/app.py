@@ -4,6 +4,7 @@ Belgische beleggingsportefeuille met belastingtracking en AI-advies.
 """
 from __future__ import annotations
 
+import json
 from datetime import date, datetime
 
 import pandas as pd
@@ -274,6 +275,64 @@ def df_row_select(df, key: str):
         if 0 <= idx < len(df):
             return idx
     return None
+
+
+def _cell_eq(a, b) -> bool:
+    """Vergelijk een tabelcel (bewerkt vs origineel), robuust voor None/NaN en floats."""
+    an = a is None or (isinstance(a, float) and pd.isna(a))
+    bn = b is None or (isinstance(b, float) and pd.isna(b))
+    if an and bn:
+        return True
+    if an or bn:
+        return False
+    if isinstance(a, (int, float)) and isinstance(b, (int, float)):
+        return abs(float(a) - float(b)) < 1e-9
+    return str(a) == str(b)
+
+
+def _date_or_none(s: str):
+    """'JJJJ-MM-DD' (of dd/mm/jjjj) -> date, anders None."""
+    s = (s or "").strip()
+    for fmt in ("%Y-%m-%d", "%d/%m/%Y", "%d-%m-%Y"):
+        try:
+            return datetime.strptime(s[:10], fmt).date()
+        except ValueError:
+            continue
+    return None
+
+
+def multiselect_delete(state_key, options_map, do_delete_one, noun="rij",
+                       extra_warning="", container=None):
+    """Multiselect om meerdere rijen te kiezen + wis-knop met EXPLICIETE bevestiging.
+    options_map: dict {id: label} (invoegvolgorde = weergavevolgorde).
+    do_delete_one(id): verwijdert één item."""
+    c = container or st
+    ids = list(options_map.keys())
+    sel = c.multiselect(f"Selecteer {noun}(en) om te verwijderen", ids,
+                        format_func=lambda i: options_map.get(i, str(i)),
+                        key=f"{state_key}_ms", placeholder=f"Kies één of meerdere {noun}(en)…")
+    pending = st.session_state.get(state_key)
+    if pending:
+        labels = [options_map.get(i, str(i)) for i in pending if i in options_map] or \
+                 [str(i) for i in pending]
+        preview = "; ".join(labels[:6]) + (f"  … (+{len(labels) - 6})" if len(labels) > 6 else "")
+        st.warning(f"⚠️ {len(pending)} {noun}(en) definitief verwijderen? Dit kan niet ongedaan "
+                   f"gemaakt worden.\n\n{preview}" + (f"\n\n{extra_warning}" if extra_warning else ""))
+        cc1, cc2 = st.columns(2)
+        if cc1.button("✅ Ja, definitief verwijderen", key=f"{state_key}_yes", width="stretch"):
+            for i in pending:
+                do_delete_one(i)
+            st.session_state.pop(state_key, None)
+            clear_cache()
+            st.rerun()
+        if cc2.button("✖️ Annuleren", key=f"{state_key}_no", width="stretch"):
+            st.session_state.pop(state_key, None)
+            st.rerun()
+    else:
+        if c.button(f"🗑️ Wis geselecteerde ({len(sel)})", key=f"{state_key}_btn",
+                    disabled=not sel, width="stretch"):
+            st.session_state[state_key] = list(sel)
+            st.rerun()
 
 
 def delete_with_confirm(btn_label, state_key, target_id, warning, do_delete, btn_container=None):
@@ -836,6 +895,9 @@ def page_assets():
                         st.session_state[k("type")] = info.get("type", "stock") or "stock"
                         st.session_state[k("exch")] = info.get("exchange", "") or ""
                         st.session_state[k("isin")] = info.get("isin", "") or ""
+                        _isin = (info.get("isin") or "").strip().upper()
+                        if len(_isin) >= 2 and _isin[:2].isalpha():
+                            st.session_state[k("country")] = _isin[:2]
                         st.session_state[k("fetched")] = True
                         if not (info.get("isin") or "").strip():
                             st.session_state[k("isin_missing")] = True
@@ -867,6 +929,16 @@ def page_assets():
                                             "Vink UIT voor niet in België aangeboden trackers/ETC's (bv. G2XJ.DE): dan geldt 0,35%.")
             exchange = st.text_input("Beurs", key=k("exch"), placeholder="bv. NMS, AMS")
             isin     = st.text_input("ISIN", key=k("isin"), placeholder="bv. IE00BK5BQT80")
+            _clist = list(tax_mod.COUNTRY_NAMES.keys())
+            _cdef  = st.session_state.get(k("country"), "BE")
+            if _cdef not in _clist:
+                _clist = _clist + [_cdef]
+            country = st.selectbox("Land van herkomst", _clist,
+                                   index=_clist.index(_cdef), key=k("country"),
+                                   format_func=lambda c: f"{c} — {tax_mod.COUNTRY_NAMES.get(c, c)}",
+                                   help="Bepaalt het tarief van de buitenlandse bronbelasting bij "
+                                        "dividenden (zie ⚙️ Instellingen). Tip: het land van de "
+                                        "uitgever, vaak herkenbaar aan de eerste 2 letters van de ISIN.")
 
         # TOB-indicatie tonen
         _tob_rate = tax_mod.calculate_tob(asset_type, etf_subtype, 10000, belg_reg) / 10000 * 100
@@ -915,7 +987,7 @@ def page_assets():
                 t = ticker.strip().upper()
                 db.add_asset(t, name.strip(), asset_type, etf_subtype,
                              currency, exchange.strip() or None, isin.strip() or None,
-                             belgian_registered=int(belg_reg))
+                             belgian_registered=int(belg_reg), country=country)
                 if snap_val and snap_val > 0:
                     _fx, snap_eur = compute_eur(snap_val, currency, tax_mod.SNAPSHOT_DATE)
                     db.set_asset_snapshot(t, float(snap_val), snap_eur)
@@ -925,91 +997,7 @@ def page_assets():
                 st.rerun()
 
     with tab_list:
-        # ── Bewerkformulier (bij klik op ✏️) ──────────────────────────────────
-        edit_tk = st.session_state.get("edit_asset")
-        if edit_tk:
-            ea = db.get_asset(edit_tk)
-            if ea:
-                st.markdown(f"### ✏️ {edit_tk} bewerken")
-                sfc1, sfc2 = st.columns([3, 1])
-                sfc1.caption("📸 Fotomoment = slotkoers 31/12/2025, gebruikt voor de meerwaardebelasting "
-                             "op stukken die je vóór 2026 kocht.")
-                if sfc2.button("📸 Ophalen 31/12/2025", key=f"esnapfetch_{edit_tk}"):
-                    with st.spinner("Slotkoers 31/12/2025 ophalen..."):
-                        p = md.get_close_on_date(edit_tk, tax_mod.SNAPSHOT_DATE)
-                    if p is None:
-                        st.warning("Geen slotkoers gevonden voor 31/12/2025 — vul ze handmatig in.")
-                    else:
-                        st.session_state[f"esnap_{edit_tk}"] = float(p)
-                        st.rerun()
-                with st.form("edit_asset_form"):
-                    e1, e2 = st.columns(2)
-                    with e1:
-                        e_ticker = st.text_input("Ticker", value=edit_tk,
-                                                 help="Pas aan als de ticker fout is (bv. STMPA → STMPA.PA). "
-                                                      "Transacties, dividenden en koershistoriek verhuizen mee.")
-                        e_name = st.text_input("Naam", value=ea.get("name") or "")
-                        e_cur_val = ea.get("currency") or "EUR"
-                        e_cur_opts = CUR if e_cur_val in CUR else CUR + [e_cur_val]
-                        e_cur = st.selectbox("Munt", e_cur_opts,
-                                             index=e_cur_opts.index(e_cur_val))
-                        e_isin = st.text_input("ISIN", value=ea.get("isin") or "")
-                    with e2:
-                        _types = ["stock", "etf", "bond"]
-                        e_type = st.radio("Type", _types,
-                                          index=_types.index(ea.get("asset_type")) if ea.get("asset_type") in _types else 0,
-                                          format_func=lambda x: {"stock": "📊 Aandeel", "etf": "🧺 ETF/fonds", "bond": "📈 Obligatie"}[x])
-                        e_sub = ea.get("etf_subtype") or "distributing"
-                        e_breg = bool(ea.get("belgian_registered", 1))
-                        if e_type == "etf":
-                            e_sub = st.radio("ETF-type", ["distributing", "accumulating"],
-                                             index=0 if e_sub == "distributing" else 1,
-                                             format_func=lambda x: "📤 Uitkerend (distributie)" if x == "distributing" else "📦 Kapitaliserend")
-                            e_breg = st.checkbox("🇧🇪 In België aangeboden / geregistreerd (FSMA)",
-                                                 value=e_breg,
-                                                 help="Uit = niet in België aangeboden tracker/ETC (bv. G2XJ.DE) → TOB 0,35%.")
-                        e_exch = st.text_input("Beurs", value=ea.get("exchange") or "")
-                        e_snap = st.number_input(
-                            f"📸 Fotomomentwaarde 31/12/2025 ({e_cur}/stuk)",
-                            min_value=0.0, step=0.01, format="%.4f",
-                            value=float(st.session_state.get(f"esnap_{edit_tk}",
-                                                             ea.get("snapshot_price") or 0.0)),
-                            help="Slotkoers op 31/12/2025. Laat 0 voor activa die je pas vanaf 2026 koopt. "
-                                 "Gebruik de knop hierboven om ze automatisch op te halen.")
-                    _etr = tax_mod.calculate_tob(e_type, e_sub, 10000, e_breg) / 10000 * 100
-                    st.caption(f"➡️ TOB-tarief: **{_etr:.2f}%**".replace(".", ",") +
-                               "  ·  💡 Na het corrigeren van een ticker: klik op '🔄 Ververs prijzen' op de Portefeuille-pagina.")
-                    s1, s2 = st.columns(2)
-                    if s1.form_submit_button("💾 Opslaan", type="primary"):
-                        target = edit_tk
-                        new_tk = e_ticker.strip().upper()
-                        ok = True
-                        if new_tk and new_tk != edit_tk:
-                            if db.rename_ticker(edit_tk, new_tk):
-                                target = new_tk
-                            else:
-                                ok = False
-                                st.error(f"Ticker '{new_tk}' bestaat al — kies een andere of voeg ze samen handmatig.")
-                        if ok:
-                            db.update_asset(target, name=e_name.strip() or target,
-                                            asset_type=e_type, etf_subtype=e_sub,
-                                            currency=e_cur, exchange=e_exch.strip() or "",
-                                            isin=e_isin.strip() or "",
-                                            belgian_registered=int(e_breg))
-                            if e_snap and e_snap > 0:
-                                _fx, snap_eur = compute_eur(e_snap, e_cur, tax_mod.SNAPSHOT_DATE)
-                                db.set_asset_snapshot(target, float(e_snap), snap_eur)
-                            else:
-                                db.set_asset_snapshot(target, None, None)
-                            st.session_state.pop(f"esnap_{edit_tk}", None)
-                            clear_cache()
-                            st.session_state.pop("edit_asset", None)
-                            st.success(f"✅ {target} bijgewerkt!")
-                            st.rerun()
-                    if s2.form_submit_button("✖️ Annuleren"):
-                        st.session_state.pop("edit_asset", None)
-                        st.rerun()
-                st.divider()
+        st.session_state.pop("edit_asset", None)  # inline bewerken vervangt het oude formulier
 
         assets = db.get_assets()
         if not assets:
@@ -1026,39 +1014,144 @@ def page_assets():
             st.info("Geen activa gevonden voor deze filter.")
             return
         st.caption(f"{len(assets)} activum/activa")
+        a_names = {a["ticker"]: (a.get("name") or a["ticker"]) for a in assets}
+        TYPE_LBL = {"stock": "Aandeel", "etf": "ETF", "bond": "Obligatie"}
+        TYPE_KEY = {v: k for k, v in TYPE_LBL.items()}
+        SUB_LBL  = {"distributing": "uitkerend", "accumulating": "kapitaliserend", "": "—"}
+        SUB_KEY  = {v: k for k, v in SUB_LBL.items()}
+        ACUR = ["EUR", "USD", "GBP", "CHF"]
+        clist = list(tax_mod.COUNTRY_NAMES.keys())
         rows = []
         for a in assets:
             lp = db.get_latest_price(a["ticker"])
             sub = a.get("etf_subtype") if a["asset_type"] == "etf" else ""
+            cur = a["currency"] if a["currency"] in ACUR else "EUR"
+            ctry = (a.get("country") or "BE").upper()
             rows.append({
-                "Ticker":   a["ticker"],
-                "Naam":     a.get("name") or "—",
-                "Type":     {"stock": "Aandeel", "etf": "ETF", "bond": "Obligatie"}.get(a["asset_type"], a["asset_type"]),
-                "ETF-type": {"distributing": "uitkerend", "accumulating": "kapitaliserend"}.get(sub, ""),
-                "BE":       "✓" if a.get("belgian_registered") else "✗",
-                "Munt":     a["currency"],
-                "Beurs":    a.get("exchange") or "—",
-                "ISIN":     a.get("isin") or "—",
+                "Ticker":     a["ticker"],
+                "Naam":       a.get("name") or "",
+                "Type":       TYPE_LBL.get(a["asset_type"], a["asset_type"]),
+                "ETF-type":   SUB_LBL.get(sub, "—"),
+                "BE":         bool(a.get("belgian_registered")),
+                "Munt":       cur,
+                "Land":       ctry if ctry in clist else "BE",
+                "Beurs":      a.get("exchange") or "",
+                "ISIN":       a.get("isin") or "",
                 "Fotomoment": round(a["snapshot_price"], 4) if a.get("snapshot_price") is not None else None,
                 "Laatste koers": round(lp["price"], 4) if lp else None,
             })
-        a_names = {a["ticker"]: (a.get("name") or a["ticker"]) for a in assets}
-        sel_idx = df_row_select(pd.DataFrame(rows), "asset_table")
-        if sel_idx is None or sel_idx >= len(assets):
-            st.caption("👆 Klik op een rij om dat activum te bewerken of verwijderen.")
-        else:
-            sel_a = assets[sel_idx]
-            sel_tk = sel_a["ticker"]
-            st.caption(f"Geselecteerd: **{asset_label(sel_tk, a_names)}**")
-            b1, b2 = st.columns(2)
-            if b1.button("✏️ Bewerk", key="asset_action_edit", width="stretch"):
-                st.session_state["edit_asset"] = sel_tk
+        cc = st.column_config
+        edited = st.data_editor(
+            pd.DataFrame(rows), width="stretch", hide_index=True, key="asset_editor",
+            num_rows="fixed",
+            column_config={
+                "Ticker":     cc.TextColumn(disabled=True,
+                                            help="Ticker corrigeren doe je onderaan (verhuist transacties mee)."),
+                "Naam":       cc.TextColumn(),
+                "Type":       cc.SelectboxColumn(options=list(TYPE_LBL.values())),
+                "ETF-type":   cc.SelectboxColumn(options=list(SUB_LBL.values()),
+                                                 help="Enkel relevant voor ETF's (bepaalt mee de TOB)."),
+                "BE":         cc.CheckboxColumn(help="In België aangeboden/geregistreerd (FSMA)."),
+                "Munt":       cc.SelectboxColumn(options=ACUR),
+                "Land":       cc.SelectboxColumn(options=clist,
+                                                 help="Land van herkomst — bepaalt de buitenlandse bronbelasting."),
+                "Beurs":      cc.TextColumn(),
+                "ISIN":       cc.TextColumn(),
+                "Fotomoment": cc.NumberColumn(min_value=0.0, format="%.4f",
+                                              help="Slotkoers 31/12/2025 (native). Leeg = geen fotomoment."),
+                "Laatste koers": cc.NumberColumn(disabled=True, format="%.4f"),
+            })
+        st.caption("✏️ Bewerk rechtstreeks in de tabel en klik op 'Wijzigingen opslaan'. TOB-tarief, "
+                   "buitenlandse bronbelasting en de EUR-fotomomentwaarde volgen automatisch.")
+
+        if st.button("💾 Wijzigingen opslaan", type="primary", key="asset_save_inline"):
+            n_upd, problems = 0, []
+            try:
+                for i, a in enumerate(assets):
+                    r = edited.iloc[i]
+                    orig = rows[i]
+                    if all(_cell_eq(r[k], orig[k]) for k in
+                           ("Naam", "Type", "ETF-type", "BE", "Munt", "Land", "Beurs", "ISIN", "Fotomoment")):
+                        continue
+                    atype = TYPE_KEY.get(str(r["Type"]), a["asset_type"])
+                    asub  = SUB_KEY.get(str(r["ETF-type"]), a.get("etf_subtype") or "distributing") or "distributing"
+                    ncur  = str(r["Munt"]) if r["Munt"] in ACUR else (a.get("currency") or "EUR")
+                    ctry  = str(r["Land"]) if r["Land"] in clist else "BE"
+                    db.update_asset(a["ticker"], name=(str(r["Naam"]).strip() or a["ticker"]),
+                                    asset_type=atype, etf_subtype=asub, currency=ncur,
+                                    exchange=(str(r["Beurs"]).strip() or ""),
+                                    isin=(str(r["ISIN"]).strip() or ""),
+                                    belgian_registered=int(bool(r["BE"])), country=ctry)
+                    snap = r["Fotomoment"]
+                    if snap is None or pd.isna(snap) or float(snap) <= 0:
+                        db.set_asset_snapshot(a["ticker"], None, None)
+                    else:
+                        _fx, snap_eur = compute_eur(float(snap), ncur, tax_mod.SNAPSHOT_DATE)
+                        db.set_asset_snapshot(a["ticker"], float(snap), snap_eur)
+                    n_upd += 1
+            except Exception as exc:
+                problems.append(f"Onverwachte fout: {exc}")
+            for p in problems:
+                st.warning("⚠️ " + p)
+            if n_upd:
+                clear_cache()
+                st.success(f"✅ {n_upd} activum/activa bijgewerkt.")
                 st.rerun()
-            delete_with_confirm(
-                "🗑️ Wis (incl. transacties)", "confirm_del_asset", sel_tk,
-                f"⚠️ **{asset_label(sel_tk, a_names)}** verwijderen wist óók ALLE transacties, "
-                "dividenden en splitsingen van dit activum. Dit is onomkeerbaar. Doorgaan?",
-                lambda: db.delete_asset(sel_tk), btn_container=b2)
+            elif not problems:
+                st.info("Geen wijzigingen gevonden.")
+
+        fmc1, fmc2 = st.columns([3, 1])
+        fmc1.caption("📸 Fotomoment = slotkoers 31/12/2025 (native munt), gebruikt voor de "
+                     "meerwaardebelasting op stukken gekocht vóór 2026. Je kunt de waarde in de "
+                     "tabel intypen, of hiernaast automatisch ophalen voor activa zonder waarde.")
+        if fmc2.button("📸 Ophalen (ontbrekende)", key="snap_fetch_all", width="stretch"):
+            n_ok, n_fail = 0, 0
+            with st.spinner("Slotkoersen 31/12/2025 ophalen..."):
+                for a in assets:
+                    if a.get("snapshot_price") is not None:
+                        continue
+                    p = md.get_close_on_date(a["ticker"], tax_mod.SNAPSHOT_DATE)
+                    if p:
+                        _fx, p_eur = compute_eur(p, a["currency"], tax_mod.SNAPSHOT_DATE)
+                        db.set_asset_snapshot(a["ticker"], p, p_eur)
+                        n_ok += 1
+                    else:
+                        n_fail += 1
+            clear_cache()
+            if n_ok:
+                st.success(f"✅ {n_ok} fotomoment(en) opgehaald." + (f" {n_fail} niet gevonden." if n_fail else ""))
+                st.rerun()
+            else:
+                st.info("Geen ontbrekende fotomomenten gevonden of geen koersen beschikbaar.")
+
+        # Ticker corrigeren (verhuist transacties, dividenden en koershistoriek mee)
+        with st.expander("🔧 Ticker corrigeren"):
+            rc1, rc2, rc3 = st.columns([2, 2, 1])
+            old_tk = rc1.selectbox("Huidige ticker", [a["ticker"] for a in assets], key="rename_old")
+            new_tk = rc2.text_input("Nieuwe ticker", key="rename_new",
+                                    placeholder="bv. STMPA → STMPA.PA").strip().upper()
+            rc3.write(""); rc3.write("")
+            if rc3.button("Hernoem", key="rename_btn", width="stretch"):
+                if not new_tk:
+                    st.warning("Vul een nieuwe ticker in.")
+                elif new_tk == old_tk:
+                    st.info("Dezelfde ticker.")
+                elif db.rename_ticker(old_tk, new_tk):
+                    clear_cache()
+                    st.success(f"✅ {old_tk} → {new_tk} (transacties/dividenden/koersen verhuisd). "
+                               "Ververs de koersen op de Portefeuille-pagina.")
+                    st.rerun()
+                else:
+                    st.error(f"'{new_tk}' bestaat al — kies een andere ticker.")
+
+        # Verwijderen (meerdere tegelijk, met bevestiging — incl. transacties!)
+        st.divider()
+        adel_opts = {a["ticker"]: f"{asset_label(a['ticker'], a_names)}" for a in assets}
+        multiselect_delete(
+            "confirm_del_asset", adel_opts,
+            lambda tk: db.delete_asset(tk), noun="activum",
+            extra_warning="⚠️ Dit wist óók ALLE transacties, dividenden en splitsingen van de "
+                          "geselecteerde activa.")
 
     with tab_splits:
         st.subheader("🔀 Aandelensplitsingen")
@@ -1095,19 +1188,19 @@ def page_assets():
             splits = db.get_splits()
             if splits:
                 st.divider()
-                for sp in splits:
-                    cc1, cc2, cc3 = st.columns([4, 2, 1])
-                    with cc1:
-                        st.markdown(f"🔀 **{sp['ticker']}** — {s_names.get(sp['ticker'], sp['ticker'])}")
-                        st.caption(f"📅 {sp['split_date']}")
-                    with cc2:
-                        st.markdown(f"Ratio **{sp['ratio']:g}**")
-                    with cc3:
-                        if st.button("🗑️", key=f"del_split_{sp['id']}"):
-                            db.delete_split(sp["id"])
-                            clear_cache()
-                            st.rerun()
-                    st.divider()
+                sp_rows = [{
+                    "ID":      sp["id"],
+                    "Datum":   sp["split_date"][:10],
+                    "Activum": f"{sp['ticker']} — {s_names.get(sp['ticker'], sp['ticker'])}",
+                    "Ratio":   f"{sp['ratio']:g}",
+                } for sp in splits]
+                st.dataframe(pd.DataFrame(sp_rows), width="stretch", hide_index=True)
+                sp_opts = {sp["id"]: f"#{sp['id']} · {sp['split_date'][:10]} · {sp['ticker']} · ratio {sp['ratio']:g}"
+                           for sp in splits}
+                multiselect_delete("confirm_del_split", sp_opts,
+                                   lambda i: db.delete_split(i), noun="splitsing",
+                                   extra_warning="De transacties van vóór de splitsdatum worden weer "
+                                                 "zonder deze ratio getoond.")
             else:
                 st.info("Nog geen splitsingen geregistreerd.")
 
@@ -1290,79 +1383,8 @@ def page_transactions():
                     st.rerun()
 
     with tab_view:
-        # ── Bewerkformulier (verschijnt bij klik op ✏️) ───────────────────────
-        edit_id = st.session_state.get("edit_txn")
-        if edit_id:
-            et = next((x for x in db.get_transactions(adjusted=False) if x["id"] == edit_id), None)
-            if et:
-                st.info("✏️ Bewerkformulier geopend — pas de transactie hieronder aan en klik op Opslaan.")
-                st.markdown(f"### ✏️ Transactie #{edit_id} bewerken")
-                with st.form("edit_txn_form"):
-                    e1, e2, e3 = st.columns(3)
-                    with e1:
-                        e_ticker = st.selectbox("Activum", asset_tickers,
-                                                index=asset_tickers.index(et["ticker"]) if et["ticker"] in asset_tickers else 0,
-                                                format_func=fmt)
-                        e_type = st.selectbox("Type", ["buy", "sell"],
-                                              index=0 if et["transaction_type"] == "buy" else 1)
-                        e_date = st.date_input("Datum", value=datetime.strptime(et["date"][:10], "%Y-%m-%d").date(), min_value=date(2000,1,1), max_value=date.today())
-                        e_acct = st.selectbox("Rekening", db.get_accounts(),
-                                              index=db.get_accounts().index(et.get("account")) if et.get("account") in db.get_accounts() else 0)
-                    with e2:
-                        e_qty   = st.number_input("Aantal", min_value=0.0001, value=float(et["quantity"]), step=0.001, format="%.4f")
-                        e_price = st.number_input("Prijs per stuk", min_value=0.0001, value=float(et["price_per_unit"]), step=0.01, format="%.4f")
-                        e_cur   = st.selectbox("Munt", CUR, index=CUR.index(et["currency"]) if et["currency"] in CUR else 0)
-                        e_tgt   = st.number_input("Koersdoel", min_value=0.0, value=float(et.get("price_target") or 0.0), step=0.01, format="%.2f")
-                    with e3:
-                        e_tob   = st.number_input("TOB (€)", min_value=0.0, value=float(et.get("tob_tax") or 0.0), step=0.01, format="%.2f")
-                        e_costs = st.number_input("Kosten", min_value=0.0, value=float(et.get("costs") or 0.0), step=0.01, format="%.2f")
-                        e_costs_cur = st.selectbox("Kostenmunt", CUR, index=CUR.index(et.get("costs_currency") or "EUR") if (et.get("costs_currency") or "EUR") in CUR else 0)
-                    e_notes = st.text_area("Notities", value=et.get("notes") or "", height=60)
+        st.session_state.pop("edit_txn", None)  # inline bewerken vervangt het oude formulier
 
-                    # Performance shares — ook om bestaande transacties om te vormen
-                    _cur_inctax = float(et.get("income_tax_eur") or 0.0)
-                    _cur_baseeur = float(et.get("total_amount_eur") or 0.0)
-                    _def_pct = round(_cur_inctax / _cur_baseeur * 100, 1) if (_cur_inctax and _cur_baseeur) else 53.5
-                    st.markdown("**🎁 Performance shares (toekenning / vesting)**")
-                    pf1, pf2, pf3 = st.columns(3)
-                    e_perf = pf1.checkbox("Is een toekenning", value=bool(et.get("is_performance_share")),
-                                          help="Vink aan om deze (reeds ingevoerde) transactie om te vormen tot "
-                                               "performance shares. De kostbasis blijft de ingevulde waarde; TOB wordt op €0 gezet.")
-                    e_pb_pct = pf2.number_input("Personenbelasting (%)", min_value=0.0, max_value=100.0,
-                                                value=_def_pct, step=0.5)
-                    e_inctax = pf3.number_input("of exact bedrag (€)", min_value=0.0, value=_cur_inctax,
-                                                step=0.01, format="%.2f",
-                                                help="Laat op 0 om uit het % te berekenen; vul in voor een exact bedrag.")
-                    s1, s2 = st.columns(2)
-                    save = s1.form_submit_button("💾 Opslaan", type="primary")
-                    cancel = s2.form_submit_button("✖️ Annuleren")
-                    if save:
-                        e_total = e_qty * e_price
-                        fx, tot_eur = compute_eur(e_total, e_cur, e_date)
-                        _, ce = compute_eur(e_costs, e_costs_cur, e_date)
-                        if e_perf:
-                            inc_tax = e_inctax if e_inctax > 0 else round(tot_eur * e_pb_pct / 100, 2)
-                            tob_final = 0.0
-                        else:
-                            inc_tax = 0.0
-                            tob_final = e_tob
-                        db.update_transaction(edit_id, ticker=e_ticker, transaction_type=e_type,
-                                              date=str(e_date), quantity=e_qty, price_per_unit=e_price,
-                                              total_amount=e_total, currency=e_cur, tob_tax=tob_final,
-                                              notes=e_notes or None, account=e_acct, costs=e_costs,
-                                              costs_currency=e_costs_cur, fx_rate=fx,
-                                              total_amount_eur=tot_eur, costs_eur=ce,
-                                              price_target=(e_tgt or None),
-                                              is_performance_share=int(e_perf), income_tax_eur=inc_tax)
-                        clear_cache()
-                        st.session_state.pop("edit_txn", None)
-                        st.success("✅ Transactie bijgewerkt!"
-                                   + (" Omgevormd tot performance shares." if e_perf else ""))
-                        st.rerun()
-                    if cancel:
-                        st.session_state.pop("edit_txn", None)
-                        st.rerun()
-                st.divider()
 
         c1, c2, c3, c4 = st.columns(4)
         f_asset = c1.selectbox("Activum", ["Alle"] + asset_tickers,
@@ -1387,52 +1409,119 @@ def page_transactions():
         st.caption(f"{len(txns)} transactie(s) | Totale TOB: {eur(total_tob)} | Kosten: {eur(total_costs)}")
 
         ordered = list(reversed(txns))
+        ainfo = {a["ticker"]: a for a in db.get_assets()}
+        accounts = db.get_accounts()
+        TYPE_LBL = {"buy": "🟢 Aankoop", "sell": "🔴 Verkoop"}
+        TYPE_KEY = {v: k for k, v in TYPE_LBL.items()}
+        TCUR = ["EUR", "USD", "GBP", "CHF"]
         rows = []
         for t in ordered:
+            cur = t["currency"] if t["currency"] in TCUR else "EUR"
             rows.append({
+                "ID":       t["id"],
                 "Datum":    t["date"][:10],
-                "Type":     "🟢 Aankoop" if t["transaction_type"] == "buy" else "🔴 Verkoop",
+                "Type":     TYPE_LBL.get(t["transaction_type"], t["transaction_type"]),
                 "Activum":  asset_label(t["ticker"], names),
                 "Aantal":   round(t["quantity"], 4),
                 "Prijs":    round(t["price_per_unit"], 4),
-                "Munt":     t["currency"],
-                "Totaal":   round(t["total_amount"], 2),
-                "€ Totaal": round(t.get("total_amount_eur") or t["total_amount"], 2),
+                "Munt":     cur,
                 "Rekening": t.get("account") or db.DEFAULT_ACCOUNT,
-                "TOB €":    round(t.get("tob_tax") or 0, 2),
                 "Kosten €": round(t.get("costs_eur") or 0, 2),
-                "Koersdoel": t.get("price_target") or None,
+                "Koersdoel": t.get("price_target"),
+                "Perf?":    bool(t.get("is_performance_share")),
+                "Personenbel. €": round(t.get("income_tax_eur") or 0, 2),
+                "€ Totaal": round(t.get("total_amount_eur") or t["total_amount"], 2),
+                "TOB €":    round(t.get("tob_tax") or 0, 2),
                 "Notities": t.get("notes") or "",
             })
-        sel_idx = df_row_select(pd.DataFrame(rows), "txn_table")
+        cc = st.column_config
+        edited = st.data_editor(
+            pd.DataFrame(rows), width="stretch", hide_index=True, key="txn_editor",
+            num_rows="fixed",
+            column_config={
+                "ID":        cc.NumberColumn(disabled=True, width="small"),
+                "Datum":     cc.TextColumn(help="JJJJ-MM-DD"),
+                "Type":      cc.SelectboxColumn(options=list(TYPE_LBL.values())),
+                "Activum":   cc.TextColumn(disabled=True,
+                                           help="Ticker wijzigen doe je via 🏢 Activa (ticker corrigeren)."),
+                "Aantal":    cc.NumberColumn(min_value=0.0, format="%.4f"),
+                "Prijs":     cc.NumberColumn(min_value=0.0, format="%.4f"),
+                "Munt":      cc.SelectboxColumn(options=TCUR),
+                "Rekening":  cc.SelectboxColumn(options=accounts),
+                "Kosten €":  cc.NumberColumn(min_value=0.0, format="%.2f"),
+                "Koersdoel": cc.NumberColumn(min_value=0.0, format="%.4f"),
+                "Perf?":     cc.CheckboxColumn(help="Performance shares (toekenning): geen TOB."),
+                "Personenbel. €": cc.NumberColumn(min_value=0.0, format="%.2f",
+                                                  help="Personenbelasting bij toekenning (enkel bij Perf?)."),
+                "€ Totaal":  cc.NumberColumn(disabled=True, format="%.2f"),
+                "TOB €":     cc.NumberColumn(disabled=True, format="%.2f"),
+                "Notities":  cc.TextColumn(),
+            })
+        st.caption("✏️ Bewerk rechtstreeks in de tabel (datum, type, aantal, prijs, munt, rekening, "
+                   "kosten, koersdoel, performance shares, notities) en klik op 'Wijzigingen opslaan'. "
+                   "Totaal, EUR-tegenwaarde en TOB worden bij het opslaan herberekend.")
 
-        # Acties voor de aangeklikte rij
-        if sel_idx is None or sel_idx >= len(ordered):
-            st.caption("👆 Klik op een rij om die te bewerken, verwijderen of naar een andere rekening te verplaatsen.")
-        else:
-            sel_t = ordered[sel_idx]
-            sel_id = sel_t["id"]
-            accounts = db.get_accounts()
-            cur_acct = sel_t.get("account") or db.DEFAULT_ACCOUNT
-            st.caption(f"Geselecteerd: **#{sel_id} · {sel_t['date'][:10]} · "
-                       f"{'Aankoop' if sel_t['transaction_type']=='buy' else 'Verkoop'} · "
-                       f"{asset_label(sel_t['ticker'], names)}**")
-            a1, a2, a3 = st.columns([2, 1, 1])
-            new_acct = a1.selectbox("Verplaats naar rekening", accounts,
-                                    index=accounts.index(cur_acct) if cur_acct in accounts else 0,
-                                    key=f"txn_action_acct_{sel_id}")
-            if new_acct != cur_acct:
-                db.update_transaction_account(sel_id, new_acct)
+        if st.button("💾 Wijzigingen opslaan", type="primary", key="txn_save_inline"):
+            n_upd, problems = 0, []
+            try:
+                for i, t in enumerate(ordered):
+                    r = edited.iloc[i]
+                    orig = rows[i]
+                    if all(_cell_eq(r[k], orig[k]) for k in
+                           ("Datum", "Type", "Aantal", "Prijs", "Munt", "Rekening",
+                            "Kosten €", "Koersdoel", "Perf?", "Personenbel. €", "Notities")):
+                        continue
+                    nd = _date_or_none(str(r["Datum"]))
+                    if nd is None:
+                        problems.append(f"#{t['id']}: datum '{r['Datum']}' ongeldig (JJJJ-MM-DD).")
+                        continue
+                    ttype = TYPE_KEY.get(str(r["Type"]), t["transaction_type"])
+                    try:
+                        qty = float(r["Aantal"]); price = float(r["Prijs"])
+                    except (TypeError, ValueError):
+                        problems.append(f"#{t['id']}: aantal/prijs ongeldig."); continue
+                    if qty <= 0 or price < 0:
+                        problems.append(f"#{t['id']}: aantal moet > 0 en prijs ≥ 0 zijn."); continue
+                    ncur = str(r["Munt"]) if r["Munt"] in TCUR else (t.get("currency") or "EUR")
+                    total = qty * price
+                    fx, tot_eur = compute_eur(total, ncur, nd)
+                    perf = bool(r["Perf?"])
+                    inctax = 0.0 if not perf else float(r["Personenbel. €"] or 0)
+                    info = ainfo.get(t["ticker"], {})
+                    if perf:
+                        tob = 0.0
+                    else:
+                        tob = tax_mod.calculate_tob(info.get("asset_type", "stock"),
+                                                    info.get("etf_subtype", "distributing"), tot_eur,
+                                                    bool(info.get("belgian_registered", 1)), txn_date=nd)
+                    costs_v = float(r["Kosten €"] or 0)
+                    tgt = float(r["Koersdoel"]) if not (r["Koersdoel"] is None or pd.isna(r["Koersdoel"])) else None
+                    db.update_transaction(
+                        t["id"], transaction_type=ttype, date=str(nd), quantity=qty,
+                        price_per_unit=price, total_amount=total, currency=ncur, tob_tax=tob,
+                        notes=(str(r["Notities"]) or None) if not pd.isna(r["Notities"]) else None,
+                        account=str(r["Rekening"]), costs=costs_v, costs_currency="EUR",
+                        fx_rate=fx, total_amount_eur=tot_eur, costs_eur=costs_v,
+                        price_target=tgt, is_performance_share=int(perf), income_tax_eur=inctax)
+                    n_upd += 1
+            except Exception as exc:
+                problems.append(f"Onverwachte fout: {exc}")
+            for p in problems:
+                st.warning("⚠️ " + p)
+            if n_upd:
                 clear_cache()
+                st.success(f"✅ {n_upd} transactie(s) bijgewerkt.")
                 st.rerun()
-            if a2.button("✏️ Bewerk", key="txn_action_edit", width="stretch"):
-                st.session_state["edit_txn"] = sel_id
-                st.rerun()
-            delete_with_confirm(
-                "🗑️ Wis", "confirm_del_txn", sel_id,
-                f"Transactie #{sel_id} ({asset_label(sel_t['ticker'], names)}, {sel_t['date'][:10]}) "
-                "definitief verwijderen? Dit kan niet ongedaan gemaakt worden.",
-                lambda: db.delete_transaction(sel_id), btn_container=a3)
+            elif not problems:
+                st.info("Geen wijzigingen gevonden.")
+
+        # Verwijderen (meerdere tegelijk, met bevestiging)
+        st.divider()
+        tdel_opts = {t["id"]: f"#{t['id']} · {t['date'][:10]} · "
+                              f"{'Aankoop' if t['transaction_type']=='buy' else 'Verkoop'} · "
+                              f"{asset_label(t['ticker'], names)} · {t['quantity']:g}" for t in ordered}
+        multiselect_delete("confirm_del_txn", tdel_opts,
+                           lambda i: db.delete_transaction(i), noun="transactie")
 
     with tab_costs:
         st.subheader("🏦 Algemene rekeningkosten")
@@ -1463,20 +1552,76 @@ def page_transactions():
         if costs:
             st.divider()
             st.caption(f"Totaal rekeningkosten: {eur(db.total_account_costs_eur())}")
-            for c in costs:
-                cc1, cc2, cc3 = st.columns([4, 2, 1])
-                with cc1:
-                    st.markdown(f"🏦 **{c['account']}** — {c.get('description') or 'kost'}")
-                    st.caption(f"📅 {c['date']}")
-                with cc2:
-                    eur_str = f" (€{c['amount_eur']:,.2f})" if c["currency"] != "EUR" else ""
-                    st.markdown(f"{c['currency']} {c['amount']:,.2f}{eur_str}")
-                with cc3:
-                    if st.button("🗑️", key=f"del_ac_{c['id']}"):
-                        db.delete_account_cost(c["id"])
-                        clear_cache()
-                        st.rerun()
-                st.divider()
+            acc_all = db.get_accounts()
+            crows = [{
+                "ID":           c["id"],
+                "Datum":        c["date"][:10],
+                "Rekening":     c["account"],
+                "Omschrijving": c.get("description") or "",
+                "Bedrag":       c["amount"],
+                "Munt":         c.get("currency") or "EUR",
+                "EUR":          round(c.get("amount_eur") or 0.0, 2),
+            } for c in costs]
+            ccg = st.column_config
+            cedited = st.data_editor(
+                pd.DataFrame(crows), width="stretch", hide_index=True, key="acct_cost_editor",
+                num_rows="fixed",
+                column_config={
+                    "ID":           ccg.NumberColumn(disabled=True, width="small"),
+                    "Datum":        ccg.TextColumn(help="JJJJ-MM-DD"),
+                    "Rekening":     ccg.SelectboxColumn(options=acc_all),
+                    "Omschrijving": ccg.TextColumn(),
+                    "Bedrag":       ccg.NumberColumn(min_value=0.0, format="%.2f"),
+                    "Munt":         ccg.SelectboxColumn(options=CUR),
+                    "EUR":          ccg.NumberColumn(disabled=True, format="%.2f"),
+                })
+            st.caption("✏️ Bewerk rechtstreeks in de tabel en klik op 'Wijzigingen opslaan'. "
+                       "Het EUR-bedrag wordt bij het opslaan herberekend (historische wisselkoers).")
+            if st.button("💾 Wijzigingen opslaan", key="acct_cost_save"):
+                n_upd, problems = 0, []
+                try:
+                    for i, c in enumerate(costs):
+                        r = cedited.iloc[i]
+                        orig = crows[i]
+                        if all(r[k] == orig[k] for k in ("Datum", "Rekening", "Omschrijving", "Bedrag", "Munt")):
+                            continue
+                        nd = _date_or_none(str(r["Datum"]))
+                        amt = None
+                        try:
+                            amt = float(r["Bedrag"])
+                        except (TypeError, ValueError):
+                            pass
+                        if nd is None:
+                            problems.append(f"#{c['id']}: datum '{r['Datum']}' ongeldig (JJJJ-MM-DD).")
+                            continue
+                        if amt is None or amt < 0:
+                            problems.append(f"#{c['id']}: bedrag ongeldig.")
+                            continue
+                        ncur = str(r["Munt"]) if r["Munt"] in CUR else (c.get("currency") or "EUR")
+                        fx, amt_eur = compute_eur(amt, ncur, nd)
+                        db.update_account_cost(c["id"], account=str(r["Rekening"]), date=str(nd),
+                                               description=(str(r["Omschrijving"]) or None),
+                                               amount=amt, currency=ncur,
+                                               fx_rate=fx, amount_eur=amt_eur)
+                        n_upd += 1
+                except Exception as exc:
+                    problems.append(f"Onverwachte fout: {exc}")
+                for p in problems:
+                    st.warning("⚠️ " + p)
+                if n_upd:
+                    clear_cache()
+                    st.success(f"✅ {n_upd} rekeningkost(en) bijgewerkt.")
+                    st.rerun()
+                elif not problems:
+                    st.info("Geen wijzigingen gevonden.")
+
+            # Verwijderen (meerdere tegelijk, met bevestiging)
+            st.divider()
+            cd_opts = {c["id"]: f"#{c['id']} · {c['date'][:10]} · {c['account']} · "
+                                f"{c.get('description') or 'kost'} · {eur(c.get('amount_eur') or 0)}"
+                       for c in costs}
+            multiselect_delete("confirm_del_acct_cost", cd_opts,
+                               lambda i: db.delete_account_cost(i), noun="rekeningkost")
 
 
 # ── PAGINA: Dividenden ────────────────────────────────────────────────────────
@@ -1510,9 +1655,6 @@ def page_dividends():
                                            "Hetzelfde dividend op een andere rekening voer je als een aparte lijn in.")
             asset_cur = amap.get(d_ticker, {}).get("currency", "EUR")
             cur_opts  = CURS if asset_cur in CURS else CURS + [asset_cur]
-            def cur_box(col, keyname):
-                return col.selectbox("Munt", cur_opts, index=cur_opts.index(asset_cur),
-                                     key=dk(keyname), label_visibility="collapsed")
 
             mode = st.radio("Invoerwijze", ["Eenvoudig", "Gedetailleerd (bronbelasting + RV)"],
                             horizontal=True, key="div_mode")
@@ -1522,7 +1664,8 @@ def page_dividends():
                 with sc1:
                     gross    = st.number_input("Bruto dividend *", min_value=0.0, step=0.01,
                                                format="%.2f", value=None, key=dk("s_gross"))
-                    currency = st.selectbox("Munt", cur_opts, index=cur_opts.index(asset_cur), key=dk("s_cur"))
+                    currency = st.selectbox("Munt", cur_opts, index=cur_opts.index(asset_cur),
+                                            key=dk(f"s_cur_{d_ticker}"))
                 with sc2:
                     wh_amt = st.number_input("Ingehouden voorheffing (bedrag)", min_value=0.0,
                                              step=0.01, format="%.2f", value=None, key=dk("s_wh"))
@@ -1546,32 +1689,104 @@ def page_dividends():
                         st.rerun()
 
             else:  # Gedetailleerd
-                st.caption("Vul in wat je weet; lege velden worden waar mogelijk automatisch berekend "
-                           "(zelfde munt verondersteld voor de berekening).")
+                a_country = (amap.get(d_ticker, {}).get("country") or "BE").upper()
+                wht_pct_default = tax_mod.get_wht_rates().get(a_country, 0.0)
+                is_foreign = a_country != "BE"
+                cname = tax_mod.COUNTRY_NAMES.get(a_country, a_country)
+                st.caption(f"Vul in wat je weet — lege velden worden automatisch berekend en ingevuld. "
+                           f"Land van dit activum: **{cname}**"
+                           + (f" (bronbelasting {wht_pct_default:g}%)." if is_foreign else " (geen buitenlandse bronbelasting)."))
+
+                # Prefill (gezet door de aanvul-knop) — nonce zorgt voor verse widgets
+                pre = st.session_state.pop("div_prefill", {})
+                rv_pct = st.number_input(
+                    "🇧🇪 Roerende voorheffing (%)", min_value=0.0, max_value=100.0,
+                    value=float(pre.get("rv_pct", 30.0)), step=0.5, key=dk("rvpct"),
+                    help="Belgische roerende voorheffing op dividenden — standaard 30%. Pas aan bij "
+                         "een afwijkend tarief (bv. VVPR-bis 15%). Gebruikt om ④ uit ③ te berekenen "
+                         "(of omgekeerd) wanneer een van beide leeg is.")
+
+                # Munt-widgets keyen op het activum: bij een ander activum verschijnen
+                # verse muntvelden met de juiste standaardmunt.
+                def cur_box_t(col, keyname):
+                    return col.selectbox("Munt", cur_opts, index=cur_opts.index(asset_cur),
+                                         key=dk(f"{keyname}_{d_ticker}"), label_visibility="collapsed")
+
                 r1a, r1b = st.columns([3, 1])
                 A = r1a.number_input("① Bruto dividend (vóór buitenlandse bronbelasting)",
-                                     min_value=0.0, step=0.01, format="%.4f", value=None, key=dk("A"))
-                A_cur = cur_box(r1b, "Acur")
+                                     min_value=0.0, step=0.01, format="%.4f",
+                                     value=pre.get("A"), key=dk("A"),
+                                     help="Het brutobedrag vóór eender welke inhouding. Enkel invullen "
+                                          "bij een BUITENLANDS activum (bv. VS, Nederland, Frankrijk); "
+                                          "voor Belgische aandelen laat je dit leeg en start je bij ③.")
+                A_cur = cur_box_t(r1b, "Acur")
                 r2a, r2b = st.columns([3, 1])
                 B = r2a.number_input("② Buitenlandse bronbelasting",
-                                     min_value=0.0, step=0.01, format="%.4f", value=None, key=dk("B"))
-                B_cur = cur_box(r2b, "Bcur")
+                                     min_value=0.0, step=0.01, format="%.4f",
+                                     value=pre.get("B"), key=dk("B"),
+                                     help="Wordt automatisch berekend uit ① × het heffingstarief van het "
+                                          f"land van het activum ({cname}: {wht_pct_default:g}% — zie ⚙️ "
+                                          "Instellingen). Klopt het ingehouden bedrag niet (bv. ander "
+                                          "verdragstarief), pas het hier aan.")
+                B_cur = cur_box_t(r2b, "Bcur")
                 r3a, r3b = st.columns([3, 1])
                 C = r3a.number_input("③ Bruto na bronbelasting / vóór Belgische RV",
-                                     min_value=0.0, step=0.01, format="%.4f", value=None, key=dk("C"))
-                C_cur = cur_box(r3b, "Ccur")
+                                     min_value=0.0, step=0.01, format="%.4f",
+                                     value=pre.get("C"), key=dk("C"),
+                                     help="Het bedrag waarop de Belgische roerende voorheffing wordt "
+                                          "berekend. Voor BELGISCHE aandelen is dit het brutodividend: "
+                                          "vul het hier in en laat ① en ② leeg.")
+                C_cur = cur_box_t(r3b, "Ccur")
                 r4a, r4b = st.columns([3, 1])
                 D = r4a.number_input("④ Netto dividend (na alle voorheffingen)",
-                                     min_value=0.0, step=0.01, format="%.4f", value=None, key=dk("D"))
-                D_cur = cur_box(r4b, "Dcur")
+                                     min_value=0.0, step=0.01, format="%.4f",
+                                     value=pre.get("D"), key=dk("D"),
+                                     help="Wat er uiteindelijk overblijft na ALLE belastingen: eventuele "
+                                          "buitenlandse bronbelasting én de Belgische roerende voorheffing. "
+                                          "Dit is doorgaans wat je broker daadwerkelijk uitkeert.")
+                D_cur = cur_box_t(r4b, "Dcur")
                 notes = st.text_area("Notities (optioneel)", height=60, key=dk("d_notes"))
 
-                res = tax_mod.resolve_dividend_chain(A, B, C, D)
+                # Keten aanvullen met de tarieven (land + RV%)
+                res = tax_mod.resolve_dividend_chain(
+                    A, B, C, D,
+                    rv_rate=(rv_pct / 100.0),
+                    wht_rate=(wht_pct_default / 100.0) if is_foreign else None)
                 rA, rB, rC, rD, rRV = res["a"], res["b"], res["c"], res["d"], res["rv"]
                 def _f(v, cur): return "—" if v is None else f"{cur} {v:,.2f}"
                 st.markdown(
                     f"**Afgeleide keten:** ① {_f(rA, A_cur)}  →  ② bronbelasting {_f(rB, B_cur)}  →  "
                     f"③ {_f(rC, C_cur)}  →  🇧🇪 RV {_f(rRV, C_cur)}  →  ④ netto {_f(rD, D_cur)}")
+
+                # Omgekeerde controle (④ → ③ → ② → ①) met tolerantie voor afronding
+                filled = [v for v in (A, B, C, D) if v is not None]
+                if len(filled) >= 2:
+                    issues = tax_mod.verify_dividend_chain(rA, rB, rC, rD, tol=0.02)
+                    if issues:
+                        for i in issues:
+                            st.warning("⚠️ Controle (④→③→②→①): " + i)
+                    else:
+                        st.caption("✅ Omgekeerde controle (④→③→②→①) klopt binnen de afrondingstolerantie (± €0,02).")
+
+                bc1, bc2 = st.columns([1, 2])
+                if bc1.button("🪄 Vul lege velden in", key=dk("fill"),
+                              help="Zet de automatisch berekende bedragen in de lege invoervelden, "
+                                   "zodat je ze kunt nakijken en zo nodig aanpassen vóór het opslaan."):
+                    st.session_state["div_prefill"] = {
+                        "A": rA, "B": rB, "C": rC, "D": rD, "rv_pct": rv_pct,
+                        "cash_basis": st.session_state.get(dk("cashbasis"), "④ Netto"),
+                    }
+                    st.session_state["div_amt_nonce"] = dn + 1
+                    st.rerun()
+
+                cash_choice = bc2.radio(
+                    "Cash-boeking op basis van", ["④ Netto", "③ Bruto na bronbelasting", "① Bruto vóór bronbelasting"],
+                    horizontal=True, key=dk("cashbasis"),
+                    index=["④ Netto", "③ Bruto na bronbelasting", "① Bruto vóór bronbelasting"].index(pre["cash_basis"]) if pre.get("cash_basis") in ("④ Netto", "③ Bruto na bronbelasting", "① Bruto vóór bronbelasting") else 0,
+                    help="Welk bedrag als dividend in het cash-grootboek (💶 Cash) geboekt wordt. "
+                         "Standaard het netto (④) — wat je broker effectief stort. Kies ③ of ① als je "
+                         "broker bruto uitkeert en de belasting later apart afhoudt. Er kan er maar één "
+                         "gekozen worden.")
 
                 if st.button("✅ Dividend toevoegen", type="primary", key=dk("d_submit")):
                     # EUR per veld (elk in zijn eigen munt op de dividenddatum)
@@ -1587,6 +1802,13 @@ def page_dividends():
                         st.error("Geef minstens een bruto- én een nettowaarde in (of voldoende velden om ze te berekenen).")
                     else:
                         wh_eur = max(0.0, gross_eur - net_eur)
+                        # Cash-boeking op basis van het gekozen veld
+                        if cash_choice.startswith("①"):
+                            cash_basis, cash_eur_v = "gross_before", (a_eur if a_eur is not None else net_eur)
+                        elif cash_choice.startswith("③"):
+                            cash_basis, cash_eur_v = "gross_after", (c_eur if c_eur is not None else net_eur)
+                        else:
+                            cash_basis, cash_eur_v = "net", net_eur
                         # Native rollup (voor weergave/compat): primair veld = ① of ③ of ④
                         prim_v, prim_cur = ((rA, A_cur) if rA is not None else
                                             (rC, C_cur) if rC is not None else (rD, D_cur))
@@ -1599,6 +1821,8 @@ def page_dividends():
                             "belgian_rv_amt":   rRV,
                             "net_received":     rD, "net_received_cur":     D_cur if rD is not None else None,
                             "net_eur":          net_eur,
+                            "cash_basis":       cash_basis,
+                            "cash_eur":         cash_eur_v,
                         }
                         db.add_dividend(d_ticker, str(d_date), prim_v, wh_native, prim_cur, notes or None,
                                         fx_rate=fx_prim, gross_eur=gross_eur, withholding_eur=wh_eur,
@@ -1608,91 +1832,12 @@ def page_dividends():
                         clear_cache()
                         st.session_state["div_amt_nonce"] = dn + 1
                         st.session_state["div_added_msg"] = (
-                            f"✅ Dividend voor {d_ticker} op {d_account} toegevoegd (netto ≈ {eur(net_eur)}).")
+                            f"✅ Dividend voor {d_ticker} op {d_account} toegevoegd (netto ≈ {eur(net_eur)}; "
+                            f"cash-boeking: {cash_choice}).")
                         st.rerun()
 
     with tab_view:
-        # ── Bewerkformulier (bij klik op ✏️) ──────────────────────────────────
-        edit_did = st.session_state.get("edit_div")
-        if edit_did:
-            ed = next((x for x in db.get_dividends() if x["id"] == edit_did), None)
-            if ed:
-                st.info("✏️ Bewerkformulier geopend — pas het dividend hieronder aan en klik op Opslaan.")
-                st.markdown(f"### ✏️ Dividend #{edit_did} ({ed['ticker']}) bewerken")
-                ecur = ed.get("currency") or "EUR"
-                ECUR = ["EUR", "USD", "GBP", "CHF"]
-                eopts = ECUR if ecur in ECUR else ECUR + [ecur]
-                # Standaardwaarden: gebruik de keten indien aanwezig, anders de eenvoudige velden
-                dA = ed.get("gross_before_wht")
-                dB = ed.get("foreign_wht_amt")
-                dC = ed.get("gross_after_wht")
-                dD = ed.get("net_received")
-                if dA is None and dB is None and dC is None and dD is None:
-                    dA = ed.get("gross_amount")
-                    dD = (ed.get("gross_amount") or 0) - (ed.get("withholding_tax") or 0)
-                with st.form("edit_div_form"):
-                    g1, g2, g3 = st.columns(3)
-                    e_date = g1.date_input("Datum", value=datetime.strptime(ed["date"][:10], "%Y-%m-%d").date(),
-                                           min_value=date(2000, 1, 1), max_value=date.today())
-                    e_acct = g2.selectbox("Rekening", db.get_accounts(),
-                                          index=db.get_accounts().index(ed.get("account") or db.DEFAULT_ACCOUNT)
-                                          if (ed.get("account") or db.DEFAULT_ACCOUNT) in db.get_accounts() else 0)
-                    def _ecur(col, key, stored):
-                        cc = stored or ecur
-                        oo = eopts if cc in eopts else eopts + [cc]
-                        return col.selectbox("Munt", oo, index=oo.index(cc), key=key, label_visibility="collapsed")
-                    e1a, e1b = st.columns([3, 1])
-                    eA = e1a.number_input("① Bruto vóór buitenlandse bronbelasting", min_value=0.0,
-                                          step=0.01, format="%.4f", value=dA, key="ediv_A")
-                    eAc = _ecur(e1b, "ediv_Ac", ed.get("gross_before_wht_cur"))
-                    e2a, e2b = st.columns([3, 1])
-                    eB = e2a.number_input("② Buitenlandse bronbelasting", min_value=0.0,
-                                          step=0.01, format="%.4f", value=dB, key="ediv_B")
-                    eBc = _ecur(e2b, "ediv_Bc", ed.get("foreign_wht_cur"))
-                    e3a, e3b = st.columns([3, 1])
-                    eC = e3a.number_input("③ Bruto na bronbelasting / vóór Belgische RV", min_value=0.0,
-                                          step=0.01, format="%.4f", value=dC, key="ediv_C")
-                    eCc = _ecur(e3b, "ediv_Cc", ed.get("gross_after_wht_cur"))
-                    e4a, e4b = st.columns([3, 1])
-                    eD = e4a.number_input("④ Netto na alle voorheffingen", min_value=0.0,
-                                          step=0.01, format="%.4f", value=dD, key="ediv_D")
-                    eDc = _ecur(e4b, "ediv_Dc", ed.get("net_received_cur"))
-                    e_notes = st.text_area("Notities", value=ed.get("notes") or "", height=60)
-                    sd1, sd2 = st.columns(2)
-                    if sd1.form_submit_button("💾 Opslaan", type="primary"):
-                        res = tax_mod.resolve_dividend_chain(eA, eB, eC, eD)
-                        rA, rB, rC, rD, rRV = res["a"], res["b"], res["c"], res["d"], res["rv"]
-                        def _te(v, cur): return None if v is None else compute_eur(v, cur, e_date)[1]
-                        a_eur, c_eur, d_eur = _te(rA, eAc), _te(rC, eCc), _te(rD, eDc)
-                        gross_eur = a_eur if a_eur is not None else (c_eur if c_eur is not None else d_eur)
-                        net_eur   = d_eur if d_eur is not None else c_eur
-                        if gross_eur is None or net_eur is None:
-                            st.error("Geef minstens een bruto- en nettowaarde in.")
-                        else:
-                            wh_eur = max(0.0, gross_eur - net_eur)
-                            prim_v, prim_cur = ((rA, eAc) if rA is not None else
-                                                (rC, eCc) if rC is not None else (rD, eDc))
-                            fx_prim = compute_eur(prim_v, prim_cur, e_date)[0] or 1.0
-                            db.update_dividend(
-                                edit_did, date=str(e_date), account=e_acct, notes=e_notes or None,
-                                currency=prim_cur, gross_amount=prim_v, withholding_tax=round(wh_eur / fx_prim, 2),
-                                fx_rate=fx_prim, gross_eur=gross_eur, withholding_eur=wh_eur, net_eur=net_eur,
-                                foreign_wht_withheld=1 if (rB and rB > 0) else 0,
-                                belgian_rv_withheld=1 if (rRV and rRV > 0) else 0,
-                                gross_before_wht=rA, gross_before_wht_cur=eAc if rA is not None else None,
-                                foreign_wht_amt=rB, foreign_wht_cur=eBc if rB is not None else None,
-                                gross_after_wht=rC, gross_after_wht_cur=eCc if rC is not None else None,
-                                belgian_rv_amt=rRV, net_received=rD,
-                                net_received_cur=eDc if rD is not None else None)
-                            clear_cache()
-                            st.session_state.pop("edit_div", None)
-                            st.success("✅ Dividend bijgewerkt!")
-                            st.rerun()
-                    if sd2.form_submit_button("✖️ Annuleren"):
-                        st.session_state.pop("edit_div", None)
-                        st.rerun()
-                st.divider()
-
+        st.session_state.pop("edit_div", None)  # oude bewerkstaat opruimen
         fcol1, fcol2 = st.columns(2)
         f_year = fcol1.selectbox("Jaar:", ["Alle"] + [str(y) for y in range(datetime.now().year, 2019, -1)],
                                  key="div_year")
@@ -1730,48 +1875,125 @@ def page_dividends():
         st.divider()
 
         names_map = asset_name_map()
+        CASH_LBL  = {"net": "④ Netto", "gross_after": "③ Bruto na", "gross_before": "① Bruto vóór"}
+        CASH_KEY  = {v: k for k, v in CASH_LBL.items()}
+        accounts_all = db.get_accounts()
         rows = []
         for d in divs:
             rows.append({
+                "ID":       d["id"],
                 "Datum":    d["date"][:10],
                 "Activum":  asset_label(d["ticker"], names_map),
                 "Rekening": d.get("account") or db.DEFAULT_ACCOUNT,
                 "① Bruto":  d.get("gross_before_wht"),
                 "② Bronbel.": d.get("foreign_wht_amt"),
                 "③ Na bronbel.": d.get("gross_after_wht"),
-                "🇧🇪 RV":   d.get("belgian_rv_amt"),
                 "④ Netto":  d.get("net_received") if d.get("net_received") is not None
                             else round(d["gross_amount"] - d["withholding_tax"], 2),
                 "Munt":     d.get("net_received_cur") or d.get("gross_before_wht_cur") or d["currency"],
+                "Cash":     CASH_LBL.get(d.get("cash_basis") or "net", "④ Netto"),
                 "Netto €":  round(_neur(d), 2),
                 "Notities": d.get("notes") or "",
             })
-        sel_idx = df_row_select(pd.DataFrame(rows), "div_table")
-        if sel_idx is None or sel_idx >= len(divs):
-            st.caption("👆 Klik op een rij om dat dividend te bewerken, verwijderen of te verplaatsen.")
-        else:
-            sel_d = divs[sel_idx]
-            sel_did = sel_d["id"]
-            div_accts = db.get_accounts()
-            cur_acct = sel_d.get("account") or db.DEFAULT_ACCOUNT
-            st.caption(f"Geselecteerd: **#{sel_did} · {sel_d['date'][:10]} · "
-                       f"{asset_label(sel_d['ticker'], names_map)} · netto {eur(_neur(sel_d))}**")
-            da1, da2, da3 = st.columns([2, 1, 1])
-            new_acct = da1.selectbox("Verplaats naar rekening", div_accts,
-                                     index=div_accts.index(cur_acct) if cur_acct in div_accts else 0,
-                                     key=f"div_action_acct_{sel_did}")
-            if new_acct != cur_acct:
-                db.set_dividend_account(sel_did, new_acct)
+        cc = st.column_config
+        CUR_OPTS = ["EUR", "USD", "GBP", "CHF"]
+        edited = st.data_editor(
+            pd.DataFrame(rows), width="stretch", hide_index=True, key="div_editor",
+            num_rows="fixed",
+            column_config={
+                "ID":            cc.NumberColumn(disabled=True, width="small"),
+                "Datum":         cc.TextColumn(help="JJJJ-MM-DD"),
+                "Activum":       cc.TextColumn(disabled=True),
+                "Rekening":      cc.SelectboxColumn(options=accounts_all),
+                "① Bruto":       cc.NumberColumn(min_value=0.0, format="%.4f"),
+                "② Bronbel.":    cc.NumberColumn(min_value=0.0, format="%.4f"),
+                "③ Na bronbel.": cc.NumberColumn(min_value=0.0, format="%.4f"),
+                "④ Netto":       cc.NumberColumn(min_value=0.0, format="%.4f"),
+                "Munt":          cc.SelectboxColumn(options=CUR_OPTS),
+                "Cash":          cc.SelectboxColumn(options=list(CASH_LBL.values()),
+                                                    help="Welk veld naar het cash-grootboek gaat."),
+                "Netto €":       cc.NumberColumn(disabled=True, format="%.2f"),
+                "Notities":      cc.TextColumn(),
+            })
+        st.caption("✏️ Bewerk rechtstreeks in de tabel (datum, rekening, bedragen ①–④, munt, cash-basis, "
+                   "notities) en klik daarna op 'Wijzigingen opslaan'. De keten, RV, EUR-bedragen en "
+                   "cash-boeking worden bij het opslaan herberekend en gecontroleerd.")
+
+        if st.button("💾 Wijzigingen opslaan", type="primary", key="div_save_inline"):
+            n_upd, problems = 0, []
+            try:
+                for i, d in enumerate(divs):
+                    r = edited.iloc[i]
+                    orig = rows[i]
+                    if all(r[k] == orig[k] or (pd.isna(r[k]) and orig[k] is None)
+                           for k in ("Datum", "Rekening", "① Bruto", "② Bronbel.", "③ Na bronbel.",
+                                     "④ Netto", "Munt", "Cash", "Notities")):
+                        continue
+                    nd = _date_or_none(str(r["Datum"]))
+                    if nd is None:
+                        problems.append(f"#{d['id']}: datum '{r['Datum']}' ongeldig (JJJJ-MM-DD).")
+                        continue
+                    def _num(v):
+                        try:
+                            return None if v is None or pd.isna(v) else float(v)
+                        except (TypeError, ValueError):
+                            return None
+                    nA, nB = _num(r["① Bruto"]), _num(r["② Bronbel."])
+                    nC, nD = _num(r["③ Na bronbel."]), _num(r["④ Netto"])
+                    ncur   = str(r["Munt"]) if r["Munt"] in CUR_OPTS else (d.get("currency") or "EUR")
+                    res = tax_mod.resolve_dividend_chain(nA, nB, nC, nD)
+                    rA, rB, rC, rD, rRV = res["a"], res["b"], res["c"], res["d"], res["rv"]
+                    def _te(v):
+                        return None if v is None else compute_eur(v, ncur, nd)[1]
+                    a_eur, c_eur, d_eur = _te(rA), _te(rC), _te(rD)
+                    gross_eur = a_eur if a_eur is not None else (c_eur if c_eur is not None else d_eur)
+                    net_eur   = d_eur if d_eur is not None else c_eur
+                    if gross_eur is None or net_eur is None:
+                        problems.append(f"#{d['id']}: minstens een bruto- en nettowaarde nodig.")
+                        continue
+                    issues = tax_mod.verify_dividend_chain(rA, rB, rC, rD, tol=0.02)
+                    if issues:
+                        problems.append(f"#{d['id']}: " + "; ".join(issues) + " — niet opgeslagen.")
+                        continue
+                    cbk = CASH_KEY.get(str(r["Cash"]), "net")
+                    cash_eur_v = {"gross_before": a_eur, "gross_after": c_eur, "net": net_eur}.get(cbk)
+                    if cash_eur_v is None:
+                        cash_eur_v = net_eur
+                    wh_eur = max(0.0, gross_eur - net_eur)
+                    prim_v = rA if rA is not None else (rC if rC is not None else rD)
+                    fx_prim = compute_eur(prim_v, ncur, nd)[0] or 1.0
+                    db.update_dividend(
+                        d["id"], date=str(nd), account=str(r["Rekening"]),
+                        notes=(str(r["Notities"]) or None) if not pd.isna(r["Notities"]) else None,
+                        currency=ncur, gross_amount=prim_v,
+                        withholding_tax=round(wh_eur / fx_prim, 2), fx_rate=fx_prim,
+                        gross_eur=gross_eur, withholding_eur=wh_eur, net_eur=net_eur,
+                        foreign_wht_withheld=1 if (rB and rB > 0) else 0,
+                        belgian_rv_withheld=1 if (rRV and rRV > 0) else 0,
+                        gross_before_wht=rA, gross_before_wht_cur=ncur if rA is not None else None,
+                        foreign_wht_amt=rB, foreign_wht_cur=ncur if rB is not None else None,
+                        gross_after_wht=rC, gross_after_wht_cur=ncur if rC is not None else None,
+                        belgian_rv_amt=rRV, net_received=rD,
+                        net_received_cur=ncur if rD is not None else None,
+                        cash_basis=cbk, cash_eur=cash_eur_v)
+                    n_upd += 1
+            except Exception as exc:
+                problems.append(f"Onverwachte fout: {exc}")
+            for p in problems:
+                st.warning("⚠️ " + p)
+            if n_upd:
                 clear_cache()
+                st.success(f"✅ {n_upd} dividend(en) bijgewerkt.")
                 st.rerun()
-            if da2.button("✏️ Bewerk", key="div_action_edit", width="stretch"):
-                st.session_state["edit_div"] = sel_did
-                st.rerun()
-            delete_with_confirm(
-                "🗑️ Wis", "confirm_del_div", sel_did,
-                f"Dividend #{sel_did} ({asset_label(sel_d['ticker'], names_map)}, {sel_d['date'][:10]}) "
-                "definitief verwijderen? Dit kan niet ongedaan gemaakt worden.",
-                lambda: db.delete_dividend(sel_did), btn_container=da3)
+            elif not problems:
+                st.info("Geen wijzigingen gevonden.")
+
+        # Verwijderen (meerdere tegelijk, met bevestiging)
+        st.divider()
+        del_opts = {d["id"]: f"#{d['id']} · {d['date'][:10]} · {asset_label(d['ticker'], names_map)} "
+                             f"· netto {eur(_neur(d))}" for d in divs}
+        multiselect_delete("confirm_del_div", del_opts,
+                           lambda i: db.delete_dividend(i), noun="dividend")
 
 
 # ── PAGINA: Belgische belasting ────────────────────────────────────────────────
@@ -2061,7 +2283,7 @@ def page_settings():
     st.title("⚙️ Instellingen")
 
     tab_api, tab_acct, tab_tax, tab_tob, tab_data = st.tabs(
-        ["🔑 API-sleutel", "🏦 Rekeningen", "🧾 Meerwaardebelasting", "🏛️ TOB-tarieven", "🗃️ Data"])
+        ["🔑 API-sleutel", "🏦 Rekeningen", "🧾 Meerwaardebelasting", "🏛️ TOB & bronbelasting", "🗃️ Data"])
 
     with tab_api:
         st.subheader("OpenAI API & AI-instellingen")
@@ -2233,6 +2455,36 @@ def page_settings():
             db.set_setting("tob_start_date", str(tob_start))
             db.set_setting("withholding_tax_rate", str(wh/100))
             st.success("✅ TOB-instellingen opgeslagen!")
+
+        st.divider()
+        st.subheader("🌍 Buitenlandse bronbelasting op dividenden")
+        st.caption("Tarief per land van herkomst (het land stel je in per activum op de 🏢 Activa-pagina). "
+                   "Bij het invoeren van een dividend wordt ② bronbelasting = ① bruto × dit tarief "
+                   "automatisch voorgesteld; je kunt het bedrag daar nog altijd aanpassen. "
+                   "Standaardtarieven zijn indicatief — verdragstarieven kunnen afwijken.")
+        rates_now = tax_mod.get_wht_rates()
+        wrows = [{"Land": c, "Naam": tax_mod.COUNTRY_NAMES.get(c, c), "Tarief (%)": rates_now[c]}
+                 for c in sorted(rates_now.keys())]
+        wcg = st.column_config
+        wedit = st.data_editor(
+            pd.DataFrame(wrows), width="stretch", hide_index=True, key="wht_editor",
+            num_rows="dynamic",
+            column_config={
+                "Land":       wcg.TextColumn(help="Landcode (2 letters, bv. US)", max_chars=2),
+                "Naam":       wcg.TextColumn(disabled=True),
+                "Tarief (%)": wcg.NumberColumn(min_value=0.0, max_value=100.0, format="%.3f"),
+            })
+        if st.button("💾 Tarieven opslaan", key="save_wht"):
+            try:
+                new_rates = {}
+                for _, r in wedit.iterrows():
+                    code = str(r["Land"] or "").strip().upper()
+                    if len(code) == 2 and code.isalpha() and not pd.isna(r["Tarief (%)"]):
+                        new_rates[code] = float(r["Tarief (%)"])
+                db.set_setting("foreign_wht_rates", json.dumps(new_rates))
+                st.success(f"✅ {len(new_rates)} tarieven opgeslagen!")
+            except Exception as exc:
+                st.error(f"Kon de tarieven niet opslaan: {exc}")
 
     with tab_data:
         st.subheader("Databeheer")
@@ -2557,16 +2809,11 @@ def page_cash():
             manual = [it for it in ledger if it["source"] == "manual"]
             if manual:
                 st.divider()
-                st.caption("Een handmatige storting/opname verwijderen:")
-                opts = {it["ref"]: f"{it['date']} · {it['account']} · {it['label']} · {eur(it['delta'])}"
+                opts = {it["ref"]: f"#{it['ref']} · {it['date']} · {it['account']} · {it['label']} · {eur(it['delta'])}"
                         for it in reversed(manual)}
-                dsel = st.selectbox("Beweging", list(opts.keys()),
-                                    format_func=lambda i: opts[i], key="cash_del_sel",
-                                    label_visibility="collapsed")
-                delete_with_confirm(
-                    "🗑️ Wis beweging", "confirm_del_cash", dsel,
-                    f"Handmatige cashbeweging #{dsel} definitief verwijderen?",
-                    lambda: db.delete_cash_movement(dsel))
+                multiselect_delete("confirm_del_cash", opts,
+                                   lambda i: db.delete_cash_movement(i),
+                                   noun="storting/opname")
 
 
 def page_simulation():

@@ -48,7 +48,8 @@ def fotomoment_taxable(sell_proceeds: float, cost_basis: float,
     return gain_vs_f
 
 
-def resolve_dividend_chain(a, b, c, d):
+def resolve_dividend_chain(a, b, c, d, rv_rate: float | None = None,
+                           wht_rate: float | None = None):
     """Leid ontbrekende waarden af in de dividendketen (zelfde munt verondersteld).
 
       A = bruto vóór buitenlandse bronbelasting
@@ -58,13 +59,92 @@ def resolve_dividend_chain(a, b, c, d):
       RV = Belgische roerende voorheffing               (= C - D)
 
     None = leeg. Vult de A/B/C-driehoek aan (twee gekend -> derde) en berekent RV.
+    Optioneel:
+      wht_rate (bv. 0.15): als B leeg is maar A gekend -> B = A × wht_rate.
+      rv_rate  (bv. 0.30): als D leeg is maar C gekend (of afleidbaar) -> D = C × (1 − rv_rate);
+                           als C leeg is maar D gekend -> C = D / (1 − rv_rate).
     """
+    # Buitenlandse bronbelasting uit het tarief (vóór de driehoek, zodat C volgt)
+    if b is None and a is not None and wht_rate is not None:
+        b = round(a * wht_rate, 4)
     for _ in range(2):
         if c is None and a is not None and b is not None: c = a - b
         if a is None and b is not None and c is not None: a = b + c
         if b is None and a is not None and c is not None: b = a - c
+    # Belgische RV uit het tarief
+    if rv_rate is not None and 0 <= rv_rate < 1:
+        if d is None and c is not None:
+            d = round(c * (1 - rv_rate), 4)
+        elif c is None and d is not None:
+            c = round(d / (1 - rv_rate), 4)
+            # driehoek opnieuw proberen nu C bekend is
+            if a is None and b is not None: a = b + c
+            if b is None and a is not None: b = a - c
     rv = (c - d) if (c is not None and d is not None) else None
     return {"a": a, "b": b, "c": c, "d": d, "rv": rv}
+
+
+def verify_dividend_chain(a, b, c, d, tol: float = 0.02) -> list[str]:
+    """Omgekeerde controle (④ → ③ → ② → ①) met tolerantie voor afrondingsfouten.
+    Werkt op de (aangevulde) keten; geeft een lijst afwijkingen terug (leeg = OK)."""
+    issues = []
+    rv = (c - d) if (c is not None and d is not None) else None
+    # stap ④ -> ③ : D + RV moet C geven
+    if d is not None and rv is not None and c is not None:
+        back_c = d + rv
+        if abs(back_c - c) > tol:
+            issues.append(f"④ netto + RV = {back_c:,.2f} wijkt af van ③ ({c:,.2f})")
+    # stap ③ -> ① : C + B moet A geven
+    if c is not None and b is not None and a is not None:
+        back_a = c + b
+        if abs(back_a - a) > tol:
+            issues.append(f"③ + ② bronbelasting = {back_a:,.2f} wijkt af van ① ({a:,.2f})")
+    # sanity: B mag niet groter zijn dan A; D niet groter dan C
+    if a is not None and b is not None and b > a + tol:
+        issues.append("② bronbelasting is groter dan ① bruto")
+    if c is not None and d is not None and d > c + tol:
+        issues.append("④ netto is groter dan ③ bruto na bronbelasting")
+    return issues
+
+
+# ── Buitenlandse bronbelasting per land ───────────────────────────────────────
+# Indicatieve standaardtarieven op dividenden voor een Belgische particulier
+# (verdragstarieven kunnen afwijken; bewerkbaar via ⚙️ Instellingen).
+DEFAULT_WHT_RATES = {
+    "BE": 0.0,   "US": 15.0, "NL": 15.0, "FR": 25.0, "DE": 26.375,
+    "CH": 35.0,  "GB": 0.0,  "IE": 25.0, "LU": 15.0, "ES": 19.0,
+    "IT": 26.0,  "PT": 28.0, "DK": 27.0, "SE": 30.0, "NO": 25.0,
+    "FI": 35.0,  "AT": 27.5, "CA": 25.0, "JP": 15.315, "AU": 30.0,
+}
+
+COUNTRY_NAMES = {
+    "BE": "België", "US": "Verenigde Staten", "NL": "Nederland", "FR": "Frankrijk",
+    "DE": "Duitsland", "CH": "Zwitserland", "GB": "Verenigd Koninkrijk", "IE": "Ierland",
+    "LU": "Luxemburg", "ES": "Spanje", "IT": "Italië", "PT": "Portugal",
+    "DK": "Denemarken", "SE": "Zweden", "NO": "Noorwegen", "FI": "Finland",
+    "AT": "Oostenrijk", "CA": "Canada", "JP": "Japan", "AU": "Australië",
+}
+
+
+def get_wht_rates() -> dict[str, float]:
+    """Tarieven buitenlandse bronbelasting (% per landcode), met overrides uit settings."""
+    rates = dict(DEFAULT_WHT_RATES)
+    try:
+        import json as _json
+        stored = db.get_setting("foreign_wht_rates", "")
+        if stored:
+            for k, v in _json.loads(stored).items():
+                rates[str(k).upper()] = float(v)
+    except Exception:
+        pass
+    return rates
+
+
+def get_wht_rate(country: str | None) -> float:
+    """Tarief (fractie, bv. 0.15) voor een landcode; 0.0 indien onbekend/BE."""
+    if not country:
+        return 0.0
+    return get_wht_rates().get(country.upper(), 0.0) / 100.0
 
 
 # ── TOB berekening ────────────────────────────────────────────────────────────
