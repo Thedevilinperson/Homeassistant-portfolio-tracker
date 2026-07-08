@@ -196,8 +196,9 @@ def dividend_tax_benefit(year: int | None = None, accounts=None) -> dict:
         yd = per_year.setdefault(yr, {
             "qualifying_gross": 0.0, "be_rv_qualifying": 0.0,
             "fbb_base_fr": 0.0, "excluded_gross": 0.0})
-        # Enkel individuele aandelen komen in aanmerking voor de 833-vrijstelling
-        if atype == "stock":
+        # Enkel individuele aandelen (geen fondsen/ETF's) én echte dividenden
+        # (geen interest / securities lending) komen in aanmerking voor de 833-vrijstelling
+        if atype == "stock" and (d.get("kind") or "dividend") == "dividend":
             yd["qualifying_gross"] += net_after_foreign
             yd["be_rv_qualifying"] += be_rv_eur
             if country == "FR":

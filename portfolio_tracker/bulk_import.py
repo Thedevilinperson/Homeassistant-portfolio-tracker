@@ -30,7 +30,7 @@ TXN_COLUMNS = [
 DIV_COLUMNS = [
     "ticker", "datum", "munt", "fx_koers",
     "bruto_voor_bronbelasting", "buitenlandse_bronbelasting",
-    "bruto_na_bronbelasting", "netto", "rekening", "cash_basis",
+    "bruto_na_bronbelasting", "netto", "rekening", "cash_basis", "kind",
 ]
 COST_COLUMNS = ["rekening", "datum", "omschrijving", "bedrag", "munt"]
 
@@ -59,6 +59,7 @@ INSTRUCTIONS = [
     ("Dividenden", "bruto_na_bronbelasting", "nee", "C: bruto na bronbelasting (= A − B)"),
     ("Dividenden", "netto", "nee", "D: netto na Belgische RV. Lege velden worden afgeleid."),
     ("Dividenden", "cash_basis", "nee", "Welk veld naar het cash-grootboek gaat: netto (standaard), bruto_na of bruto_voor"),
+    ("Dividenden", "kind", "nee", "dividend (standaard), interest of securities_lending — enkel dividend telt voor de 833-vrijstelling"),
     ("Kosten", "rekening / datum / bedrag", "ja", "Rekeningkost (beheerskosten e.d.)"),
     ("Kosten", "omschrijving / munt", "nee", "Standaard EUR"),
 ]
@@ -233,12 +234,15 @@ def parse_workbook(file) -> dict:
             cash_basis = {"netto": "net", "net": "net", "bruto_na": "gross_after",
                           "gross_after": "gross_after", "bruto_voor": "gross_before",
                           "gross_before": "gross_before"}.get(_cb, "net")
+            _kd = _s(row.get("kind")).lower()
+            kind = {"dividend": "dividend", "interest": "interest", "interesten": "interest",
+                    "securities_lending": "securities_lending", "lending": "securities_lending"}.get(_kd, "dividend")
             result["dividenden"].append({
                 "ticker": tk, "date": d, "currency": cur,
                 "fx_rate_in": _f(row.get("fx_koers")),
                 "A": A, "B": B, "C": C, "D": D,
                 "account": _s(row.get("rekening")) or default_acct,
-                "cash_basis": cash_basis,
+                "cash_basis": cash_basis, "kind": kind,
             })
             if tk not in known and tk not in result["new_assets"]:
                 result["new_assets"][tk] = {"name": tk, "asset_type": "stock",
@@ -317,10 +321,20 @@ def apply_import(parsed: dict) -> dict:
                            income_tax_eur=r["income_tax_eur"])
         summary["transacties"] += 1
 
-    # 3) Dividenden (keten aanvullen, EUR via fx)
+    # 3) Dividenden (keten aanvullen met tarieven, EUR via fx)
+    _s = db.get_all_settings()
+    rv_rate = float(_s.get("withholding_tax_rate", "0.30"))
     for r in parsed.get("dividenden", []):
-        ch = tax.resolve_dividend_chain(r["A"], r["B"], r["C"], r["D"])
         cur = r["currency"]
+        info = a_info.get(r["ticker"], {})
+        atype = info.get("asset_type", "stock")
+        country = (info.get("country") or "BE").upper()
+        wht_rate = tax.get_wht_rate(country)
+        kind = r.get("kind", "dividend")
+        # Interesten/securities lending: geen buitenlandse bronbelasting-driehoek, wel RV
+        _wht = wht_rate if (kind == "dividend" and country != "BE") else 0.0
+        ch = tax.resolve_dividend_chain(r["A"], r["B"], r["C"], r["D"],
+                                        rv_rate=rv_rate, wht_rate=_wht)
         fx = r["fx_rate_in"]
         if fx is None:
             fx, _ = _compute_eur(1.0, cur, r["date"]) if cur != "EUR" else (1.0, 1.0)
@@ -341,6 +355,7 @@ def apply_import(parsed: dict) -> dict:
             "net_eur": (net or 0.0) * fx,
             "cash_basis": cbk,
             "cash_eur": (cash_native or 0.0) * fx,
+            "kind": kind,
         }
         db.add_dividend(r["ticker"], r["date"], gross, withholding, cur, None, fx,
                         gross_eur=(gross or 0.0) * fx, withholding_eur=(withholding or 0.0) * fx,
@@ -383,7 +398,7 @@ def build_template() -> bytes:
         {"ticker": "AAPL", "datum": "2026-05-15", "munt": "USD", "fx_koers": "",
          "bruto_voor_bronbelasting": 25, "buitenlandse_bronbelasting": 3.75,
          "bruto_na_bronbelasting": 21.25, "netto": 14.88, "rekening": acct,
-         "cash_basis": "netto"},
+         "cash_basis": "netto", "kind": "dividend"},
     ], columns=DIV_COLUMNS)
 
     cost_example = pd.DataFrame([

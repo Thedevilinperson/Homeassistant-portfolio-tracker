@@ -2,6 +2,22 @@
 
 Alle noemenswaardige wijzigingen aan de Portfolio Tracker add-on.
 
+## 0.25.0
+- Bugfix dividendafhandeling — automatische RV/netto-berekening. Bij de bulk-import en de
+inline-tabel werd de dividendketen aangeroepen zonder het RV-tarief en de bronbelasting, waardoor
+bij het opladen van enkel het brutobedrag geen roerende voorheffing en netto berekend werden
+(netto = bruto). Nu worden de Belgische RV (uit de instellingen) en de buitenlandse bronbelasting
+(uit het land van het activum) automatisch toegepast bij zowel import als inline bewerken.
+- Herbereken-knop voor bestaande lijnen. Op de dividendenpagina staat nu "🔄 RV en netto
+herberekenen (lijnen zonder RV)": dit herstelt eerder geïmporteerde lijnen waar nog niets werd
+ingehouden (netto ≈ bruto), zonder correct ingevoerde lijnen aan te raken.
+- ID-kolom verwijderd uit de dividendtabel (bewerken gebeurt positioneel; de ID was overbodig).
+- De 🇧🇪 RV-kolom (berekend) is toegevoegd voor controle.
+- Interest & securities lending. Nieuwe kolom "Soort" bij inkomsten (Dividend / Interest /
+Securities lending), in het invoerformulier, de inline-tabel en de bulk-import (kolom kind).
+Enkel echte dividenden tellen mee voor de €833-vrijstelling; interest en securities lending worden
+apart bijgehouden (ze hebben hun eigen fiscale regels) maar lopen wel gewoon mee in de cashpositie.
+
 ## 0.24.0
 - Performance shares — drie zienswijzen (dashboard-brede toepassing). De vroegere aan/uit-toggle
 is vervangen door een keuze uit drie modi, die nu doorwerkt in totaal geïnvesteerd, de

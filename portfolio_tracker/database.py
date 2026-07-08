@@ -231,6 +231,7 @@ def _migrate(conn):
         ("net_eur",              "REAL"),  # D in EUR (authoritatief voor totalen)
         ("cash_basis",           "TEXT DEFAULT 'net'"),  # welk veld naar de cashbalans gaat: net/gross_after/gross_before
         ("cash_eur",             "REAL"),                # het gekozen cashbedrag in EUR
+        ("kind",                 "TEXT DEFAULT 'dividend'"),  # dividend / interest / securities_lending
     ]
     new_div_cols = []
     for col, ddl in div_cols:
@@ -941,13 +942,15 @@ def add_dividend(ticker, date, gross_amount, withholding_tax=0.0,
         d["cash_basis"] = "net"
     if d.get("cash_eur") is None:
         d["cash_eur"] = d["net_eur"]
+    if d.get("kind") is None:
+        d["kind"] = "dividend"
     cols = ["ticker", "date", "gross_amount", "withholding_tax", "currency", "notes",
             "fx_rate", "gross_eur", "withholding_eur",
             "foreign_wht_withheld", "belgian_rv_withheld", "account",
             "gross_before_wht", "gross_before_wht_cur", "foreign_wht_amt",
             "foreign_wht_cur", "gross_after_wht", "gross_after_wht_cur",
             "belgian_rv_amt", "net_received", "net_received_cur", "net_eur",
-            "cash_basis", "cash_eur"]
+            "cash_basis", "cash_eur", "kind"]
     vals = [ticker.upper(), date, gross_amount, withholding_tax, currency, notes,
             fx_rate, gross_eur, withholding_eur,
             int(foreign_wht_withheld), int(belgian_rv_withheld), account,
@@ -956,7 +959,7 @@ def add_dividend(ticker, date, gross_amount, withholding_tax=0.0,
             d.get("gross_after_wht"), d.get("gross_after_wht_cur"),
             d.get("belgian_rv_amt"), d.get("net_received"),
             d.get("net_received_cur"), d.get("net_eur"),
-            d.get("cash_basis"), d.get("cash_eur")]
+            d.get("cash_basis"), d.get("cash_eur"), d.get("kind")]
     conn = get_connection()
     conn.execute(f"INSERT INTO dividends ({','.join(cols)}) VALUES ({','.join('?'*len(cols))})",
                  vals)
@@ -991,7 +994,7 @@ _DIV_EDITABLE = {
     "foreign_wht_withheld", "belgian_rv_withheld",
     "gross_before_wht", "gross_before_wht_cur", "foreign_wht_amt", "foreign_wht_cur",
     "gross_after_wht", "gross_after_wht_cur", "belgian_rv_amt",
-    "net_received", "net_received_cur", "cash_basis", "cash_eur",
+    "net_received", "net_received_cur", "cash_basis", "cash_eur", "kind",
 }
 
 

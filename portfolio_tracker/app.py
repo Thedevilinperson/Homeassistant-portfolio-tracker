@@ -350,6 +350,62 @@ def _cell_eq(a, b) -> bool:
     return str(a) == str(b)
 
 
+def _recompute_dividend_chain(divs, rv_rate: float) -> int:
+    """Herbereken RV + netto voor dividendlijnen waar nog niets werd ingehouden
+    (netto ≈ bruto), bv. na een bulk-import met enkel het brutobedrag. Gebruikt het
+    RV-tarief uit de instellingen en de bronbelasting uit het land van het activum.
+    Raakt geen lijnen aan waar al een inhouding op staat."""
+    a_by = {a["ticker"]: a for a in db.get_assets()}
+    fixed = 0
+    for d in divs:
+        if (d.get("kind") or "dividend") != "dividend":
+            continue
+        cur_gross = d.get("gross_eur") or 0.0
+        cur_net = d.get("net_eur")
+        if cur_net is None:
+            cur_net = cur_gross
+        # enkel lijnen zonder enige inhouding (netto ≈ bruto) en zonder RV
+        if (d.get("belgian_rv_amt") or 0) or abs(cur_gross - cur_net) > 0.01:
+            continue
+        A  = d.get("gross_before_wht")
+        C  = d.get("gross_after_wht")
+        Dv = d.get("net_received")
+        if A is None and C is None and Dv is None:
+            A = d.get("gross_amount")
+        cur  = d.get("currency") or "EUR"
+        ndat = d["date"][:10]
+        ctry = (a_by.get(d["ticker"], {}).get("country") or "BE").upper()
+        wht  = tax_mod.get_wht_rate(ctry) if ctry != "BE" else 0.0
+        res  = tax_mod.resolve_dividend_chain(A, d.get("foreign_wht_amt"), C, Dv,
+                                              rv_rate=rv_rate, wht_rate=wht)
+        rA, rB, rC, rD, rRV = res["a"], res["b"], res["c"], res["d"], res["rv"]
+
+        def _te(v):
+            return None if v is None else compute_eur(v, cur, ndat)[1]
+        a_eur, c_eur, d_eur = _te(rA), _te(rC), _te(rD)
+        gross_eur = a_eur if a_eur is not None else (c_eur if c_eur is not None else d_eur)
+        net_eur   = d_eur if d_eur is not None else c_eur
+        if gross_eur is None or net_eur is None:
+            continue
+        wh_eur = max(0.0, gross_eur - net_eur)
+        cbk = d.get("cash_basis") or "net"
+        cash_eur = {"gross_before": a_eur, "gross_after": c_eur, "net": net_eur}.get(cbk) or net_eur
+        prim = rA if rA is not None else (rC if rC is not None else rD)
+        fx_prim = compute_eur(prim, cur, ndat)[0] or 1.0
+        db.update_dividend(
+            d["id"], gross_amount=prim, withholding_tax=round(wh_eur / fx_prim, 2),
+            fx_rate=fx_prim, gross_eur=gross_eur, withholding_eur=wh_eur, net_eur=net_eur,
+            foreign_wht_withheld=1 if (rB and rB > 0) else 0,
+            belgian_rv_withheld=1 if (rRV and rRV > 0) else 0,
+            gross_before_wht=rA, gross_before_wht_cur=cur if rA is not None else None,
+            foreign_wht_amt=rB, foreign_wht_cur=cur if rB is not None else None,
+            gross_after_wht=rC, gross_after_wht_cur=cur if rC is not None else None,
+            belgian_rv_amt=rRV, net_received=rD, net_received_cur=cur if rD is not None else None,
+            cash_basis=cbk, cash_eur=cash_eur)
+        fixed += 1
+    return fixed
+
+
 def _date_or_none(s: str):
     """'JJJJ-MM-DD' (of dd/mm/jjjj) -> date, anders None."""
     s = (s or "").strip()
@@ -1746,6 +1802,14 @@ def page_dividends():
             asset_cur = amap.get(d_ticker, {}).get("currency", "EUR")
             cur_opts  = CURS if asset_cur in CURS else CURS + [asset_cur]
 
+            _KIND_LBL = {"dividend": "💰 Dividend", "interest": "🏦 Interest",
+                         "securities_lending": "🔁 Securities lending"}
+            _kinds = list(_KIND_LBL.keys())
+            d_kind = st.radio("Soort inkomst", _kinds, horizontal=True, key=dk("kind"),
+                              format_func=lambda k: _KIND_LBL[k],
+                              help="Dividend telt mee voor de vrijstelling van €833 p.p.; interest en "
+                                   "securities lending niet (die hebben hun eigen fiscale regels).")
+
             mode = st.radio("Invoerwijze", ["Eenvoudig", "Gedetailleerd (bronbelasting + RV)"],
                             horizontal=True, key="div_mode")
 
@@ -1771,7 +1835,8 @@ def page_dividends():
                         _, wh_eur = compute_eur(w, currency, d_date)
                         db.add_dividend(d_ticker, str(d_date), g, w, currency, notes or None,
                                         fx_rate=fx_rate, gross_eur=gross_eur, withholding_eur=wh_eur,
-                                        belgian_rv_withheld=1 if w > 0 else 0, account=d_account)
+                                        belgian_rv_withheld=1 if w > 0 else 0, account=d_account,
+                                        details={"kind": d_kind, "net_eur": gross_eur - wh_eur})
                         clear_cache()
                         st.session_state["div_amt_nonce"] = dn + 1
                         st.session_state["div_added_msg"] = (
@@ -1841,7 +1906,7 @@ def page_dividends():
                 res = tax_mod.resolve_dividend_chain(
                     A, B, C, D,
                     rv_rate=(rv_pct / 100.0),
-                    wht_rate=(wht_pct_default / 100.0) if is_foreign else None)
+                    wht_rate=(wht_pct_default / 100.0) if (is_foreign and d_kind == "dividend") else 0.0)
                 rA, rB, rC, rD, rRV = res["a"], res["b"], res["c"], res["d"], res["rv"]
                 def _f(v, cur): return "—" if v is None else f"{cur} {v:,.2f}"
                 st.markdown(
@@ -1913,6 +1978,7 @@ def page_dividends():
                             "net_eur":          net_eur,
                             "cash_basis":       cash_basis,
                             "cash_eur":         cash_eur_v,
+                            "kind":             d_kind,
                         }
                         db.add_dividend(d_ticker, str(d_date), prim_v, wh_native, prim_cur, notes or None,
                                         fx_rate=fx_prim, gross_eur=gross_eur, withholding_eur=wh_eur,
@@ -1974,19 +2040,23 @@ def page_dividends():
         st.divider()
 
         names_map = asset_name_map()
+        a_by_tk   = {a["ticker"]: a for a in db.get_assets()}
         CASH_LBL  = {"net": "④ Netto", "gross_after": "③ Bruto na", "gross_before": "① Bruto vóór"}
         CASH_KEY  = {v: k for k, v in CASH_LBL.items()}
+        KIND_LBL  = {"dividend": "Dividend", "interest": "Interest", "securities_lending": "Securities lending"}
+        KIND_KEY  = {v: k for k, v in KIND_LBL.items()}
         accounts_all = db.get_accounts()
         rows = []
         for d in divs:
             rows.append({
-                "ID":       d["id"],
                 "Datum":    d["date"][:10],
                 "Activum":  asset_label(d["ticker"], names_map),
+                "Soort":    KIND_LBL.get(d.get("kind") or "dividend", "Dividend"),
                 "Rekening": d.get("account") or db.DEFAULT_ACCOUNT,
                 "① Bruto":  d.get("gross_before_wht"),
                 "② Bronbel.": d.get("foreign_wht_amt"),
                 "③ Na bronbel.": d.get("gross_after_wht"),
+                "🇧🇪 RV":   d.get("belgian_rv_amt"),
                 "④ Netto":  d.get("net_received") if d.get("net_received") is not None
                             else round(d["gross_amount"] - d["withholding_tax"], 2),
                 "Munt":     d.get("net_received_cur") or d.get("gross_before_wht_cur") or d["currency"],
@@ -2000,24 +2070,33 @@ def page_dividends():
             pd.DataFrame(rows), width="stretch", hide_index=True, key="div_editor",
             num_rows="fixed",
             column_config={
-                "ID":            cc.NumberColumn(disabled=True, width="small"),
                 "Datum":         cc.TextColumn(help="JJJJ-MM-DD"),
                 "Activum":       cc.TextColumn(disabled=True),
+                "Soort":         cc.SelectboxColumn(options=list(KIND_LBL.values()),
+                                                    help="Dividend telt mee voor de 833-vrijstelling; "
+                                                         "interest en securities lending niet."),
                 "Rekening":      cc.SelectboxColumn(options=accounts_all),
-                "① Bruto":       cc.NumberColumn(min_value=0.0, format="%.4f"),
-                "② Bronbel.":    cc.NumberColumn(min_value=0.0, format="%.4f"),
-                "③ Na bronbel.": cc.NumberColumn(min_value=0.0, format="%.4f"),
-                "④ Netto":       cc.NumberColumn(min_value=0.0, format="%.4f"),
+                "① Bruto":       cc.NumberColumn(min_value=0.0, format="%.4f",
+                                                 help="Bruto vóór buitenlandse bronbelasting (enkel buitenlandse aandelen)."),
+                "② Bronbel.":    cc.NumberColumn(min_value=0.0, format="%.4f",
+                                                 help="Laat leeg om automatisch te berekenen uit het land."),
+                "③ Na bronbel.": cc.NumberColumn(min_value=0.0, format="%.4f",
+                                                 help="Grondslag Belgische RV. Voor Belgische aandelen begin je hier."),
+                "🇧🇪 RV":        cc.NumberColumn(disabled=True, format="%.4f",
+                                                 help="Belgische roerende voorheffing (berekend)."),
+                "④ Netto":       cc.NumberColumn(min_value=0.0, format="%.4f",
+                                                 help="Laat leeg om automatisch te berekenen (③ × (1 − RV%))."),
                 "Munt":          cc.SelectboxColumn(options=CUR_OPTS),
                 "Cash":          cc.SelectboxColumn(options=list(CASH_LBL.values()),
                                                     help="Welk veld naar het cash-grootboek gaat."),
                 "Netto €":       cc.NumberColumn(disabled=True, format="%.2f"),
                 "Notities":      cc.TextColumn(),
             })
-        st.caption("✏️ Bewerk rechtstreeks in de tabel (datum, rekening, bedragen ①–④, munt, cash-basis, "
-                   "notities) en klik daarna op 'Wijzigingen opslaan'. De keten, RV, EUR-bedragen en "
-                   "cash-boeking worden bij het opslaan herberekend en gecontroleerd.")
+        st.caption("✏️ Bewerk rechtstreeks in de tabel. Laat ② en ④ leeg om ze automatisch te laten "
+                   "berekenen (bronbelasting uit het land van het activum, RV uit de instellingen). "
+                   "De keten, RV, EUR-bedragen en cash-boeking worden bij het opslaan herberekend en gecontroleerd.")
 
+        _rvrate = float(db.get_setting("withholding_tax_rate", "0.30"))
         if st.button("💾 Wijzigingen opslaan", type="primary", key="div_save_inline"):
             n_upd, problems = 0, []
             try:
@@ -2025,7 +2104,7 @@ def page_dividends():
                     r = edited.iloc[i]
                     orig = rows[i]
                     if all(r[k] == orig[k] or (pd.isna(r[k]) and orig[k] is None)
-                           for k in ("Datum", "Rekening", "① Bruto", "② Bronbel.", "③ Na bronbel.",
+                           for k in ("Datum", "Soort", "Rekening", "① Bruto", "② Bronbel.", "③ Na bronbel.",
                                      "④ Netto", "Munt", "Cash", "Notities")):
                         continue
                     nd = _date_or_none(str(r["Datum"]))
@@ -2040,7 +2119,11 @@ def page_dividends():
                     nA, nB = _num(r["① Bruto"]), _num(r["② Bronbel."])
                     nC, nD = _num(r["③ Na bronbel."]), _num(r["④ Netto"])
                     ncur   = str(r["Munt"]) if r["Munt"] in CUR_OPTS else (d.get("currency") or "EUR")
-                    res = tax_mod.resolve_dividend_chain(nA, nB, nC, nD)
+                    kind   = KIND_KEY.get(str(r["Soort"]), "dividend")
+                    # Tarieven toepassen: bronbelasting uit het land, RV uit de instellingen
+                    ctry = (a_by_tk.get(d["ticker"], {}).get("country") or "BE").upper()
+                    _wht = tax_mod.get_wht_rate(ctry) if (kind == "dividend" and ctry != "BE") else 0.0
+                    res = tax_mod.resolve_dividend_chain(nA, nB, nC, nD, rv_rate=_rvrate, wht_rate=_wht)
                     rA, rB, rC, rD, rRV = res["a"], res["b"], res["c"], res["d"], res["rv"]
                     def _te(v):
                         return None if v is None else compute_eur(v, ncur, nd)[1]
@@ -2074,7 +2157,7 @@ def page_dividends():
                         gross_after_wht=rC, gross_after_wht_cur=ncur if rC is not None else None,
                         belgian_rv_amt=rRV, net_received=rD,
                         net_received_cur=ncur if rD is not None else None,
-                        cash_basis=cbk, cash_eur=cash_eur_v)
+                        cash_basis=cbk, cash_eur=cash_eur_v, kind=kind)
                     n_upd += 1
             except Exception as exc:
                 problems.append(f"Onverwachte fout: {exc}")
@@ -2082,10 +2165,21 @@ def page_dividends():
                 st.warning("⚠️ " + p)
             if n_upd:
                 clear_cache()
-                st.success(f"✅ {n_upd} dividend(en) bijgewerkt.")
+                st.success(f"✅ {n_upd} lijn(en) bijgewerkt.")
                 st.rerun()
             elif not problems:
                 st.info("Geen wijzigingen gevonden.")
+
+        # Herbereken RV + netto voor lijnen zonder ingehouden RV (bv. na een bulk-import
+        # waarbij enkel het bruto was ingevuld)
+        st.divider()
+        st.caption("Importeerde je enkel het brutobedrag? Dan werd nog geen roerende voorheffing "
+                   "berekend. Herbereken de keten (RV uit de instellingen, bronbelasting uit het land):")
+        if st.button("🔄 RV en netto herberekenen (lijnen zonder RV)", key="div_recompute"):
+            fixed = _recompute_dividend_chain(divs, _rvrate)
+            clear_cache()
+            st.success(f"✅ {fixed} lijn(en) herberekend.")
+            st.rerun()
 
         # Verwijderen (meerdere tegelijk, met bevestiging)
         st.divider()
