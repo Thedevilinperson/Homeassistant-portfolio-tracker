@@ -487,7 +487,9 @@ def delete_with_confirm(btn_label, state_key, target_id, warning, do_delete, btn
 
 
 def backfill_eur(force: bool = False) -> int:
-    """Reken bestaande transacties + dividenden om naar EUR (historische koers)."""
+    """Reken bestaande transacties + dividenden om naar EUR (historische koers).
+    Voor dividenden worden álle EUR-velden herberekend — ook net_eur en de
+    cash-boeking (cash_eur) — zodat het cash-grootboek mee wordt bijgewerkt."""
     n = 0
     for t in db.get_transactions():
         need = (t.get("total_amount_eur") is None) or (force and t["currency"] != "EUR")
@@ -502,9 +504,30 @@ def backfill_eur(force: bool = False) -> int:
     for d in db.get_dividends():
         if d.get("gross_eur") is not None and not (force and d["currency"] != "EUR"):
             continue
-        fx, gross_eur = compute_eur(d["gross_amount"], d["currency"], d["date"])
-        _, wh_eur     = compute_eur(d["withholding_tax"], d["currency"], d["date"])
-        db.set_dividend_eur(d["id"], fx, gross_eur, wh_eur)
+        cur  = d.get("currency") or "EUR"
+        ndat = d["date"][:10]
+        fx   = compute_eur(1.0, cur, ndat)[0] or 1.0
+        A, C, Dv = d.get("gross_before_wht"), d.get("gross_after_wht"), d.get("net_received")
+        if any(v is not None for v in (A, C, Dv)):
+            # Native keten aanwezig: de bedragen blijven, enkel hun EUR-tegenwaarde wijzigt.
+            prim       = A if A is not None else (C if C is not None else Dv)
+            net_native = Dv if Dv is not None else (C if C is not None else prim)
+            cbk        = d.get("cash_basis") or "net"
+            cash_native = {"gross_before": A, "gross_after": C, "net": net_native}.get(cbk)
+            if cash_native is None:
+                cash_native = net_native
+            gross_eur = (prim or 0.0) * fx
+            net_eur   = (net_native or 0.0) * fx
+            cash_eur  = (cash_native or 0.0) * fx
+            wh_eur    = max(0.0, gross_eur - net_eur)
+        else:
+            # Oude rij zonder keten: val terug op bruto/ingehouden.
+            gross_eur = (d["gross_amount"] or 0.0) * fx
+            wh_eur    = (d["withholding_tax"] or 0.0) * fx
+            net_eur   = gross_eur - wh_eur
+            cash_eur  = net_eur
+        db.update_dividend(d["id"], fx_rate=fx, gross_eur=gross_eur, withholding_eur=wh_eur,
+                           net_eur=net_eur, cash_eur=cash_eur)
         n += 1
     return n
 

@@ -2,6 +2,14 @@
 
 Alle noemenswaardige wijzigingen aan de Portfolio Tracker add-on.
 
+## 0.26.1
+- Bugfix cash-grootboek bij EUR-herberekening. De knop "💱 Herbereken EUR-bedragen" werkte voor
+dividenden enkel het bruto- en ingehouden bedrag in EUR bij, maar niet het netto- en cashbedrag
+(net_eur/cash_eur). Daardoor bleef het cash-grootboek na een herberekening op de oude bedragen
+staan. De herberekening bouwt nu álle EUR-velden van een dividend opnieuw op vanuit de native
+keten (bruto → bronbelasting → RV → netto) met de wisselkoers op de dividenddatum, inclusief de
+cash-boeking volgens de gekozen cash-basis. Het cash-grootboek volgt nu correct.
+
 ## 0.26.0
 - Koersen via ISIN + meerdere bronnen. Effecten zonder Yahoo-notering (bv. ING-warrants met enkel
 een ISIN, zoals NL0015002RI2) krijgen nu automatisch een koers. De ophaalvolgorde is: (1) Yahoo op
