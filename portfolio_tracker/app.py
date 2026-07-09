@@ -351,34 +351,47 @@ def _cell_eq(a, b) -> bool:
 
 
 def _recompute_dividend_chain(divs, rv_rate: float) -> int:
-    """Herbereken RV + netto voor dividendlijnen waar nog niets werd ingehouden
-    (netto ≈ bruto), bv. na een bulk-import met enkel het brutobedrag. Gebruikt het
-    RV-tarief uit de instellingen en de bronbelasting uit het land van het activum.
-    Raakt geen lijnen aan waar al een inhouding op staat."""
+    """(Her)bouw de dividendketen op vanaf ① bruto met de actuele instellingen:
+    buitenlandse bronbelasting uit het land van het activum, Belgische RV uit de
+    instellingen.
+
+    Zelfherstellend en idempotent: lijnen waarvan de opgeslagen keten al klopt met
+    het (huidige) land worden overgeslagen; lijnen die niet meer overeenkomen — bv.
+    nadat je het land van een activum hebt gecorrigeerd na een bulk-import — worden
+    opnieuw berekend vanaf het brutobedrag. Meermaals klikken kan dus veilig.
+    Interest en securities lending blijven ongemoeid."""
     a_by = {a["ticker"]: a for a in db.get_assets()}
     fixed = 0
+
+    def _close(x, y, tol=0.02):
+        xv, yv = (x or 0.0), (y or 0.0)
+        return abs(xv - yv) <= tol
+
     for d in divs:
         if (d.get("kind") or "dividend") != "dividend":
             continue
-        cur_gross = d.get("gross_eur") or 0.0
-        cur_net = d.get("net_eur")
-        if cur_net is None:
-            cur_net = cur_gross
-        # enkel lijnen zonder enige inhouding (netto ≈ bruto) en zonder RV
-        if (d.get("belgian_rv_amt") or 0) or abs(cur_gross - cur_net) > 0.01:
-            continue
-        A  = d.get("gross_before_wht")
-        C  = d.get("gross_after_wht")
-        Dv = d.get("net_received")
-        if A is None and C is None and Dv is None:
+        # Anker = ① bruto vóór bronbelasting; val terug op ③ of de opgeslagen bruto.
+        A = d.get("gross_before_wht")
+        if A is None:
+            A = d.get("gross_after_wht")
+        if A is None:
             A = d.get("gross_amount")
+        if A is None:
+            continue
         cur  = d.get("currency") or "EUR"
         ndat = d["date"][:10]
         ctry = (a_by.get(d["ticker"], {}).get("country") or "BE").upper()
         wht  = tax_mod.get_wht_rate(ctry) if ctry != "BE" else 0.0
-        res  = tax_mod.resolve_dividend_chain(A, d.get("foreign_wht_amt"), C, Dv,
+        # Volledige keten opnieuw opbouwen vanaf ① (B/C/D leeg → uit de tarieven)
+        res  = tax_mod.resolve_dividend_chain(A, None, None, None,
                                               rv_rate=rv_rate, wht_rate=wht)
         rA, rB, rC, rD, rRV = res["a"], res["b"], res["c"], res["d"], res["rv"]
+
+        # Idempotent: al correct t.o.v. het huidige land? Dan niets doen.
+        if (_close(rB, d.get("foreign_wht_amt")) and
+                _close(rRV, d.get("belgian_rv_amt")) and
+                _close(rD, d.get("net_received"))):
+            continue
 
         def _te(v):
             return None if v is None else compute_eur(v, cur, ndat)[1]
@@ -1168,6 +1181,7 @@ def page_assets():
         rows = []
         for a in assets:
             lp = db.get_latest_price(a["ticker"])
+            mp = a.get("manual_price")
             sub = a.get("etf_subtype") if a["asset_type"] == "etf" else ""
             cur = a["currency"] if a["currency"] in ACUR else "EUR"
             ctry = (a.get("country") or "BE").upper()
@@ -1182,7 +1196,8 @@ def page_assets():
                 "Beurs":      a.get("exchange") or "",
                 "ISIN":       a.get("isin") or "",
                 "Fotomoment": round(a["snapshot_price"], 4) if a.get("snapshot_price") is not None else None,
-                "Laatste koers": round(lp["price"], 4) if lp else None,
+                "Handmatige koers": round(mp, 4) if mp is not None else None,
+                "Laatste koers": round(mp, 4) if mp is not None else (round(lp["price"], 4) if lp else None),
             })
         cc = st.column_config
         edited = st.data_editor(
@@ -1203,10 +1218,18 @@ def page_assets():
                 "ISIN":       cc.TextColumn(),
                 "Fotomoment": cc.NumberColumn(min_value=0.0, format="%.4f",
                                               help="Slotkoers 31/12/2025 (native). Leeg = geen fotomoment."),
+                "Handmatige koers": cc.NumberColumn(min_value=0.0, format="%.4f",
+                                              help="Laatste redmiddel: enkel gebruikt als geen enkele onlinebron "
+                                                   "(Yahoo op ticker of ISIN, Tradegate, Börse Frankfurt) een koers "
+                                                   "vindt. Zet de ISIN correct in — dan werken de meeste warrants "
+                                                   "automatisch. Leeg = volledig automatisch."),
                 "Laatste koers": cc.NumberColumn(disabled=True, format="%.4f"),
             })
         st.caption("✏️ Bewerk rechtstreeks in de tabel en klik op 'Wijzigingen opslaan'. TOB-tarief, "
-                   "buitenlandse bronbelasting en de EUR-fotomomentwaarde volgen automatisch.")
+                   "buitenlandse bronbelasting en de EUR-fotomomentwaarde volgen automatisch. "
+                   "Staat een effect niet op Yahoo (bv. een warrant)? Vul de **ISIN** in — koersen "
+                   "worden dan via de ISIN opgehaald (Yahoo, Tradegate, Börse Frankfurt). Een "
+                   "'Handmatige koers' is enkel het laatste redmiddel.")
 
         if st.button("💾 Wijzigingen opslaan", type="primary", key="asset_save_inline"):
             n_upd, problems = 0, []
@@ -1215,7 +1238,8 @@ def page_assets():
                     r = edited.iloc[i]
                     orig = rows[i]
                     if all(_cell_eq(r[k], orig[k]) for k in
-                           ("Naam", "Type", "ETF-type", "BE", "Munt", "Land", "Beurs", "ISIN", "Fotomoment")):
+                           ("Naam", "Type", "ETF-type", "BE", "Munt", "Land", "Beurs", "ISIN",
+                            "Fotomoment", "Handmatige koers")):
                         continue
                     atype = TYPE_KEY.get(str(r["Type"]), a["asset_type"])
                     asub  = SUB_KEY.get(str(r["ETF-type"]), a.get("etf_subtype") or "distributing") or "distributing"
@@ -1232,6 +1256,11 @@ def page_assets():
                     else:
                         _fx, snap_eur = compute_eur(float(snap), ncur, tax_mod.SNAPSHOT_DATE)
                         db.set_asset_snapshot(a["ticker"], float(snap), snap_eur)
+                    mpv = r["Handmatige koers"]
+                    if mpv is None or pd.isna(mpv) or float(mpv) <= 0:
+                        db.set_manual_price(a["ticker"], None, None)
+                    else:
+                        db.set_manual_price(a["ticker"], float(mpv), ncur)
                     n_upd += 1
             except Exception as exc:
                 problems.append(f"Onverwachte fout: {exc}")
@@ -1269,6 +1298,27 @@ def page_assets():
                 st.info("Geen ontbrekende fotomomenten gevonden of geen koersen beschikbaar.")
 
         # Ticker corrigeren (verhuist transacties, dividenden en koershistoriek mee)
+        missing_snap = [a for a in assets if a.get("snapshot_price") is None]
+        if missing_snap:
+            if st.button(f"📸 Fotomoment ophalen (ontbrekende: {len(missing_snap)})",
+                         key="fetch_snaps",
+                         help=f"Haalt de slotkoers van {tax_mod.SNAPSHOT_DATE} op voor alle activa "
+                              "zonder fotomoment. Handig na het toevoegen van nieuwe activa."):
+                got = 0
+                for a in missing_snap:
+                    px = md.get_close_on_date(a["ticker"], tax_mod.SNAPSHOT_DATE)
+                    if px:
+                        _fx, px_eur = compute_eur(px, a.get("currency") or "EUR", tax_mod.SNAPSHOT_DATE)
+                        db.set_asset_snapshot(a["ticker"], px, px_eur)
+                        got += 1
+                clear_cache()
+                if got:
+                    st.success(f"✅ Fotomoment opgehaald voor {got} activum/activa.")
+                else:
+                    st.warning("Geen koersen gevonden (mogelijk niet op Yahoo genoteerd — vul de "
+                               "fotomomentwaarde dan handmatig in de tabel in).")
+                st.rerun()
+
         with st.expander("🔧 Ticker corrigeren"):
             rc1, rc2, rc3 = st.columns([2, 2, 1])
             old_tk = rc1.selectbox("Huidige ticker", [a["ticker"] for a in assets], key="rename_old")
@@ -2049,6 +2099,7 @@ def page_dividends():
         rows = []
         for d in divs:
             rows.append({
+                "ID":       d["id"],
                 "Datum":    d["date"][:10],
                 "Activum":  asset_label(d["ticker"], names_map),
                 "Soort":    KIND_LBL.get(d.get("kind") or "dividend", "Dividend"),
@@ -2070,6 +2121,8 @@ def page_dividends():
             pd.DataFrame(rows), width="stretch", hide_index=True, key="div_editor",
             num_rows="fixed",
             column_config={
+                "ID":            cc.NumberColumn(disabled=True, format="%d", width="small",
+                                                 help="Uniek dividend-ID — handig om een lijn te selecteren voor verwijdering."),
                 "Datum":         cc.TextColumn(help="JJJJ-MM-DD"),
                 "Activum":       cc.TextColumn(disabled=True),
                 "Soort":         cc.SelectboxColumn(options=list(KIND_LBL.values()),
@@ -2173,12 +2226,16 @@ def page_dividends():
         # Herbereken RV + netto voor lijnen zonder ingehouden RV (bv. na een bulk-import
         # waarbij enkel het bruto was ingevuld)
         st.divider()
-        st.caption("Importeerde je enkel het brutobedrag? Dan werd nog geen roerende voorheffing "
-                   "berekend. Herbereken de keten (RV uit de instellingen, bronbelasting uit het land):")
-        if st.button("🔄 RV en netto herberekenen (lijnen zonder RV)", key="div_recompute"):
+        st.caption("Herbouwt de keten vanaf ① bruto met de bronbelasting uit het **land** van het "
+                   "activum en de RV uit de instellingen. Corrigeerde je het land na een import? "
+                   "Klik dan opnieuw — lijnen die al kloppen blijven ongemoeid, foute lijnen worden hersteld.")
+        if st.button("🔄 RV en netto herberekenen (keten vanaf ① bruto)", key="div_recompute"):
             fixed = _recompute_dividend_chain(divs, _rvrate)
             clear_cache()
-            st.success(f"✅ {fixed} lijn(en) herberekend.")
+            if fixed:
+                st.success(f"✅ {fixed} lijn(en) herberekend.")
+            else:
+                st.info("Alle lijnen klopten al — niets gewijzigd.")
             st.rerun()
 
         # Verwijderen (meerdere tegelijk, met bevestiging)

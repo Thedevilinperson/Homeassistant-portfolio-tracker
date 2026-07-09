@@ -260,6 +260,11 @@ def _migrate(conn):
         cur.execute("ALTER TABLE assets ADD COLUMN snapshot_price REAL")
     if not _column_exists(cur, "assets", "snapshot_price_eur"):
         cur.execute("ALTER TABLE assets ADD COLUMN snapshot_price_eur REAL")
+    # Handmatige koers (voor effecten zonder Yahoo-notering, bv. warrants, FCPE)
+    if not _column_exists(cur, "assets", "manual_price"):
+        cur.execute("ALTER TABLE assets ADD COLUMN manual_price REAL")
+    if not _column_exists(cur, "assets", "manual_price_cur"):
+        cur.execute("ALTER TABLE assets ADD COLUMN manual_price_cur TEXT")
 
     # Zorg dat oude rijen een rekening hebben
     cur.execute(
@@ -304,6 +309,27 @@ def set_asset_snapshot(ticker, snapshot_price=None, snapshot_price_eur=None):
                  (snapshot_price, snapshot_price_eur, ticker.upper()))
     conn.commit()
     conn.close()
+
+
+def set_manual_price(ticker, price=None, currency=None):
+    """Bewaar (of wis) een handmatige koers voor een activum zonder Yahoo-notering."""
+    conn = get_connection()
+    conn.execute("UPDATE assets SET manual_price=?, manual_price_cur=? WHERE ticker=?",
+                 (price, currency, ticker.upper()))
+    conn.commit()
+    conn.close()
+
+
+def get_manual_price(ticker) -> dict | None:
+    """Handmatige koers voor een activum, of None."""
+    conn = get_connection()
+    row = conn.execute("SELECT manual_price, manual_price_cur, currency FROM assets WHERE ticker=?",
+                       (ticker.upper(),)).fetchone()
+    conn.close()
+    if row and row["manual_price"] is not None:
+        return {"price": float(row["manual_price"]),
+                "currency": row["manual_price_cur"] or row["currency"] or "EUR"}
+    return None
 
 
 def get_accounts() -> list[str]:

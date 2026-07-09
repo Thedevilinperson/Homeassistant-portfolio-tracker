@@ -2,6 +2,27 @@
 
 Alle noemenswaardige wijzigingen aan de Portfolio Tracker add-on.
 
+## 0.26.0
+- Koersen via ISIN + meerdere bronnen. Effecten zonder Yahoo-notering (bv. ING-warrants met enkel
+een ISIN, zoals NL0015002RI2) krijgen nu automatisch een koers. De ophaalvolgorde is: (1) Yahoo op
+het ticker, (2) Yahoo via een symbool afgeleid uit de ISIN, (3) externe niet-Yahoo-bronnen op basis
+van de ISIN (Tradegate, Börse Frankfurt), en pas (4) de handmatige koers als álles faalt. De
+handmatige koers is dus niet langer prioritair maar het laatste redmiddel. Extra bronnen zijn
+eenvoudig toe te voegen via _ISIN_PROVIDERS in market_data.py. get_stock_info herkent
+bovendien een ISIN die als ticker wordt ingegeven en zoekt er een verhandelbaar symbool bij.
+- Bugfix dividenden herberekenen na landcorrectie. De herberekening bouwt de keten nu telkens
+opnieuw op vanaf ① bruto met het huidige land (buitenlandse bronbelasting) en de RV uit de
+instellingen. Ze is zelfherstellend en idempotent: lijnen die al kloppen blijven ongemoeid, en
+lijnen die na een import verkeerd stonden (bv. Belgische RV op een Amerikaans aandeel omdat het
+land nog niet juist stond) worden hersteld zodra je het land corrigeert en opnieuw op herberekenen
+klikt. Voorheen bleven zulke lijnen na de eerste herberekening vastzitten.
+- ID-kolom terug in de dividendtabel. De (alleen-lezen) ID-kolom staat weer vooraan, zodat je snel
+het juiste dividend kunt selecteren om te verwijderen.
+
+## 0.25.1
+- kleine fixes
+- handmatige koers is mogelijk
+
 ## 0.25.0
 - Bugfix dividendafhandeling — automatische RV/netto-berekening. Bij de bulk-import en de
 inline-tabel werd de dividendketen aangeroepen zonder het RV-tarief en de bronbelasting, waardoor

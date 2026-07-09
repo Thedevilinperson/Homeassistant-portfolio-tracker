@@ -84,6 +84,25 @@ def get_stock_info(ticker: str) -> dict:
             or info.get("previousClose") is not None
         )
         if not found:
+            # Ticker gaf niets op Yahoo. Is het (of lijkt het op) een ISIN, probeer
+            # dan een verhandelbaar symbool via de ISIN te vinden.
+            cand = ticker.strip().upper()
+            if _isin_valid(cand):
+                sym = _yahoo_symbol_for_isin(cand)
+                if sym:
+                    tkr  = yf.Ticker(sym)
+                    info = tkr.info or {}
+                    qt = info.get("quoteType", "").lower()
+                    if info.get("longName") or info.get("shortName") or info.get("regularMarketPrice") is not None:
+                        return {
+                            "found":    True,
+                            "name":     info.get("longName") or info.get("shortName") or ticker,
+                            "currency": info.get("currency", "EUR"),
+                            "exchange": info.get("exchange", ""),
+                            "type":     "etf" if qt == "etf" else "stock",
+                            "isin":     cand,
+                            "symbol":   sym,
+                        }
             return {"found": False, "name": ticker, "currency": "EUR",
                     "exchange": "", "type": "stock", "isin": ""}
         return {
@@ -100,29 +119,173 @@ def get_stock_info(ticker: str) -> dict:
                 "exchange": "", "type": "stock", "isin": ""}
 
 
-def get_current_price(ticker: str) -> tuple[float | None, str | None]:
-    cached_price, cached_cur = _cached(ticker)
-    if cached_price is not None:
-        return cached_price, cached_cur
+# ── Koersbronnen (ticker → ISIN-symbool → externe bronnen → handmatig) ──────────
+# Volgorde bij het ophalen van een actuele koers:
+#   1) Yahoo Finance op het ticker zelf
+#   2) Yahoo Finance via een symbool dat we uit de ISIN afleiden
+#   3) Externe (niet-Yahoo) bronnen op basis van de ISIN (Tradegate, Börse Frankfurt)
+#   4) Handmatige koers — enkel als álle onlinebronnen falen (laatste redmiddel)
+# Zo werken ook effecten zonder Yahoo-notering (bv. ING-warrants met enkel een ISIN)
+# zonder dat je manueel koersen moet bijhouden.
+
+def _isin_valid(isin) -> bool:
+    return isinstance(isin, str) and len(isin) == 12 and isin[:2].isalpha()
+
+
+def _to_float(v) -> float | None:
+    if v is None:
+        return None
     try:
-        tkr = yf.Ticker(ticker)
-        info = tkr.info
-        price = (
-            info.get("regularMarketPrice")
-            or info.get("currentPrice")
-            or info.get("previousClose")
-        )
-        currency = info.get("currency", "EUR")
+        return float(str(v).replace("\u202f", "").replace(" ", "").replace(",", "."))
+    except (TypeError, ValueError):
+        return None
+
+
+def _price_from_yahoo_symbol(symbol: str) -> tuple[float | None, str | None]:
+    """(prijs, munt) via Yahoo voor één concreet symbool, of (None, None)."""
+    try:
+        tkr = yf.Ticker(symbol)
+        info = tkr.info or {}
+        price = (info.get("regularMarketPrice")
+                 or info.get("currentPrice")
+                 or info.get("previousClose"))
+        currency = info.get("currency") or "EUR"
         if price is None:
             hist = tkr.history(period="1d", auto_adjust=True)
             if not hist.empty:
                 price = float(hist["Close"].iloc[-1])
         if price is not None:
-            price = float(price)
-            _store(ticker, price, currency)
-            return price, currency
+            return float(price), currency
     except Exception as e:
-        logger.warning(f"get_current_price({ticker}): {e}")
+        logger.warning(f"_price_from_yahoo_symbol({symbol}): {e}")
+    return None, None
+
+
+_ISIN_SYMBOL_CACHE: dict[str, str] = {}
+
+
+def _yahoo_symbol_for_isin(isin: str) -> str | None:
+    """Zoek via het Yahoo search-endpoint een verhandelbaar symbool voor een ISIN."""
+    if not _isin_valid(isin):
+        return None
+    if isin in _ISIN_SYMBOL_CACHE:
+        return _ISIN_SYMBOL_CACHE[isin] or None
+    try:
+        import requests
+        resp = requests.get(
+            "https://query2.finance.yahoo.com/v1/finance/search",
+            params={"q": isin, "quotesCount": 6, "newsCount": 0},
+            headers={"User-Agent": "Mozilla/5.0"}, timeout=6)
+        if resp.ok:
+            for q in resp.json().get("quotes", []):
+                sym = q.get("symbol")
+                if sym:
+                    _ISIN_SYMBOL_CACHE[isin] = sym
+                    return sym
+    except Exception as e:
+        logger.warning(f"_yahoo_symbol_for_isin({isin}): {e}")
+    _ISIN_SYMBOL_CACHE[isin] = ""
+    return None
+
+
+def _price_tradegate(isin: str) -> tuple[float | None, str | None]:
+    """(prijs, munt) via Tradegate — dekt veel warrants, turbos en ETP's die niet
+    op Yahoo staan. Geen sleutel nodig."""
+    if not _isin_valid(isin):
+        return None, None
+    try:
+        import requests
+        resp = requests.get("https://www.tradegate.de/refresh.php",
+                            params={"isin": isin},
+                            headers={"User-Agent": "Mozilla/5.0"}, timeout=6)
+        if resp.ok:
+            data = resp.json()
+            price = _to_float(data.get("last") or data.get("bid") or data.get("ask"))
+            if price:
+                return price, (data.get("currency") or "EUR")
+    except Exception as e:
+        logger.warning(f"_price_tradegate({isin}): {e}")
+    return None, None
+
+
+def _price_boerse_frankfurt(isin: str) -> tuple[float | None, str | None]:
+    """(prijs, munt) via Börse Frankfurt (best effort), of (None, None)."""
+    if not _isin_valid(isin):
+        return None, None
+    try:
+        import requests
+        resp = requests.get(
+            "https://api.boerse-frankfurt.de/v1/data/quote_box/single",
+            params={"isin": isin, "mic": "XFRA"},
+            headers={"User-Agent": "Mozilla/5.0", "Accept": "application/json"},
+            timeout=6)
+        if resp.ok:
+            data = resp.json()
+            price = _to_float(data.get("lastPrice") or data.get("last"))
+            if price:
+                return price, (data.get("currency") or "EUR")
+    except Exception as e:
+        logger.warning(f"_price_boerse_frankfurt({isin}): {e}")
+    return None, None
+
+
+# Externe ISIN-bronnen, in volgorde geprobeerd na Yahoo. Uitbreidbaar met extra
+# bronnen (bv. een ING-Markets-provider) door een functie (isin)->(prijs,munt) toe
+# te voegen aan deze lijst.
+_ISIN_PROVIDERS = [_price_tradegate, _price_boerse_frankfurt]
+
+
+def _asset_isin(ticker: str) -> str:
+    try:
+        import database as _db
+        a = _db.get_asset(ticker) or {}
+        return (a.get("isin") or "").strip().upper()
+    except Exception:
+        return ""
+
+
+def get_current_price(ticker: str) -> tuple[float | None, str | None]:
+    """Actuele koers + munt. Probeert online bronnen eerst (Yahoo op ticker, dan via
+    ISIN, dan niet-Yahoo-bronnen) en valt pas als álles faalt terug op een handmatige
+    koers."""
+    cached_price, cached_cur = _cached(ticker)
+    if cached_price is not None:
+        return cached_price, cached_cur
+
+    isin = _asset_isin(ticker)
+
+    # 1) Yahoo op het ticker zelf
+    price, currency = _price_from_yahoo_symbol(ticker)
+
+    # 2) Yahoo via een uit de ISIN afgeleid symbool
+    if price is None and _isin_valid(isin):
+        sym = _yahoo_symbol_for_isin(isin)
+        if sym and sym.upper() != ticker.upper():
+            price, currency = _price_from_yahoo_symbol(sym)
+
+    # 3) Externe (niet-Yahoo) bronnen op basis van de ISIN
+    if price is None and _isin_valid(isin):
+        for provider in _ISIN_PROVIDERS:
+            p, c = provider(isin)
+            if p is not None:
+                price, currency = p, c
+                break
+
+    # 4) Handmatige koers — laatste redmiddel
+    if price is None:
+        try:
+            import database as _db
+            mp = _db.get_manual_price(ticker)
+            if mp:
+                return mp["price"], mp["currency"]
+        except Exception:
+            pass
+
+    if price is not None:
+        price = float(price)
+        currency = currency or "EUR"
+        _store(ticker, price, currency)
+        return price, currency
     return None, None
 
 

@@ -11,9 +11,7 @@ Structurelere aanpassingen
 
 Bugs
 
-
 Aanpak/designvragen
 
 
 
-nu ingevoerde dividenden kloppen niet
