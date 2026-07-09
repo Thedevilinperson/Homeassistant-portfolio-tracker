@@ -2,6 +2,18 @@
 
 Alle noemenswaardige wijzigingen aan de Portfolio Tracker add-on.
 
+## 0.26.2
+- Dividenden herberekenen herstelt nu ook de cash-boeking. De herberekenknop keek enkel of de
+keten (bronbelasting/RV/netto) klopte en sloeg een lijn over zodra dat zo was — óók als het
+EUR-cashbedrag (cash_eur/net_eur) nog verouderd was. Daardoor leek de knop "niets te doen" en
+bleef het cash-grootboek op de oude bedragen staan. De idempotentiecheck vergelijkt nu ook de
+EUR-bedragen en de cash-boeking, zodat een verouderde cash-boeking wordt hersteld en het
+cash-grootboek mee wijzigt. Klopt alles al, dan blijft de tabel ongemoeid.
+- Filterbug op de dividendpagina opgelost. De pagina gebruikte tabbladen (Toevoegen / Overzicht);
+bij het kiezen van een rekening- of jaarfilter herlaadt Streamlit en sprong de weergave terug naar
+het eerste tabblad, waardoor plots het invoerformulier verscheen. De tabbladen zijn vervangen door
+een blijvende keuzeschakelaar, zodat je op het overzicht blijft terwijl je filtert.
+
 ## 0.26.1
 - Bugfix cash-grootboek bij EUR-herberekening. De knop "💱 Herbereken EUR-bedragen" werkte voor
 dividenden enkel het bruto- en ingehouden bedrag in EUR bij, maar niet het netto- en cashbedrag

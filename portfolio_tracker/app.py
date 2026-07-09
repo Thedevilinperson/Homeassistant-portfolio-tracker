@@ -387,12 +387,7 @@ def _recompute_dividend_chain(divs, rv_rate: float) -> int:
                                               rv_rate=rv_rate, wht_rate=wht)
         rA, rB, rC, rD, rRV = res["a"], res["b"], res["c"], res["d"], res["rv"]
 
-        # Idempotent: al correct t.o.v. het huidige land? Dan niets doen.
-        if (_close(rB, d.get("foreign_wht_amt")) and
-                _close(rRV, d.get("belgian_rv_amt")) and
-                _close(rD, d.get("net_received"))):
-            continue
-
+        # EUR-tegenwaarden + cash-boeking op basis van de (her)berekende keten
         def _te(v):
             return None if v is None else compute_eur(v, cur, ndat)[1]
         a_eur, c_eur, d_eur = _te(rA), _te(rC), _te(rD)
@@ -403,6 +398,18 @@ def _recompute_dividend_chain(divs, rv_rate: float) -> int:
         wh_eur = max(0.0, gross_eur - net_eur)
         cbk = d.get("cash_basis") or "net"
         cash_eur = {"gross_before": a_eur, "gross_after": c_eur, "net": net_eur}.get(cbk) or net_eur
+
+        # Idempotent: enkel overslaan als zowel de keten áls de EUR/cash-velden al
+        # kloppen. Zo herstelt een klik ook een stale cash-boeking (bv. na een eerdere
+        # herberekening die net_eur/cash_eur niet mee bijwerkte) zonder de tabel te wijzigen.
+        if (_close(rB, d.get("foreign_wht_amt")) and
+                _close(rRV, d.get("belgian_rv_amt")) and
+                _close(rD, d.get("net_received")) and
+                _close(net_eur, d.get("net_eur")) and
+                _close(cash_eur, d.get("cash_eur")) and
+                _close(gross_eur, d.get("gross_eur"))):
+            continue
+
         prim = rA if rA is not None else (rC if rC is not None else rD)
         fx_prim = compute_eur(prim, cur, ndat)[0] or 1.0
         db.update_dividend(
@@ -1850,9 +1857,11 @@ def page_dividends():
 
     assets = db.get_assets()
 
-    tab_add, tab_view = st.tabs(["📝 Dividend toevoegen", "📋 Overzicht"])
+    _div_section = st.radio(
+        "Weergave", ["📝 Dividend toevoegen", "📋 Overzicht"],
+        key="div_section", horizontal=True, label_visibility="collapsed")
 
-    with tab_add:
+    if _div_section == "📝 Dividend toevoegen":
         tickers = [a["ticker"] for a in assets]
         div_names = {a["ticker"]: (a.get("name") or a["ticker"]) for a in assets}
         amap = {a["ticker"]: a for a in assets}
@@ -2065,7 +2074,7 @@ def page_dividends():
                             f"cash-boeking: {cash_choice}).")
                         st.rerun()
 
-    with tab_view:
+    else:  # 📋 Overzicht
         st.session_state.pop("edit_div", None)  # oude bewerkstaat opruimen
         fcol1, fcol2 = st.columns(2)
         f_year = fcol1.selectbox("Jaar:", ["Alle"] + [str(y) for y in range(datetime.now().year, 2019, -1)],
@@ -2250,8 +2259,10 @@ def page_dividends():
         # waarbij enkel het bruto was ingevuld)
         st.divider()
         st.caption("Herbouwt de keten vanaf ① bruto met de bronbelasting uit het **land** van het "
-                   "activum en de RV uit de instellingen. Corrigeerde je het land na een import? "
-                   "Klik dan opnieuw — lijnen die al kloppen blijven ongemoeid, foute lijnen worden hersteld.")
+                   "activum en de RV uit de instellingen, inclusief de EUR-bedragen en de "
+                   "**cash-boeking**. Corrigeerde je het land na een import? Klik dan opnieuw — "
+                   "lijnen die al kloppen blijven ongemoeid, foute lijnen (ook een verouderde "
+                   "cash-boeking) worden hersteld en het cash-grootboek volgt.")
         if st.button("🔄 RV en netto herberekenen (keten vanaf ① bruto)", key="div_recompute"):
             fixed = _recompute_dividend_chain(divs, _rvrate)
             clear_cache()
