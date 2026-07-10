@@ -1504,8 +1504,27 @@ def page_transactions():
             account  = st.selectbox("Rekening *", db.get_accounts(), key=kk("acct"),
                                     help="Beheer rekeningen via ⚙️ Instellingen → Rekeningen")
         with c2:
-            quantity   = st.number_input("Aantal *", min_value=0.0, step=0.001,
-                                         format="%.4f", value=None, key=kk("qty"))
+            # Bij een verkoop: toon de beschikbare positie OP de verkoopdatum en bied
+            # 'volledige positie verkopen' aan (voorkomt gedoe met fractionele aandelen).
+            sell_avail = None
+            sell_all = False
+            if txn_type == "sell":
+                _acct_txns = db.get_transactions(ticker=ticker, account=account)
+                _upto = [t for t in _acct_txns if t["date"][:10] <= str(txn_date)]
+                _posd, _ = tax_mod.build_fifo_positions(_upto)
+                sell_avail = round(_posd.get(ticker, {}).get("total_quantity", 0.0), 6)
+                sell_all = st.checkbox(
+                    f"🔻 Volledige positie verkopen ({sell_avail:.4f} beschikbaar op {txn_date})",
+                    key=kk("sellall"),
+                    help="Verkoopt exact je volledige positie op de gekozen datum — handig bij "
+                         "fractionele aandelen. Vink uit om zelf een aantal in te geven.")
+            if txn_type == "sell" and sell_all:
+                quantity = float(sell_avail or 0.0)
+                st.number_input("Aantal *", min_value=0.0, value=quantity,
+                                format="%.4f", key=kk("qty_locked"), disabled=True)
+            else:
+                quantity = st.number_input("Aantal *", min_value=0.0, step=0.0001,
+                                           format="%.4f", value=None, key=kk("qty"))
             price_unit = st.number_input("Prijs per stuk *", min_value=0.0,
                                          step=0.01, format="%.4f", value=None,
                                          key=kk("price"))
@@ -1632,10 +1651,24 @@ def page_transactions():
                 proceed = True
                 if txn_type == "sell":
                     acct_txns = db.get_transactions(ticker=ticker, account=account)
-                    positions, _ = tax_mod.build_fifo_positions(acct_txns)
-                    available = positions.get(ticker, {}).get("total_quantity", 0)
-                    if quantity > available + 1e-9:
-                        st.error(f"Onvoldoende positie op rekening '{account}'. Beschikbaar: {available:.4f}")
+                    # Positie beschikbaar OP de verkoopdatum (een verkoop kan niet vóór
+                    # de bijhorende aankoop liggen — anders klopt de FIFO/portefeuille niet).
+                    upto = [t for t in acct_txns if t["date"][:10] <= str(txn_date)]
+                    positions, _ = tax_mod.build_fifo_positions(upto)
+                    available = positions.get(ticker, {}).get("total_quantity", 0.0)
+                    positions_all, _ = tax_mod.build_fifo_positions(acct_txns)
+                    available_all = positions_all.get(ticker, {}).get("total_quantity", 0.0)
+                    # Fractionele tolerantie: exact de volledige positie verkopen mag.
+                    if quantity - available > 1e-6:
+                        if available_all - quantity > -1e-6 and available < available_all - 1e-9:
+                            st.error(
+                                f"Op {txn_date} had je slechts **{available:.4f}** stuk(s) op '{account}'. "
+                                f"Je bezit in totaal wel {available_all:.4f}, maar de verkoopdatum ligt "
+                                "wellicht vóór je aankoop. Een verkoop kan niet vóór de aankoop liggen — "
+                                "corrigeer de **verkoopdatum**.")
+                        else:
+                            st.error(f"Onvoldoende positie op '{account}' op {txn_date}. "
+                                     f"Beschikbaar: {available:.4f}.")
                         proceed = False
                 if proceed:
                     db.add_transaction(ticker, txn_type, str(txn_date), quantity,

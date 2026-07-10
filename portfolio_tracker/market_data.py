@@ -208,31 +208,104 @@ def _price_tradegate(isin: str) -> tuple[float | None, str | None]:
     return None, None
 
 
+_BF_SALT_CACHE: dict = {"salt": None, "ts": 0.0}
+# Fallback-salt (uit een oudere JS-bundle). Wordt enkel gebruikt als het dynamisch
+# ophalen faalt; de salt kan wijzigen, daarom halen we ze bij voorkeur live op.
+_BF_SALT_FALLBACK = "w4icATTGtnjAZMbkL3kJwxMfEAKDa3MN"
+
+
+def _bf_salt() -> str:
+    """Haal de (wisselende) salt van boerse-frankfurt.de dynamisch uit de JS-bundle,
+    zodat de beveiligingsheaders blijven kloppen als Börse Frankfurt de salt wijzigt.
+    Resultaat wordt ~24u gecachet; bij falen valt hij terug op een bekende salt."""
+    import time
+    now = time.time()
+    if _BF_SALT_CACHE["salt"] and (now - _BF_SALT_CACHE["ts"] < 86400):
+        return _BF_SALT_CACHE["salt"]
+    salt = None
+    try:
+        import re
+        import requests
+        html = requests.get("https://www.boerse-frankfurt.de/",
+                            headers={"User-Agent": "Mozilla/5.0"}, timeout=6).text
+        bundles = re.findall(r'src="([^"]*?(?:main|runtime|polyfills)[^"]*?\.js)"', html)
+        for b in bundles:
+            url = b if b.startswith("http") else "https://www.boerse-frankfurt.de/" + b.lstrip("/")
+            try:
+                js = requests.get(url, headers={"User-Agent": "Mozilla/5.0"}, timeout=8).text
+            except Exception:
+                continue
+            m = re.search(r'salt:\s*"([A-Za-z0-9+/=_-]{16,})"', js)
+            if m:
+                salt = m.group(1)
+                break
+    except Exception as e:
+        logger.warning(f"_bf_salt dynamisch ophalen faalde: {e}")
+    salt = salt or _BF_SALT_FALLBACK
+    _BF_SALT_CACHE.update(salt=salt, ts=now)
+    return salt
+
+
+def _bf_headers(url: str) -> dict:
+    """Bereken de vereiste Börse-Frankfurt-headers (Client-Date, X-Client-TraceId,
+    X-Security). X-Security gebruikt de tijd in Frankfurt (Europe/Berlin), ongeacht
+    de tijdzone van deze server."""
+    import hashlib
+    import datetime
+    try:
+        from zoneinfo import ZoneInfo
+        fra_now = datetime.datetime.now(ZoneInfo("Europe/Berlin"))
+    except Exception:
+        fra_now = datetime.datetime.utcnow() + datetime.timedelta(hours=1)
+    now_utc = datetime.datetime.now(datetime.timezone.utc)
+    client_date = now_utc.isoformat(timespec="milliseconds").replace("+00:00", "Z")
+    salt = _bf_salt()
+    return {
+        "Client-Date":      client_date,
+        "X-Client-TraceId": hashlib.md5((client_date + url + salt).encode()).hexdigest(),
+        "X-Security":       hashlib.md5(fra_now.strftime("%Y%m%d%H%M").encode()).hexdigest(),
+        "Accept":           "application/json, text/plain, */*",
+        "User-Agent":       "Mozilla/5.0",
+        "Origin":           "https://www.boerse-frankfurt.de",
+        "Referer":          "https://www.boerse-frankfurt.de/",
+    }
+
+
+# Handelsplaatsen (MIC) waarop we een koers proberen. Warrants/certificaten van
+# bv. ING Markets noteren doorgaans op de Frankfurtse Zertifikate-beurs (XFRA).
+_BF_MICS = ["XFRA", "XETR", "XSTU", "XGAT"]
+
+
 def _price_boerse_frankfurt(isin: str) -> tuple[float | None, str | None]:
-    """(prijs, munt) via Börse Frankfurt (best effort), of (None, None)."""
+    """(prijs, munt) via de Börse-Frankfurt-API. Werkt ook voor warrants/certificaten
+    (bv. ING Markets, ISIN NL0015002RI2). Gebruikt de vereiste beveiligingsheaders met
+    een dynamisch opgehaalde salt, en probeert enkele handelsplaatsen."""
     if not _isin_valid(isin):
         return None, None
-    try:
-        import requests
-        resp = requests.get(
-            "https://api.boerse-frankfurt.de/v1/data/quote_box/single",
-            params={"isin": isin, "mic": "XFRA"},
-            headers={"User-Agent": "Mozilla/5.0", "Accept": "application/json"},
-            timeout=6)
-        if resp.ok:
-            data = resp.json()
-            price = _to_float(data.get("lastPrice") or data.get("last"))
+    import requests
+    base = "https://api.boerse-frankfurt.de/v1/data/quote_box/single"
+    for mic in _BF_MICS:
+        url = f"{base}?isin={isin}&mic={mic}"
+        try:
+            resp = requests.get(url, headers=_bf_headers(url), timeout=8)
+            if not resp.ok:
+                continue
+            data = resp.json() or {}
+            price = _to_float(data.get("lastPrice"))
+            if price is None:
+                # geen last -> val terug op bied/laat (bv. bij illiquide certificaten)
+                price = _to_float(data.get("bidPrice") or data.get("askPrice"))
             if price:
-                return price, (data.get("currency") or "EUR")
-    except Exception as e:
-        logger.warning(f"_price_boerse_frankfurt({isin}): {e}")
+                return price, (data.get("currency") or data.get("tradingCurrency") or "EUR")
+        except Exception as e:
+            logger.warning(f"_price_boerse_frankfurt({isin},{mic}): {e}")
     return None, None
 
 
 # Externe ISIN-bronnen, in volgorde geprobeerd na Yahoo. Uitbreidbaar met extra
 # bronnen (bv. een ING-Markets-provider) door een functie (isin)->(prijs,munt) toe
-# te voegen aan deze lijst.
-_ISIN_PROVIDERS = [_price_tradegate, _price_boerse_frankfurt]
+# te voegen aan deze lijst. Börse Frankfurt eerst: dekt warrants/certificaten.
+_ISIN_PROVIDERS = [_price_boerse_frankfurt, _price_tradegate]
 
 
 def probe_isin(isin: str) -> tuple[float | None, str | None, str | None]:
@@ -274,6 +347,10 @@ def get_current_price(ticker: str) -> tuple[float | None, str | None]:
         return cached_price, cached_cur
 
     isin = _asset_isin(ticker)
+    # Geen ISIN op het activum, maar het ticker zelf is een ISIN (bv. een warrant die
+    # met de ISIN als ticker werd toegevoegd)? Gebruik die dan.
+    if not _isin_valid(isin) and _isin_valid(ticker.strip().upper()):
+        isin = ticker.strip().upper()
 
     # 1) Yahoo op het ticker zelf
     price, currency = _price_from_yahoo_symbol(ticker)

@@ -2,6 +2,36 @@
 
 Alle noemenswaardige wijzigingen aan de Portfolio Tracker add-on.
 
+## 0.27.2
+- Solide koersen voor warrants/certificaten via Börse Frankfurt. De Börse-Frankfurt-provider is
+herschreven zodat hij effectief werkt voor structured products zoals ING-Markets-warrants (bv.
+NL0015002RI2). Hun API vereist beveiligingsheaders (Client-Date, X-Client-TraceId, X-Security) met
+een hash van tijd + URL + een salt die in hun JS-bundle zit en periodiek wijzigt. De salt wordt nu
+dynamisch en zelfherstellend uit de live bundle gehaald (24u gecachet, met een terugval), de
+X-Security gebruikt de Frankfurt-tijd (Europe/Berlin) ongeacht de serverzone, en er worden meerdere
+handelsplaatsen geprobeerd (XFRA/XETR/XSTU/XGAT) met terugval op bied/laat als er geen slotkoers is.
+- De hash-berekening is geverifieerd tegen het gedocumenteerde voorbeeld. Börse Frankfurt staat nu
+vooraan in de ISIN-bronnenketen (vóór Tradegate).
+Ticker als ISIN. Voegde je een effect toe met de ISIN in het Ticker-veld maar zonder het ISIN-veld
+in te vullen, dan wordt de ticker nu zelf als ISIN gebruikt voor het ophalen van koersen.
+
+## 0.27.1
+- Verkoop van fractionele aandelen en verkoopdatum vóór de aankoop. Drie samenhangende fixes bij
+het invoeren van een verkoop:
+  -De verkoopvalidatie kijkt nu naar de positie op de verkoopdatum i.p.v. de totale positie.
+Ligt de verkoopdatum vóór je aankoop (chronologisch onmogelijk), dan krijg je een duidelijke
+melding om de datum te corrigeren. Voorheen kon je zo'n verkoop invoeren, waarna de FIFO de
+verkoop tegen een lege positie verwerkte: het aandeel bleef volledig 'in bezit' én de winst werd
+met kostbasis 0 geboekt, zodat de portefeuille dubbel telde.
+  - Fractionele tolerantie: je kunt nu exact je volledige positie verkopen (bv. 5,1885) zonder de
+melding 'onvoldoende positie'. Het aantalveld gebruikt bovendien een fijnere stap (0,0001) die
+bij de 4 decimalen past.
+  - Nieuwe optie '🔻 Volledige positie verkopen' bij een verkoop: vult automatisch exact je
+beschikbare aantal op de gekozen datum in — handig bij fractionele aandelen.
+Heb je al een verkoop met een datum vóór de aankoop ingevoerd? Corrigeer dan de verkoopdatum
+in het transactie-overzicht (die is inline bewerkbaar); de portefeuille en gerealiseerde winst
+worden dan meteen juist herberekend.
+
 ## 0.27.0
 - Filterbug definitief weg op álle pagina's. De terugspringende tabbladen (kiezen van een filter
 sprong terug naar het eerste tabblad en toonde plots het invoerformulier) zijn nu overal opgelost:
