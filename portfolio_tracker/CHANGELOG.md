@@ -2,6 +2,24 @@
 
 Alle noemenswaardige wijzigingen aan de Portfolio Tracker add-on.
 
+## 0.27.0
+- Filterbug definitief weg op álle pagina's. De terugspringende tabbladen (kiezen van een filter
+sprong terug naar het eerste tabblad en toonde plots het invoerformulier) zijn nu overal opgelost:
+activa, transacties, dividenden, cash, AI-advies en instellingen gebruiken allemaal een blijvende
+keuzeschakelaar i.p.v. st.tabs. Je blijft nu op de gekozen sectie terwijl je filtert of bewerkt.
+- Gratis aandelen registreren zonder personenbelasting. Bij een aankoop kun je nu '🎁 Toegekend als
+loon of gratis gekregen' aanvinken en daaronder '🆓 Écht gratis aandeel — geen personenbelasting'.
+De waarde per stuk mag dan 0 zijn (de validatie 'prijs > 0' geldt niet meer voor toekenningen) en
+er wordt geen personenbelasting bijgehouden; de kostbasis is gelijk aan de opgegeven waarde (€0 bij
+een volledig gratis aandeel), geen TOB en geen cash-uitgave. De database-CHECK op de prijs is
+versoepeld van > 0 naar >= 0; bestaande databases worden bij het opstarten automatisch en met
+behoud van data gemigreerd.
+- Effecten zonder ticker toevoegen (enkel ISIN). Vul je in het Ticker-veld een ISIN in (bv. een
+ING-warrant NL0015002RI2) en klik je op 'Info ophalen', dan herkent de app dat het een ISIN is:
+het ISIN- en landveld worden ingevuld, de munt wordt via een externe bron (Tradegate/Börse
+Frankfurt) geprobeerd, en je hoeft enkel nog een naam in te geven. Koersen worden nadien
+automatisch via de ISIN opgehaald; een handmatige koers blijft het laatste redmiddel.
+
 ## 0.26.2
 - Dividenden herberekenen herstelt nu ook de cash-boeking. De herberekenknop keek enkel of de
 keten (bronbelasting/RV/netto) klopte en sloeg een lijn over zodra dat zo was — óók als het

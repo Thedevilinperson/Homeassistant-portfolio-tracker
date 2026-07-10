@@ -235,6 +235,27 @@ def _price_boerse_frankfurt(isin: str) -> tuple[float | None, str | None]:
 _ISIN_PROVIDERS = [_price_tradegate, _price_boerse_frankfurt]
 
 
+def probe_isin(isin: str) -> tuple[float | None, str | None, str | None]:
+    """Test of een ISIN op een externe bron (Yahoo-symbool of niet-Yahoo-bron)
+    verhandeld wordt. Geeft (prijs, munt, bronnaam) terug, of (None, None, None).
+    Handig bij het toevoegen van een effect zonder Yahoo-ticker (bv. een warrant):
+    zo kunnen we de munt voorinvullen en bevestigen dat er automatisch een koers
+    beschikbaar is."""
+    if not _isin_valid(isin):
+        return None, None, None
+    sym = _yahoo_symbol_for_isin(isin)
+    if sym:
+        p, c = _price_from_yahoo_symbol(sym)
+        if p is not None:
+            return p, c, f"Yahoo ({sym})"
+    names = {"_price_tradegate": "Tradegate", "_price_boerse_frankfurt": "Börse Frankfurt"}
+    for provider in _ISIN_PROVIDERS:
+        p, c = provider(isin)
+        if p is not None:
+            return p, c, names.get(provider.__name__, provider.__name__)
+    return None, None, None
+
+
 def _asset_isin(ticker: str) -> str:
     try:
         import database as _db

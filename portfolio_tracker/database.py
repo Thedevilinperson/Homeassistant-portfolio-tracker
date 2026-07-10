@@ -55,7 +55,7 @@ def init_db():
             transaction_type  TEXT    NOT NULL CHECK(transaction_type IN ('buy','sell')),
             date              TEXT    NOT NULL,
             quantity          REAL    NOT NULL CHECK(quantity > 0),
-            price_per_unit    REAL    NOT NULL CHECK(price_per_unit > 0),
+            price_per_unit    REAL    NOT NULL CHECK(price_per_unit >= 0),
             total_amount      REAL    NOT NULL,
             currency          TEXT    DEFAULT 'EUR',
             tob_tax           REAL    DEFAULT 0,
@@ -271,7 +271,33 @@ def _migrate(conn):
         "UPDATE transactions SET account=? WHERE account IS NULL OR account=''",
         (DEFAULT_ACCOUNT,)
     )
+
+    # Versoepel de oude CHECK(price_per_unit > 0) naar >= 0 zodat gratis toekenningen
+    # (waarde 0) kunnen worden geregistreerd. SQLite kan een CHECK niet in-place
+    # wijzigen, dus de tabel wordt herbouwd met behoud van alle kolommen en data.
+    _relax_transactions_price_check(conn, cur)
+
     conn.commit()
+
+
+def _relax_transactions_price_check(conn, cur):
+    row = cur.execute(
+        "SELECT sql FROM sqlite_master WHERE type='table' AND name='transactions'"
+    ).fetchone()
+    sql = row["sql"] if row else None
+    if not sql or "price_per_unit > 0" not in sql:
+        return  # nieuw schema of al versoepeld
+    cols = [r[1] for r in cur.execute("PRAGMA table_info(transactions)").fetchall()]
+    collist = ", ".join(f'"{c}"' for c in cols)
+    new_sql = (sql.replace("price_per_unit > 0", "price_per_unit >= 0")
+                  .replace("CREATE TABLE IF NOT EXISTS transactions", "CREATE TABLE transactions_new")
+                  .replace("CREATE TABLE transactions", "CREATE TABLE transactions_new"))
+    cur.execute("PRAGMA foreign_keys=off")
+    cur.execute(new_sql)
+    cur.execute(f"INSERT INTO transactions_new ({collist}) SELECT {collist} FROM transactions")
+    cur.execute("DROP TABLE transactions")
+    cur.execute("ALTER TABLE transactions_new RENAME TO transactions")
+    cur.execute("PRAGMA foreign_keys=on")
 
 
 # ── Settings ────────────────────────────────────────────────────────────────

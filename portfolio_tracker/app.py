@@ -105,6 +105,14 @@ def clear_cache():
     get_overview.clear()
 
 
+def _section_radio(key: str, labels: list) -> str:
+    """Blijvende sectiekeuze i.p.v. st.tabs. Anders dan st.tabs onthoudt dit de
+    gekozen sectie over reruns heen (bv. na het kiezen van een filter), zodat de
+    weergave niet terugspringt naar het eerste tabblad."""
+    return st.radio("sectie", labels, key=key, horizontal=True,
+                    label_visibility="collapsed")
+
+
 def asset_name_map() -> dict:
     """{ticker: naam} voor alle geregistreerde activa."""
     return {a["ticker"]: (a.get("name") or a["ticker"]) for a in db.get_assets()}
@@ -1053,10 +1061,10 @@ def page_assets():
     st.title("🏢 Activa beheren")
 
     CUR = ["EUR", "USD", "GBP", "CHF"]
-    tab_add, tab_list, tab_splits = st.tabs(
+    _asec = _section_radio("assets_section",
         ["➕ Activum toevoegen", "📋 Overzicht", "🔀 Splitsingen"])
 
-    with tab_add:
+    if _asec == "➕ Activum toevoegen":
         n = st.session_state.get("as_nonce", 0)
         def k(name): return f"as_{name}_{n}"
 
@@ -1071,11 +1079,25 @@ def page_assets():
                 else:
                     with st.spinner("Info ophalen via Yahoo Finance..."):
                         info = md.get_stock_info(ticker.strip().upper())
-                    if not info.get("found"):
+                    _tk = ticker.strip().upper()
+                    if not info.get("found") and md._isin_valid(_tk):
+                        # Geen Yahoo-notering, maar het is een geldige ISIN (bv. een warrant).
+                        # Vul ISIN + land in en probeer de munt/koers via externe bronnen.
+                        with st.spinner("ISIN testen op externe bronnen..."):
+                            _p, _c, _src = md.probe_isin(_tk)
+                        st.session_state[k("isin")] = _tk
+                        st.session_state[k("country")] = _tk[:2]
+                        st.session_state[k("cur")] = _c or "EUR"
+                        st.session_state[k("isin_only_src")] = _src or ""
+                        st.session_state[k("fetched")] = True
+                        st.rerun()
+                    elif not info.get("found"):
                         st.error(
-                            f"❌ Yahoo Finance vond geen gegevens voor '{ticker.strip().upper()}'. "
+                            f"❌ Yahoo Finance vond geen gegevens voor '{_tk}'. "
                             "Controleer de ticker — Europese beurzen vereisen een suffix "
-                            "(bv. .PA Parijs, .AS Amsterdam, .BR Brussel, .DE Xetra, .MI Milaan, .L Londen).")
+                            "(bv. .PA Parijs, .AS Amsterdam, .BR Brussel, .DE Xetra, .MI Milaan, .L Londen). "
+                            "Heeft dit effect geen ticker maar wél een ISIN (bv. een warrant)? "
+                            "Vul dan de ISIN in het Ticker-veld in.")
                     else:
                         st.session_state[k("name")] = info.get("name", "") or ""
                         st.session_state[k("cur")]  = info.get("currency", "EUR") or "EUR"
@@ -1163,7 +1185,19 @@ def page_assets():
             st.caption(f"≈ €{_snap_eur_prev:,.4f}/stuk (koers 31/12/2025: {_fxs:.4f})")
 
         if st.session_state.get(k("fetched")):
-            st.success("✨ Velden ingevuld via Yahoo Finance — controleer en pas aan waar nodig, en klik daarna op Toevoegen.")
+            _src = st.session_state.get(k("isin_only_src"))
+            if _src is not None:
+                # ISIN-only activum (geen Yahoo-notering, bv. een warrant)
+                if _src:
+                    st.success(f"✅ ISIN herkend — automatische koers beschikbaar via **{_src}**. "
+                               "Vul enkel nog een **naam** in (en controleer munt/land) en klik op Toevoegen.")
+                else:
+                    st.info("ℹ️ Deze ISIN staat niet op Yahoo en er werd (nog) geen externe koers gevonden. "
+                            "Vul een **naam** in en klik op Toevoegen — de app blijft koersen proberen via de "
+                            "ISIN (Tradegate, Börse Frankfurt). Lukt dat niet, zet dan een **handmatige koers** "
+                            "in het overzicht als laatste redmiddel.")
+            else:
+                st.success("✨ Velden ingevuld via Yahoo Finance — controleer en pas aan waar nodig, en klik daarna op Toevoegen.")
 
         if st.button("✅ Activum toevoegen", type="primary", key=k("save")):
             if not ticker.strip():
@@ -1183,7 +1217,7 @@ def page_assets():
                 st.success(f"✅ {t} — {name.strip()} toegevoegd!")
                 st.rerun()
 
-    with tab_list:
+    if _asec == "📋 Overzicht":
         st.session_state.pop("edit_asset", None)  # inline bewerken vervangt het oude formulier
 
         assets = db.get_assets()
@@ -1377,7 +1411,7 @@ def page_assets():
             extra_warning="⚠️ Dit wist óók ALLE transacties, dividenden en splitsingen van de "
                           "geselecteerde activa.")
 
-    with tab_splits:
+    if _asec == "🔀 Splitsingen":
         st.subheader("🔀 Aandelensplitsingen")
         st.caption("Registreer een splitsing (bv. NVIDIA 1 → 10) of een omgekeerde splitsing "
                    "(bv. 10 → 1). Transacties van vóór de splitsdatum worden automatisch omgerekend "
@@ -1444,12 +1478,12 @@ def page_transactions():
     names         = {a["ticker"]: (a.get("name") or a["ticker"]) for a in assets}
     fmt           = lambda t: asset_label(t, names)
 
-    tab_add, tab_view, tab_costs = st.tabs(
+    _tsec = _section_radio("txn_section",
         ["📝 Nieuwe transactie", "📋 Overzicht", "🏦 Rekeningkosten"])
 
     CUR = ["EUR", "USD", "GBP", "CHF"]
 
-    with tab_add:
+    if _tsec == "📝 Nieuwe transactie":
         # Bevestiging tonen na een geslaagde toevoeging (na reset/rerun)
         if st.session_state.get("txn_added_msg"):
             st.success(st.session_state.pop("txn_added_msg"))
@@ -1533,27 +1567,38 @@ def page_transactions():
         income_tax_eur = 0.0
         if txn_type == "buy":
             is_perf = st.checkbox(
-                "🎁 Toegekend als loon (warrants, RSU, gratis/bonus aandelen)", key=kk("perf"),
-                help="Effecten die je kreeg i.p.v. kocht (warrants, performance shares/RSU, gratis "
-                     "aandelen uit een werknemersplan). Voer het aantal en de waarde per stuk op de "
-                     "toekenningsdatum in — die basiswaarde wordt je kostbasis voor de meerwaarde "
-                     "(je betaalde er al bedrijfsvoorheffing/personenbelasting op). Geen TOB, geen cash. "
-                     "Voor écht gratis aandelen zonder belasting: laat het belastingveld op 0.")
+                "🎁 Toegekend als loon of gratis gekregen (warrants, RSU, gratis/bonus aandelen)", key=kk("perf"),
+                help="Effecten die je kreeg i.p.v. kocht (warrants, performance shares/RSU, gratis of "
+                     "bonusaandelen uit een werknemersplan). Voer het aantal en de waarde per stuk op de "
+                     "toekenningsdatum in — die basiswaarde wordt je kostbasis voor de meerwaarde. Geen "
+                     "TOB, geen cash. Voor een écht gratis aandeel zonder belasting: vink hieronder "
+                     "'Écht gratis' aan; de waarde per stuk mag dan 0 zijn.")
             if is_perf:
                 _, _vest_eur = compute_eur(total_amount, currency, txn_date)
-                pb_pct = st.number_input(
-                    "Personenbelasting bij toekenning (%)", min_value=0.0, max_value=100.0,
-                    value=53.5, step=0.5, key=kk("perf_pct"),
-                    help="Marginaal tarief waartegen de toekenning als beroepsinkomen belast werd "
-                         "(vaak ± 53,5%). Dit bedrag wordt apart bijgehouden als personenbelasting.")
-                income_tax_eur = round(_vest_eur * pb_pct / 100, 2)
-                if st.checkbox("Bedrag personenbelasting manueel ingeven", key=kk("perf_man")):
-                    income_tax_eur = st.number_input(
-                        "Personenbelasting (€)", min_value=0.0, value=income_tax_eur,
-                        step=0.01, format="%.2f", key=kk("perf_taxval"))
-                st.caption(f"📌 Kostbasis ≈ **€{_vest_eur:,.2f}** | personenbelasting "
-                           f"**€{income_tax_eur:,.2f}** (apart bijgehouden, toggle op dashboard). "
-                           "Geen TOB, geen cash-uitgave.")
+                tax_free = st.checkbox(
+                    "🆓 Écht gratis aandeel — geen personenbelasting", key=kk("perf_free"),
+                    help="Vink aan voor gratis/bonusaandelen waarop je géén personenbelasting betaalt. "
+                         "De prijs/waarde per stuk mag dan 0 zijn en er wordt geen personenbelasting "
+                         "bijgehouden. De kostbasis voor een latere meerwaarde is gelijk aan de opgegeven "
+                         "waarde (€0 bij een volledig gratis aandeel).")
+                if tax_free:
+                    income_tax_eur = 0.0
+                    st.caption(f"📌 Gratis aandeel — kostbasis ≈ **€{_vest_eur:,.2f}**, "
+                               "**geen personenbelasting**, geen TOB, geen cash-uitgave.")
+                else:
+                    pb_pct = st.number_input(
+                        "Personenbelasting bij toekenning (%)", min_value=0.0, max_value=100.0,
+                        value=53.5, step=0.5, key=kk("perf_pct"),
+                        help="Marginaal tarief waartegen de toekenning als beroepsinkomen belast werd "
+                             "(vaak ± 53,5%). Dit bedrag wordt apart bijgehouden als personenbelasting.")
+                    income_tax_eur = round(_vest_eur * pb_pct / 100, 2)
+                    if st.checkbox("Bedrag personenbelasting manueel ingeven", key=kk("perf_man")):
+                        income_tax_eur = st.number_input(
+                            "Personenbelasting (€)", min_value=0.0, value=income_tax_eur,
+                            step=0.01, format="%.2f", key=kk("perf_taxval"))
+                    st.caption(f"📌 Kostbasis ≈ **€{_vest_eur:,.2f}** | personenbelasting "
+                               f"**€{income_tax_eur:,.2f}** (apart bijgehouden, toggle op dashboard). "
+                               "Geen TOB, geen cash-uitgave.")
 
         asset_info = assets_map.get(ticker, {})
         _fx_prev, _eur_prev = compute_eur(total_amount, currency, txn_date)
@@ -1575,9 +1620,13 @@ def page_transactions():
         notes = st.text_area("Notities (optioneel)", height=60, key=kk("notes"))
 
         if st.button("✅ Transactie toevoegen", type="primary", key=kk("submit")):
-            if not quantity or not price_unit or quantity <= 0 or price_unit <= 0:
-                st.error("Vul een geldig aantal en prijs in (beide groter dan 0).")
+            if not quantity or quantity <= 0:
+                st.error("Vul een geldig aantal in (groter dan 0).")
+            elif not is_perf and (not price_unit or price_unit <= 0):
+                st.error("Vul een geldige prijs per stuk in (groter dan 0). "
+                         "Een gratis aandeel voer je in met '🎁 Toegekend als loon of gratis gekregen'.")
             else:
+                price_unit = price_unit or 0.0
                 fx_rate, tot_eur = compute_eur(total_amount, currency, txn_date)
                 _, costs_eur = compute_eur(costs, costs_currency, txn_date)
                 proceed = True
@@ -1608,7 +1657,7 @@ def page_transactions():
                         f"{quantity:.4f} × {fmt(ticker)} op {account} toegevoegd! Het formulier is leeggemaakt.")
                     st.rerun()
 
-    with tab_view:
+    if _tsec == "📋 Overzicht":
         st.session_state.pop("edit_txn", None)  # inline bewerken vervangt het oude formulier
 
 
@@ -1749,7 +1798,7 @@ def page_transactions():
         multiselect_delete("confirm_del_txn", tdel_opts,
                            lambda i: db.delete_transaction(i), noun="transactie")
 
-    with tab_costs:
+    if _tsec == "🏦 Rekeningkosten":
         st.subheader("🏦 Algemene rekeningkosten")
         st.caption("Kosten die niet aan een specifiek aandeel hangen (bv. beheerskosten, bewaarloon). "
                    "Ze drukken het totale rendement van de rekening, maar niet de individuele posities of de meerwaardeberekening.")
@@ -2551,12 +2600,12 @@ def page_ai_advisor():
         _pl = "bedragen verborgen (percentages)" if _plvl == "amounts" else "volledig anoniem (ook tickers)"
         st.caption(f"🔒 Privacymodus actief: **{_pl}**. Pas aan via ⚙️ Instellingen → AI.")
 
-    tab_tax, tab_daily = st.tabs([
+    _aisec = _section_radio("ai_section", [
         "💡 Belastingoptimalisatie (maandelijks)",
         "🤖 Dagelijks portefeuilleadvies",
     ])
 
-    with tab_tax:
+    if _aisec == "💡 Belastingoptimalisatie (maandelijks)":
         st.subheader("💡 Belastingoptimalisatieadvies")
         st.caption("Automatisch gegenereerd op de 1e van de maand om 08:00. Gebaseerd op je actuele "
                    "portefeuille en de Belgische fiscale regels.")
@@ -2580,7 +2629,7 @@ def page_ai_advisor():
                     st.markdown(ev["content"])
                     st.divider()
 
-    with tab_daily:
+    if _aisec == "🤖 Dagelijks portefeuilleadvies":
         st.subheader("🤖 Dagelijks portefeuilleadvies")
         st.caption("Eén advies per werkdag (18:00) voor de hele portefeuille. Levert zowel dit "
                    "tekstadvies als de koop/houden/verkoop-ratings die de tabellen op de "
@@ -2618,10 +2667,10 @@ def page_ai_advisor():
 def page_settings():
     st.title("⚙️ Instellingen")
 
-    tab_api, tab_acct, tab_tax, tab_tob, tab_data = st.tabs(
+    _ssec = _section_radio("settings_section",
         ["🔑 API-sleutel", "🏦 Rekeningen", "🧾 Meerwaardebelasting", "🏛️ TOB & bronbelasting", "🗃️ Data"])
 
-    with tab_api:
+    if _ssec == "🔑 API-sleutel":
         st.subheader("OpenAI API & AI-instellingen")
         current = db.get_setting("openai_api_key", "")
         new_key = st.text_input("API-sleutel", value=current, type="password",
@@ -2690,7 +2739,7 @@ def page_settings():
         else:
             st.warning("⚠️ Geen API-sleutel — AI-functies niet beschikbaar.")
 
-    with tab_acct:
+    if _ssec == "🏦 Rekeningen":
         st.subheader("Rekeningen / oorsprong")
         st.caption("Definieer je rekeningen (bv. Bolero, Degiro, Saxo). Je kiest er één bij elke transactie en kunt erop filteren in het Dashboard, de Portefeuille en de Evolutie-pagina.")
         current = [a for a in db.get_accounts() if a != db.DEFAULT_ACCOUNT]
@@ -2723,7 +2772,7 @@ def page_settings():
                 db.set_account_profile(acct, sel)
                 st.toast(f"Profiel '{acct}' bijgewerkt", icon="✅")
 
-    with tab_tax:
+    if _ssec == "🧾 Meerwaardebelasting":
         st.subheader("Meerwaardebelasting (opt-out stelsel)")
         rate  = st.number_input("Belastingtarief (%)",
                                 min_value=0.0, max_value=100.0,
@@ -2782,7 +2831,7 @@ def page_settings():
             clear_cache()
             st.success("✅ Dividendvrijstelling opgeslagen!")
 
-    with tab_tob:
+    if _ssec == "🏛️ TOB & bronbelasting":
         st.subheader("Taks op Beursverrichtingen (TOB)")
         c1, c2 = st.columns(2)
         with c1:
@@ -2848,7 +2897,7 @@ def page_settings():
             except Exception as exc:
                 st.error(f"Kon de tarieven niet opslaan: {exc}")
 
-    with tab_data:
+    if _ssec == "🗃️ Data":
         st.subheader("Databeheer")
         assets = db.get_assets()
         txns   = db.get_transactions()
@@ -3079,9 +3128,9 @@ def page_cash():
                "+ verkopen − aankopen + dividenden − rekeningkosten. Toekenningen (performance shares) "
                "kosten geen brokergeld en tellen hier voor €0.")
 
-    tab_pos, tab_add, tab_log = st.tabs(["📊 Posities", "➕ Storting / opname", "📜 Bewegingen"])
+    _csec = _section_radio("cash_section", ["📊 Posities", "➕ Storting / opname", "📜 Bewegingen"])
 
-    with tab_pos:
+    if _csec == "📊 Posities":
         pos = db.compute_cash_positions()
         per, tot = pos["per_account"], pos["totals"]
         c1, c2, c3 = st.columns(3)
@@ -3110,7 +3159,7 @@ def page_cash():
                        "registreer dan je ontbrekende stortingen. Betaalde je de personenbelasting op "
                        "performance shares vanaf je beleggingsrekening, boek die dan als een opname.")
 
-    with tab_add:
+    if _csec == "➕ Storting / opname":
         accts = db.get_accounts()
         if not accts:
             st.warning("Maak eerst een rekening aan via ⚙️ Instellingen.")
@@ -3142,7 +3191,7 @@ def page_cash():
                 "die worden automatisch uit je transacties, dividenden en kosten afgeleid. Registreer hier "
                 "enkel echte geldstortingen en -opnames.")
 
-    with tab_log:
+    if _csec == "📜 Bewegingen":
         laccts = db.get_accounts()
         lsel = st.multiselect("Rekeningen", laccts, default=[], key="cash_log_acct",
                               placeholder="Alle rekeningen")
