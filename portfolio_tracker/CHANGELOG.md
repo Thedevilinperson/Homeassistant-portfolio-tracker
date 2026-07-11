@@ -2,6 +2,40 @@
 
 Alle noemenswaardige wijzigingen aan de Portfolio Tracker add-on.
 
+## 0.29.2
+0.29.2
+- Analyse van de aangeleverde log: het antwoord op "welke ticker faalt consequent" is zo goed als
+zeker NL0015002RI2 (de ING-warrant). Ze faalt op alle vier externe bronnen (onvista, Börse
+Frankfurt, Tradegate, Lang & Schwarz) én kan niet terugvallen op 'ticker rechtstreeks op Yahoo',
+omdat de ticker zelf de ISIN is (dat pad wordt bewust overgeslagen om de 'Invalid ISIN
+number'-exception te vermijden). FR0013215407 faalt weliswaar ook op alle vier externe bronnen,
+maar hoort bij een ticker mét een apart Yahoo-symbool (vermoedelijk ALMEX.PA) dat meestal wél
+rechtstreeks lukt — vandaar dat de teller steevast op 36/37 blijft steken. Vanaf deze versie
+bevestigt de log dit voortaan expliciet i.p.v. dat je het moet afleiden (zie hieronder).
+- Scheduler noemt voortaan de falende ticker(s) met naam. "✅ 36/37 koersen opgeslagen" werd niet
+aangevuld met wélke ticker de ontbrekende was. Een nieuwe regel "⚠️ Geen koers gevonden voor:
+..." somt ze nu expliciet op bij elke koersverversing.
+- Bugfix: 'Invalid ISIN number'-crash in get_price_series (historische reeksen, bv. grafieken).
+Dezelfde yfinance-exception die al in vier andere functies was opgelost, dook hier nog op omdat
+deze functie gemist was. Lost nu ook eerst een Yahoo-symbool op via de ISIN.
+Bugfix: sommige logregels (bv. de 'Invalid ISIN number'- en 'Connection aborted'-meldingen in de
+aangeleverde log) verschenen zonder tijdstip/niveau. Oorzaak: Streamlit draait als apart proces
+van scheduler.py en had nooit een logging-configuratie — die meldingen kwamen dus via Pythons
+kale 'lastResort'-handler binnen. app.py configureert nu dezelfde logging-opmaak als
+scheduler.py, zodat voortaan ELKE regel (of ze nu van een interactieve klik of van de
+achtergrondplanner komt) een tijdstip en niveau toont.
+- Minder onnodige netwerkcalls en logspam: een ticker waarvoor zonet nog alle online bronnen
+faalden, wordt de eerstvolgende 30 minuten niet meer opnieuw bij die bronnen geprobeerd (rechtstreeks
+naar de handmatige koers) — dat scheelt 4+ netwerkcalls en flink wat logregels per koersverversing
+(om de 5 min) voor een effect dat toch bij niemand gevonden wordt. Na 30 minuten of bij een
+succesvolle vondst wordt gewoon opnieuw geprobeerd.
+- Börse Frankfurt staat nu laatst in de bronnenketen (na onvista, Tradegate, Lang & Schwarz) i.p.v.
+op de tweede plaats. Ondanks dynamische salt en Chrome-TLS-imitatie blijft hun API op de meeste
+aanvragen 403 geven — vermoedelijk bot-detectie die verder gaat dan headers/salt/TLS (bv.
+cookiescope tussen hun www- en api-subdomein), wat realistisch enkel een echte browser omzeilt.
+Zij blijft als laatste kans meedraaien, maar kost niet langer de eerste (en traagste) poging voor
+activa die toch al bij de andere drie bronnen zouden falen.
+
 ## 0.29.1
 - Naam wordt nu ook gevonden via het Yahoo-zoekresultaat. Yahoo's zoekendpoint geeft voor veel
 ISIN's al een naam terug (longname/shortname), zelfs als er geen live koers beschikbaar is —

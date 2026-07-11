@@ -736,8 +736,12 @@ def _onvista_close_on_date(isin: str, on_date: str) -> float | None:
 # Externe ISIN-bronnen, in volgorde geprobeerd na Yahoo. Uitbreidbaar met extra
 # bronnen door een functie (isin)->(prijs,munt) toe te voegen aan deze lijst.
 # onvista eerst: open API zonder salt/TLS-verdediging die ook derivaten dekt.
-# Daarna Börse Frankfurt (intraday bied/laat), Tradegate en Lang & Schwarz.
-_ISIN_PROVIDERS = [_price_onvista, _price_boerse_frankfurt, _price_tradegate, _price_lang_schwarz]
+# Börse Frankfurt staat nu LAATST: hun WAF blijft ondanks dynamische salt en
+# Chrome-TLS-imitatie regelmatig 403 geven, en elke poging kost door de
+# salt-/cookie-/retry-afhandeling merkbaar meer tijd dan de andere drie bronnen.
+# Zo kosten activa die toch al bij geen enkele bron gevonden worden (bv. heel
+# illiquide warrants) niet nodeloos de traagste, minst betrouwbare poging eerst.
+_ISIN_PROVIDERS = [_price_onvista, _price_tradegate, _price_lang_schwarz, _price_boerse_frankfurt]
 
 
 def probe_isin_meta(isin: str) -> dict:
@@ -842,15 +846,27 @@ def _yf_symbol(ticker: str) -> str | None:
     return ticker
 
 
+_FAIL_CACHE: dict[str, float] = {}   # ticker -> epoch van laatste volledige mislukking
+FAIL_CACHE_TTL = 1800  # 30 min — genoeg om herhaling elke 5 min te vermijden,
+                       # kort genoeg om een terugkerende bron snel op te pikken
+
+
 def get_current_price(ticker: str) -> tuple[float | None, str | None]:
     """Actuele koers + munt. De ISIN is de bron van waarheid voor koersopzoeking
     (uniek en ondubbelzinnig, i.t.t. een Yahoo-ticker met beurssuffix). Volgorde:
     1) ISIN → (gecachet) Yahoo-symbool, 2) ISIN → externe niet-Yahoo-bronnen,
     3) de opgeslagen ticker rechtstreeks op Yahoo (enkel als er géén ISIN is, of de
-    ISIN niets oplevert), 4) handmatige koers als allerlaatste redmiddel."""
+    ISIN niets oplevert), 4) handmatige koers als allerlaatste redmiddel.
+
+    Faalden zonet nog ALLE online bronnen voor dit ticker, dan worden ze de
+    eerstvolgende 30 minuten overgeslagen (rechtstreeks naar de handmatige koers) —
+    dat scheelt 4+ netwerkcalls en flink wat logregels bij elke koersverversing
+    (om de 5 min) voor een effect dat toch bij geen enkele bron gevonden wordt."""
     cached_price, cached_cur = _cached(ticker)
     if cached_price is not None:
         return cached_price, cached_cur
+
+    recently_failed = (time.time() - _FAIL_CACHE.get(ticker, 0)) < FAIL_CACHE_TTL
 
     isin = _asset_isin(ticker)
     ticker_is_isin = _isin_valid(ticker.strip().upper())
@@ -859,35 +875,38 @@ def get_current_price(ticker: str) -> tuple[float | None, str | None]:
 
     price, currency = None, None
 
-    # 1) ISIN → Yahoo-symbool (eerst het laatst gevonden/gecachete symbool proberen,
-    #    dat is sneller dan een nieuwe zoekopdracht en meestal nog steeds correct)
-    if _isin_valid(isin):
-        cached_sym = _resolved_symbol(ticker)
-        for sym in ([cached_sym] if cached_sym else []) + [None]:
-            if sym is None:
-                sym = _yahoo_symbol_for_isin(isin)
-            if not sym:
-                continue
-            p, c = _price_from_yahoo_symbol(sym)
-            if p is not None:
-                price, currency = p, c
-                if sym != cached_sym:
-                    _remember_resolved_symbol(ticker, sym)
-                break
+    if not recently_failed:
+        # 1) ISIN → Yahoo-symbool (eerst het laatst gevonden/gecachete symbool
+        #    proberen, dat is sneller dan een nieuwe zoekopdracht en meestal nog
+        #    steeds correct)
+        if _isin_valid(isin):
+            cached_sym = _resolved_symbol(ticker)
+            for sym in ([cached_sym] if cached_sym else []) + [None]:
+                if sym is None:
+                    sym = _yahoo_symbol_for_isin(isin)
+                if not sym:
+                    continue
+                p, c = _price_from_yahoo_symbol(sym)
+                if p is not None:
+                    price, currency = p, c
+                    if sym != cached_sym:
+                        _remember_resolved_symbol(ticker, sym)
+                    break
 
-    # 2) Externe (niet-Yahoo) bronnen op basis van de ISIN
-    if price is None and _isin_valid(isin):
-        for provider in _ISIN_PROVIDERS:
-            p, c = provider(isin)
-            if p is not None:
-                price, currency = p, c
-                break
+        # 2) Externe (niet-Yahoo) bronnen op basis van de ISIN
+        if price is None and _isin_valid(isin):
+            for provider in _ISIN_PROVIDERS:
+                p, c = provider(isin)
+                if p is not None:
+                    price, currency = p, c
+                    break
 
-    # 3) De opgeslagen ticker rechtstreeks op Yahoo — enkel als terugval (geen ISIN,
-    #    of de ISIN leverde niets op). Niet bij een ISIN-als-ticker: yfinance gooit
-    #    dan een exception zodra Yahoo de ISIN niet kent ("Invalid ISIN number").
-    if price is None and not ticker_is_isin:
-        price, currency = _price_from_yahoo_symbol(ticker)
+        # 3) De opgeslagen ticker rechtstreeks op Yahoo — enkel als terugval (geen
+        #    ISIN, of de ISIN leverde niets op). Niet bij een ISIN-als-ticker:
+        #    yfinance gooit dan een exception zodra Yahoo de ISIN niet kent
+        #    ("Invalid ISIN number").
+        if price is None and not ticker_is_isin:
+            price, currency = _price_from_yahoo_symbol(ticker)
 
     # 4) Handmatige koers — laatste redmiddel
     if price is None:
@@ -895,6 +914,7 @@ def get_current_price(ticker: str) -> tuple[float | None, str | None]:
             import database as _db
             mp = _db.get_manual_price(ticker)
             if mp:
+                _FAIL_CACHE.pop(ticker, None)
                 return mp["price"], mp["currency"]
         except Exception:
             pass
@@ -903,7 +923,10 @@ def get_current_price(ticker: str) -> tuple[float | None, str | None]:
         price = float(price)
         currency = currency or "EUR"
         _store(ticker, price, currency)
+        _FAIL_CACHE.pop(ticker, None)
         return price, currency
+    if not recently_failed:
+        _FAIL_CACHE[ticker] = time.time()
     return None, None
 
 
@@ -1057,15 +1080,24 @@ def get_historical_exchange_rate(from_currency: str, on_date: str,
 def get_price_series(ticker: str, start: str, end: str | None = None):
     """
     Dagelijkse slotkoersen (native valuta) als pandas Series, geïndexeerd op datum.
-    Cache: 1 uur. Geeft None bij fout.
+    Cache: 1 uur. Geeft None bij fout. Is het ticker een ISIN zonder Yahoo-notering
+    (bv. een warrant), dan wordt eerst een Yahoo-symbool opgezocht — geen rauwe ISIN
+    naar yfinance (dat gooit een 'Invalid ISIN number'-exception).
     """
     key = f"series:{ticker}:{start}:{end}"
     entry = _HIST_CACHE.get(key)
     if entry and (time.time() - entry[0]) < HIST_TTL:
         return entry[1]
+    cand = (ticker or "").strip().upper()
+    yf_ticker = ticker
+    if _isin_valid(cand):
+        sym = _yahoo_symbol_for_isin(cand)
+        if not sym:
+            return None  # geen Yahoo-notering voor deze ISIN; geen historische reeks beschikbaar
+        yf_ticker = sym
     try:
         end = end or (datetime.now() + timedelta(days=1)).strftime("%Y-%m-%d")
-        hist = yf.Ticker(ticker).history(start=start, end=end, auto_adjust=True)
+        hist = yf.Ticker(yf_ticker).history(start=start, end=end, auto_adjust=True)
         if hist.empty:
             return None
         series = hist["Close"].copy()

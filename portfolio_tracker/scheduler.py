@@ -56,12 +56,18 @@ def job_track_prices():
     tickers = [a["ticker"] for a in assets]
     logger.info(f"📈 Koersen ophalen voor {len(tickers)} ticker(s)...")
     prices = md.get_prices_for_tickers(tickers)
-    saved = 0
+    saved, failed = 0, []
     for ticker, info in prices.items():
         if info["price"] is not None:
             db.save_price(ticker, info["price"], info.get("currency", "EUR"))
             saved += 1
+        else:
+            failed.append(ticker)
     logger.info(f"✅ {saved}/{len(tickers)} koersen opgeslagen")
+    if failed:
+        logger.warning(f"⚠️ Geen koers gevonden voor: {', '.join(failed)} "
+                       "(alle bronnen faalden — zie eventuele voorgaande regels voor detail "
+                       "per bron, of zet een handmatige koers in het activaoverzicht).")
     db.cleanup_old_prices(keep_days=90)
 
 

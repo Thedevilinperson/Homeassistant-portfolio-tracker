@@ -5,6 +5,8 @@ Belgische beleggingsportefeuille met belastingtracking en AI-advies.
 from __future__ import annotations
 
 import json
+import logging
+import sys
 from datetime import date, datetime
 
 import pandas as pd
@@ -17,6 +19,20 @@ import belgian_tax as tax_mod
 import bulk_import as bulk
 import database as db
 import market_data as md
+
+# ── Logging ───────────────────────────────────────────────────────────────────
+# Streamlit draait als een apart proces van scheduler.py en configureerde tot nu
+# toe geen logging: warnings/info van market_data/database (bv. bij 'Info ophalen'
+# of 'Ophalen 31/12/2025') kwamen daardoor ongeformatteerd (geen tijdstip/niveau)
+# in de add-on-log terecht via Pythons kale 'lastResort'-handler. Consistent met
+# scheduler.py, zodat alle logregels — ongeacht welk proces ze produceert — een
+# tijdstip en niveau tonen. basicConfig() is een no-op als er al handlers actief
+# zijn, dus dit is veilig om bij elke Streamlit-rerun opnieuw aan te roepen.
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
+    handlers=[logging.StreamHandler(sys.stdout)],
+)
 
 # ── Pagina-configuratie ───────────────────────────────────────────────────────
 
