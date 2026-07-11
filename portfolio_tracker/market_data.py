@@ -171,6 +171,33 @@ def _price_from_yahoo_symbol(symbol: str) -> tuple[float | None, str | None]:
 
 
 _ISIN_SYMBOL_CACHE: dict[str, str] = {}
+_ISIN_QUOTE_CACHE: dict[str, dict] = {}
+
+
+def _yahoo_isin_quote(isin: str) -> dict:
+    """Volledige Yahoo-zoekresultaat voor een ISIN (symbol, shortname/longname, ...),
+    of {}. Wordt gecachet zodat _yahoo_symbol_for_isin en de naamopzoeking in
+    probe_isin_meta dezelfde ene netwerkcall hergebruiken — Yahoo's zoekresultaat
+    bevat vaak al een naam, ook voor effecten zonder live Yahoo-koers."""
+    if not _isin_valid(isin):
+        return {}
+    if isin in _ISIN_QUOTE_CACHE:
+        return _ISIN_QUOTE_CACHE[isin]
+    quote = {}
+    try:
+        import requests
+        resp = requests.get(
+            "https://query2.finance.yahoo.com/v1/finance/search",
+            params={"q": isin, "quotesCount": 6, "newsCount": 0},
+            headers={"User-Agent": "Mozilla/5.0"}, timeout=6)
+        if resp.ok:
+            quotes = resp.json().get("quotes", [])
+            if quotes:
+                quote = quotes[0]
+    except Exception as e:
+        logger.warning(f"_yahoo_isin_quote({isin}): {e}")
+    _ISIN_QUOTE_CACHE[isin] = quote
+    return quote
 
 
 def _yahoo_symbol_for_isin(isin: str) -> str | None:
@@ -179,22 +206,9 @@ def _yahoo_symbol_for_isin(isin: str) -> str | None:
         return None
     if isin in _ISIN_SYMBOL_CACHE:
         return _ISIN_SYMBOL_CACHE[isin] or None
-    try:
-        import requests
-        resp = requests.get(
-            "https://query2.finance.yahoo.com/v1/finance/search",
-            params={"q": isin, "quotesCount": 6, "newsCount": 0},
-            headers={"User-Agent": "Mozilla/5.0"}, timeout=6)
-        if resp.ok:
-            for q in resp.json().get("quotes", []):
-                sym = q.get("symbol")
-                if sym:
-                    _ISIN_SYMBOL_CACHE[isin] = sym
-                    return sym
-    except Exception as e:
-        logger.warning(f"_yahoo_symbol_for_isin({isin}): {e}")
-    _ISIN_SYMBOL_CACHE[isin] = ""
-    return None
+    sym = _yahoo_isin_quote(isin).get("symbol") or ""
+    _ISIN_SYMBOL_CACHE[isin] = sym
+    return sym or None
 
 
 def _price_tradegate(isin: str) -> tuple[float | None, str | None]:
@@ -728,11 +742,19 @@ _ISIN_PROVIDERS = [_price_onvista, _price_boerse_frankfurt, _price_tradegate, _p
 
 def probe_isin_meta(isin: str) -> dict:
     """Zoek naam/type/beurs voor een ISIN die niet op Yahoo staat, zodat het
-    activaformulier ook 'Naam' en 'Beurs' kan voorinvullen. Probeert eerst
-    onvista (geeft naam + type terug), anders de instrument_information van
-    Börse Frankfurt. Geeft {} terug als niets gevonden wordt."""
+    activaformulier ook 'Naam' en 'Beurs' kan voorinvullen. Probeert eerst het
+    Yahoo-zoekresultaat (dat vaak al een naam bevat, ook zonder live Yahoo-koers —
+    en die zoekopdracht gebeurt toch al elders in de flow, dus dit kost geen extra
+    netwerkcall), dan onvista (geeft ook type terug), dan de instrument_information
+    van Börse Frankfurt. Geeft {} terug als niets gevonden wordt."""
     if not _isin_valid(isin):
         return {}
+    yq = _yahoo_isin_quote(isin)
+    yname = yq.get("longname") or yq.get("shortname")
+    ytype_map = {"EQUITY": "stock", "ETF": "etf", "MUTUALFUND": "etf", "BOND": "bond"}
+    if yname:
+        return {"name": yname, "type": ytype_map.get((yq.get("quoteType") or "").upper(), "stock"),
+               "exchange": yq.get("exchDisp") or ""}
     it = _onvista_search(isin)
     if it:
         etype = (it.get("entityType") or "").upper()
@@ -931,9 +953,14 @@ def get_close_on_date(ticker: str, on_date: str) -> float | None:
     """Slotkoers (native valuta) op of vlak vóór 'YYYY-MM-DD'. Voor het fotomoment
     (31/12/2025). auto_adjust=False zodat de koers de werkelijke slotkoers van die
     dag is (zonder latere split-/dividendcorrectie). Is het ticker een ISIN zonder
-    Yahoo-notering (bv. een warrant), dan wordt eerst een Yahoo-symbool opgezocht
-    en anders teruggevallen op onvista/Tradegate — geen rauwe ISIN naar yfinance
-    (dat gooit een 'Invalid ISIN number'-exception)."""
+    Yahoo-notering (bv. een warrant), dan wordt eerst een Yahoo-symbool opgezocht,
+    anders teruggevallen op onvista of Börse Frankfurt (beide echte HISTORISCHE
+    koersen) — geen rauwe ISIN naar yfinance (dat gooit een 'Invalid ISIN number'-
+    exception), en bewust GEEN actuele koers als terugval: dat zou een foutieve
+    (want niet-historische) fotomomentwaarde in de belastingberekening kunnen
+    invoeren. Geen resultaat betekent meestal gewoon dat dit effect op 31/12/2025
+    nog niet bestond of niet verhandeld werd (bv. een pas in 2026 uitgegeven
+    warrant) — dan is er sowieso geen fotomomentwaarde nodig."""
     cand = (ticker or "").strip().upper()
     if _isin_valid(cand):
         sym = _yahoo_symbol_for_isin(cand)
@@ -950,8 +977,7 @@ def get_close_on_date(ticker: str, on_date: str) -> float | None:
         price = _onvista_close_on_date(cand, on_date)
         if price is not None:
             return price
-        p, _ = _price_tradegate(cand)
-        return p
+        return _bf_close_on_date(cand, on_date)
     try:
         d = datetime.strptime(on_date[:10], "%Y-%m-%d")
         start = (d - timedelta(days=10)).strftime("%Y-%m-%d")
@@ -961,6 +987,30 @@ def get_close_on_date(ticker: str, on_date: str) -> float | None:
             return round(float(hist["Close"].iloc[-1]), 4)
     except Exception as e:
         logger.warning(f"get_close_on_date({ticker},{on_date}): {e}")
+    return None
+
+
+def _bf_close_on_date(isin: str, on_date: str) -> float | None:
+    """Echte historische slotkoers via Börse Frankfurt (price_history), voor het
+    fotomoment. Anders dan _price_boerse_frankfurt (actuele koers) wordt hier
+    specifiek rond on_date gezocht, niet vandaag."""
+    try:
+        d = datetime.strptime(on_date[:10], "%Y-%m-%d")
+    except Exception:
+        return None
+    for mic in _bf_available_mics(isin)[:6]:
+        data = _bf_request("price_history",
+                           {"isin": isin, "mic": mic, "limit": 30, "offset": 0,
+                            "minDate": (d - timedelta(days=10)).strftime("%Y-%m-%d"),
+                            "maxDate": (d + timedelta(days=1)).strftime("%Y-%m-%d"),
+                            "cleanSplit": False, "cleanPayout": False,
+                            "cleanSubscription": False})
+        if isinstance(data, dict) and data.get("data"):
+            rows = sorted(data["data"], key=lambda r: r.get("date") or "", reverse=True)
+            for r in rows:
+                price = _to_float(r.get("close") or r.get("last"))
+                if price:
+                    return round(price, 4)
     return None
 
 

@@ -2,6 +2,30 @@
 
 Alle noemenswaardige wijzigingen aan de Portfolio Tracker add-on.
 
+## 0.29.1
+- Naam wordt nu ook gevonden via het Yahoo-zoekresultaat. Yahoo's zoekendpoint geeft voor veel
+ISIN's al een naam terug (longname/shortname), zelfs als er geen live koers beschikbaar is —
+en die zoekopdracht gebeurde toch al bij het ophalen van het Yahoo-symbool, dus dit kost geen
+extra netwerkcall. probe_isin_meta probeert dit nu eerst, dan onvista, dan Börse Frankfurt.
+- Fotomomentwaarde (31/12/2025) van warrants/certificaten: de foutmelding legt nu uit dat "geen
+slotkoers gevonden" meestal betekent dat het effect toen nog niet bestond of niet verhandeld werd
+(bv. een pas in 2026 uitgegeven warrant) — en dat dat geen probleem is: het fotomoment geldt enkel
+voor posities die je al vóór 2026 bezat. Voor een in 2026 gekocht effect mag het veld gewoon leeg
+blijven; de meerwaardebelasting gebruikt dan gewoon de werkelijke aankoopprijs.
+- Bugfix: de fotomomentwaarde kon stilzwijgend de ACTUELE koers gebruiken i.p.v. de historische
+slotkoers van 31/12/2025, via een terugval op de live Tradegate-koers. Voor een tax-gevoelig veld
+is een foutieve waarde erger dan geen waarde. Die terugval is vervangen door een echte historische
+opzoeking via Börse Frankfurt (price_history rond de gevraagde datum); lukt ook dat niet, dan
+geeft de functie nu None (handmatig invullen) i.p.v. een misleidend 'actueel' cijfer.
+- Diagnose Börse Frankfurt: de Chrome-TLS-imitatie (0.27.8) en de dynamische salt (0.27.6) werken nu
+aantoonbaar (logs tonen 'curl_cffi met Chrome-imitatie actief' en 'salt: dynamisch opgehaald'),
+maar de API blijft op sommige aanvragen alsnog 403 geven. Dat wijst op bot-detectie die verder
+gaat dan headers/salt/TLS-vingerafdruk (bv. sessie-/cookiescope tussen www. en api.-subdomeinen,
+of gedragsdetectie) — iets wat enkel een echte browser (headless Chrome) betrouwbaar omzeilt, geen
+scriptmatige HTTP-client. Voor de naam/type-opzoeking staat Börse Frankfurt daarom nu na Yahoo en
+onvista in de rij (die twee zijn intussen betrouwbaarder gebleken); voor de koers zelf blijft de
+volledige keten (onvista → Börse Frankfurt → Tradegate → Lang & Schwarz) actief.
+
 ## 0.29.0
 - Bugfix: historische wisselkoers kon licht variëren tussen de TOB-preview en het effectief
 opslaan van een transactie (twee aparte, ongecachete netwerkcalls voor dezelfde munt/datum; bij

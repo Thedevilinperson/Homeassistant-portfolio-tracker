@@ -1223,7 +1223,13 @@ def page_assets():
                     with st.spinner("Slotkoers 31/12/2025 ophalen..."):
                         p = md.get_close_on_date(ticker.strip().upper(), tax_mod.SNAPSHOT_DATE)
                     if p is None:
-                        st.error("Geen slotkoers gevonden voor 31/12/2025 — vul ze handmatig in.")
+                        st.error(
+                            "Geen slotkoers gevonden voor 31/12/2025. Kocht je dit activum pas "
+                            "**vanaf 2026**? Dan heb je geen fotomomentwaarde nodig — laat het "
+                            "veld gewoon leeg (zie tip hierboven). Effecten die pas in 2026 "
+                            "uitgegeven of verhandeld werden (zoals sommige warrants/certificaten) "
+                            "hadden op 31/12/2025 uiteraard nog geen koers. Bezat je dit al vóór "
+                            "2026, vul de koers dan handmatig in.")
                     else:
                         st.session_state[k("snap_stage")] = float(p)
                         st.session_state["as_snap_nonce"] = snn + 1
