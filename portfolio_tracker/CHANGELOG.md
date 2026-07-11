@@ -2,6 +2,18 @@
 
 Alle noemenswaardige wijzigingen aan de Portfolio Tracker add-on.
 
+## 0.27.6
+- Salt-detectie Börse Frankfurt generiek gemaakt. De log van 0.27.5 toonde de exacte oorzaak: de
+homepage werd wel opgehaald, maar de detectie vond er 'geen main-bundle' in — de site gebruikt
+intussen een ander bundelformaat, waardoor stil op de verouderde 2022-salt werd teruggevallen en
+de API alles met 403 weigerde. De extractie is nu formaat-onafhankelijk: de salt wordt eerst in de
+homepage-HTML zelf gezocht (inline config), daarna in álle script- en preload-bundles (src én
+href, dubbele én enkele quotes, main-achtige namen eerst, max 6 downloads). Getest op vijf
+lay-outs: klassiek Angular (main.HASH.js), nieuwe Angular (main-HASH.js), Vite (index-HASH.js),
+modulepreload-chunks en inline-HTML-salt. Faalt alles, dan logt de melding voortaan wélke bundles
+gevonden werden of het begin van de pagina — zo is een WAF-blokkadepagina meteen herkenbaar in de
+add-on-log.
+
 ## 0.27.5
 - Börse Frankfurt HTTP 403 aangepakt. De 403's uit de log hadden twee waarschijnlijke oorzaken, die
 beide zijn opgelost:

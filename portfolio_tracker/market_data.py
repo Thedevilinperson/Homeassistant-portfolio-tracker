@@ -259,15 +259,18 @@ def _bf_session():
 
 
 def _bf_salt(force: bool = False) -> str:
-    """Haal de (wisselende) salt van boerse-frankfurt.de dynamisch uit de JS-bundle.
-    Ondersteunt zowel oude (main.HASH.js) als nieuwe (main-HASH.js) bundelnamen.
-    ~24u gecachet; bij falen terugval op een bekende salt. Logt altijd de bron,
-    zodat in de add-on-log zichtbaar is of de terugval (mogelijk verouderd) actief is."""
+    """Haal de (wisselende) salt van boerse-frankfurt.de dynamisch op. De salt zit in
+    een JS-bundle waarvan de naam per build/framework verandert (main.HASH.js,
+    main-HASH.js, index-HASH.js, chunks...). Daarom generiek: eerst de homepage-HTML
+    zelf doorzoeken, daarna álle script-/preload-bundles (main-achtige eerst).
+    ~24u gecachet; bij falen terugval op een bekende salt. Logt altijd de bron en bij
+    falen wélke bundles er gevonden werden, zodat de add-on-log de diagnose toont."""
     import time
     now = time.time()
     if not force and _BF_SALT_CACHE["salt"] and (now - _BF_SALT_CACHE["ts"] < 86400):
         return _BF_SALT_CACHE["salt"]
     salt, why = None, ""
+    SALT_RE = r'salt\s*[:=]\s*["\'](\w{8,})["\']'
     try:
         import re
         s = _bf_session()
@@ -275,22 +278,37 @@ def _bf_salt(force: bool = False) -> str:
         if not resp.ok:
             why = f"homepage HTTP {resp.status_code}"
         else:
-            # bundelnamen: main.HASH.js (oud) of main-HASH.js (nieuwe Angular-builds)
-            files = re.findall(r'(?<=src=")[^"]*main[^"]*\.js', resp.text)
-            if not files:
-                why = "geen main-bundle gevonden in homepage"
-            for f in files:
-                url = f if f.startswith("http") else "https://www.boerse-frankfurt.de/" + f.lstrip("/")
-                try:
-                    js = s.get(url, timeout=10).text
-                except Exception:
-                    continue
-                m = re.search(r'salt\s*[:=]\s*"(\w{8,})"', js)
-                if m:
-                    salt = m.group(1)
-                    break
-            if files and not salt:
-                why = "salt niet gevonden in bundle(s)"
+            html = resp.text or ""
+            # 1) Salt soms rechtstreeks in de HTML (inline config)
+            m = re.search(SALT_RE, html)
+            if m:
+                salt = m.group(1)
+            else:
+                # 2) Alle JS-bundles verzamelen: <script src=...>, <link href=...>,
+                #    beide quotestijlen, absolute en relatieve paden.
+                srcs = re.findall(r'(?:src|href)=["\']([^"\']+\.js(?:\?[^"\']*)?)["\']', html)
+                seen, ordered = set(), []
+                for f in srcs:
+                    if f not in seen:
+                        seen.add(f)
+                        ordered.append(f)
+                # main-achtige eerst, dan index/chunk, dan de rest; max 6 downloads
+                ordered.sort(key=lambda f: (0 if "main" in f else (1 if ("index" in f or "chunk" in f) else 2)))
+                if not ordered:
+                    why = f"geen script-bundles in homepage; begin: {html[:120]!r}"
+                for f in ordered[:6]:
+                    url = f if f.startswith("http") else "https://www.boerse-frankfurt.de/" + f.lstrip("/")
+                    try:
+                        js = s.get(url, timeout=10).text
+                    except Exception:
+                        continue
+                    m = re.search(SALT_RE, js)
+                    if m:
+                        salt = m.group(1)
+                        break
+                if ordered and not salt:
+                    names = ", ".join(x.split("/")[-1].split("?")[0] for x in ordered[:4])
+                    why = f"salt niet gevonden in {len(ordered)} bundle(s): {names}"
     except Exception as e:
         why = str(e)
     if salt:
