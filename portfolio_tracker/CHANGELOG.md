@@ -2,6 +2,23 @@
 
 Alle noemenswaardige wijzigingen aan de Portfolio Tracker add-on.
 
+## 0.27.5
+- Börse Frankfurt HTTP 403 aangepakt. De 403's uit de log hadden twee waarschijnlijke oorzaken, die
+beide zijn opgelost:
+  - Cookies ontbraken: alle verkeer loopt nu via één gedeelde sessie die eerst de homepage bezoekt
+(zoals een browser en zoals het werkende bf4py doet), zodat de WAF-cookies meegaan met de
+API-calls. Losse verzoeken zonder cookies worden door hun beveiliging geweigerd. De headers zijn
+ook volwaardig browser-achtig gemaakt (volledige User-Agent, Accept-Language, Sec-Fetch-*).
+  - De salt kon stil verkeerd zijn: de detectie herkende alleen het oude bundelformaat
+(main.HASH.js) en viel bij het nieuwe formaat (main-HASH.js) zonder enige logmelding terug op
+een verouderde salt uit 2022 — met een ongeldige trace-id en dus 403 tot gevolg. De detectie
+ondersteunt nu beide formaten en logt voortaan altijd welke salt-bron actief is
+('dynamisch opgehaald' of 'TERUGVAL-salt gebruikt (reden)').
+  - Extra: bij een 403 wordt eenmalig de salt vers opgehaald en opnieuw geprobeerd (de salt roteert
+af en toe); blijft het 403, dan pauzeert de provider 10 minuten (circuit-breaker) zodat de log
+niet volloopt en verversingen niet vertragen. Bij fouten wordt nu ook een stukje van het
+antwoord gelogd, zodat een WAF-blokkade herkenbaar is.
+
 ## 0.27.4
 - Restpunten uit de logs van de ISIN-flow opgelost (aanvulling op 0.27.3):
   - Geen 'Invalid ISIN number'-exceptions meer. yfinance gooit een exception zodra je een ISIN als

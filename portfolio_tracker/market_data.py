@@ -223,38 +223,84 @@ def _price_tradegate(isin: str) -> tuple[float | None, str | None]:
     return None, None
 
 
-_BF_SALT_CACHE: dict = {"salt": None, "ts": 0.0}
+_BF_SALT_CACHE: dict = {"salt": None, "ts": 0.0, "source": None}
 # Fallback-salt (uit een oudere JS-bundle). Wordt enkel gebruikt als het dynamisch
 # ophalen faalt; de salt kan wijzigen, daarom halen we ze bij voorkeur live op.
 _BF_SALT_FALLBACK = "w4icATTGtnjAZMbkL3kJwxMfEAKDa3MN"
 
+_BF_SESSION = None
+_BF_BLOCK = {"until": 0.0, "last_force": 0.0}
 
-def _bf_salt() -> str:
-    """Haal de (wisselende) salt van boerse-frankfurt.de dynamisch uit de JS-bundle
-    (zelfde aanpak als het bewezen werkende bf4py-pakket), zodat de headers blijven
-    kloppen als Börse Frankfurt de salt wijzigt. ~24u gecachet; met terugval."""
+# Volwaardige browserheaders: de WAF van boerse-frankfurt.de weigert kale clients.
+_BF_BROWSER_HEADERS = {
+    "User-Agent": ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+                   "(KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36"),
+    "Accept-Language": "de-DE,de;q=0.9,en;q=0.8",
+    "Accept-Encoding": "gzip, deflate, br",
+    "Sec-Fetch-Site": "same-site",
+    "Sec-Fetch-Mode": "cors",
+    "Sec-Fetch-Dest": "empty",
+    "Origin":  "https://www.boerse-frankfurt.de",
+    "Referer": "https://www.boerse-frankfurt.de/",
+}
+
+
+def _bf_session():
+    """Eén gedeelde requests.Session voor alle Börse-Frankfurt-verkeer. Belangrijk:
+    de sessie bezoekt eerst de homepage zodat WAF-cookies verzameld worden — losse
+    requests zonder cookies krijgen HTTP 403."""
+    global _BF_SESSION
+    if _BF_SESSION is None:
+        import requests
+        s = requests.Session()
+        s.headers.update(_BF_BROWSER_HEADERS)
+        _BF_SESSION = s
+    return _BF_SESSION
+
+
+def _bf_salt(force: bool = False) -> str:
+    """Haal de (wisselende) salt van boerse-frankfurt.de dynamisch uit de JS-bundle.
+    Ondersteunt zowel oude (main.HASH.js) als nieuwe (main-HASH.js) bundelnamen.
+    ~24u gecachet; bij falen terugval op een bekende salt. Logt altijd de bron,
+    zodat in de add-on-log zichtbaar is of de terugval (mogelijk verouderd) actief is."""
     import time
     now = time.time()
-    if _BF_SALT_CACHE["salt"] and (now - _BF_SALT_CACHE["ts"] < 86400):
+    if not force and _BF_SALT_CACHE["salt"] and (now - _BF_SALT_CACHE["ts"] < 86400):
         return _BF_SALT_CACHE["salt"]
-    salt = None
+    salt, why = None, ""
     try:
         import re
-        import requests
-        html = requests.get("https://www.boerse-frankfurt.de/",
-                            headers={"User-Agent": "Mozilla/5.0"}, timeout=8).text
-        files = re.findall(r'(?<=src=")main\.\w*\.js', html)
-        if files:
-            js = requests.get("https://www.boerse-frankfurt.de/" + files[0],
-                              headers={"User-Agent": "Mozilla/5.0"}, timeout=10).text
-            salts = re.findall(r'(?<=salt:")\w+', js)
-            if salts:
-                salt = salts[0]
+        s = _bf_session()
+        resp = s.get("https://www.boerse-frankfurt.de/", timeout=8)
+        if not resp.ok:
+            why = f"homepage HTTP {resp.status_code}"
+        else:
+            # bundelnamen: main.HASH.js (oud) of main-HASH.js (nieuwe Angular-builds)
+            files = re.findall(r'(?<=src=")[^"]*main[^"]*\.js', resp.text)
+            if not files:
+                why = "geen main-bundle gevonden in homepage"
+            for f in files:
+                url = f if f.startswith("http") else "https://www.boerse-frankfurt.de/" + f.lstrip("/")
+                try:
+                    js = s.get(url, timeout=10).text
+                except Exception:
+                    continue
+                m = re.search(r'salt\s*[:=]\s*"(\w{8,})"', js)
+                if m:
+                    salt = m.group(1)
+                    break
+            if files and not salt:
+                why = "salt niet gevonden in bundle(s)"
     except Exception as e:
-        logger.warning(f"_bf_salt dynamisch ophalen faalde: {e}")
-    salt = salt or _BF_SALT_FALLBACK
-    _BF_SALT_CACHE.update(salt=salt, ts=now)
-    return salt
+        why = str(e)
+    if salt:
+        logger.info(f"_bf_salt: dynamisch opgehaald ({salt[:6]}...)")
+        _BF_SALT_CACHE.update(salt=salt, ts=now, source="dynamisch")
+    else:
+        logger.warning(f"_bf_salt: TERUGVAL-salt gebruikt (dynamisch ophalen mislukt: {why}). "
+                       "Als Börse Frankfurt 403 blijft geven, is deze salt wellicht verouderd.")
+        _BF_SALT_CACHE.update(salt=_BF_SALT_FALLBACK, ts=now, source="terugval")
+    return _BF_SALT_CACHE["salt"]
 
 
 def _frankfurt_now():
@@ -290,22 +336,40 @@ def _bf_headers(url: str) -> dict:
         "x-client-traceid": hashlib.md5((client_date + url + salt).encode()).hexdigest(),
         "x-security":       hashlib.md5(_frankfurt_now().strftime("%Y%m%d%H%M").encode()).hexdigest(),
         "accept":           "application/json, text/plain, */*",
-        "User-Agent":       "Mozilla/5.0",
-        "Origin":           "https://www.boerse-frankfurt.de",
-        "Referer":          "https://www.boerse-frankfurt.de/",
     }
 
 
-def _bf_request(function: str, params: dict):
-    """GET naar https://api.boerse-frankfurt.de/v1/data/<function>?<params> met de
-    vereiste headers. Geeft de JSON terug, of None bij een fout/afwijzing."""
+def _bf_request(function: str, params: dict, _retry: bool = True):
+    """GET naar https://api.boerse-frankfurt.de/v1/data/<function>?<params> via de
+    gedeelde sessie (cookies!) met de vereiste headers. Bij een 403 wordt eenmalig
+    de salt vers opgehaald en opnieuw geprobeerd (de salt roteert af en toe). Blijft
+    het 403, dan pauzeert de provider 10 minuten (circuit-breaker) om logspam en
+    trage verversingen te vermijden. Logt status én een stukje van het antwoord."""
+    import time
     import urllib.parse
-    import requests
+    if time.time() < _BF_BLOCK["until"]:
+        return None  # recent geblokkeerd (403): even niet opnieuw proberen
     url = "https://api.boerse-frankfurt.de/v1/data/" + function + "?" + urllib.parse.urlencode(params)
     try:
-        resp = requests.get(url, headers=_bf_headers(url), timeout=(3.5, 10))
+        s = _bf_session()
+        resp = s.get(url, headers=_bf_headers(url), timeout=(3.5, 10))
+        if resp.status_code == 403 and _retry and time.time() - _BF_BLOCK["last_force"] > 300:
+            # Salt mogelijk geroteerd of cookies verlopen: vers ophalen en 1x opnieuw.
+            logger.info(f"_bf_request({function}): 403 — salt/cookies verversen en opnieuw proberen")
+            _BF_BLOCK["last_force"] = time.time()
+            _bf_salt(force=True)
+            return _bf_request(function, params, _retry=False)
+        if resp.status_code == 403:
+            body = (resp.text or "")[:120].replace("\n", " ")
+            logger.warning(f"_bf_request({function}): HTTP 403 blijft na verse salt "
+                           f"(salt={_BF_SALT_CACHE.get('source')}) | {body} — "
+                           "Börse Frankfurt 10 min gepauzeerd")
+            _BF_BLOCK["until"] = time.time() + 600
+            return None
         if not resp.ok or not resp.text:
-            logger.warning(f"_bf_request({function}): HTTP {resp.status_code}")
+            body = (resp.text or "")[:120].replace("\n", " ")
+            logger.warning(f"_bf_request({function}): HTTP {resp.status_code} "
+                           f"(salt={_BF_SALT_CACHE.get('source')}) | {body}")
             return None
         data = resp.json()
         if isinstance(data, dict) and data.get("messages"):
