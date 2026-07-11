@@ -215,10 +215,18 @@ def parse_workbook(file) -> dict:
             rn = i + 2
             if all(_is_blank(row.get(c)) for c in ("ticker", "datum")):
                 continue
-            tk = _s(row.get("ticker")).upper()
+            tk = _s(row.get("ticker")).upper() or None
             d = _date(row.get("datum"))
+            _kd = _s(row.get("kind")).lower()
+            kind = {"dividend": "dividend", "interest": "interest", "interesten": "interest",
+                    "securities_lending": "securities_lending", "lending": "securities_lending"}.get(_kd, "dividend")
             errs = []
-            if not tk: errs.append("ticker ontbreekt")
+            # Ticker is enkel verplicht bij een echt dividend — dat wordt altijd
+            # door een specifiek activum uitgekeerd. Interest is meestal algemene
+            # cash-rekeninginterest; securities lending is niet noodzakelijk aan
+            # één activum gekoppeld. Beide mogen dus zonder ticker.
+            if kind == "dividend" and not tk:
+                errs.append("ticker ontbreekt (verplicht bij kind=dividend)")
             if not d:  errs.append("datum ongeldig")
             A = _f(row.get("bruto_voor_bronbelasting"))
             B = _f(row.get("buitenlandse_bronbelasting"))
@@ -234,9 +242,6 @@ def parse_workbook(file) -> dict:
             cash_basis = {"netto": "net", "net": "net", "bruto_na": "gross_after",
                           "gross_after": "gross_after", "bruto_voor": "gross_before",
                           "gross_before": "gross_before"}.get(_cb, "net")
-            _kd = _s(row.get("kind")).lower()
-            kind = {"dividend": "dividend", "interest": "interest", "interesten": "interest",
-                    "securities_lending": "securities_lending", "lending": "securities_lending"}.get(_kd, "dividend")
             result["dividenden"].append({
                 "ticker": tk, "date": d, "currency": cur,
                 "fx_rate_in": _f(row.get("fx_koers")),
@@ -244,7 +249,7 @@ def parse_workbook(file) -> dict:
                 "account": _s(row.get("rekening")) or default_acct,
                 "cash_basis": cash_basis, "kind": kind,
             })
-            if tk not in known and tk not in result["new_assets"]:
+            if tk and tk not in known and tk not in result["new_assets"]:
                 result["new_assets"][tk] = {"name": tk, "asset_type": "stock",
                                             "etf_subtype": "distributing",
                                             "currency": cur, "belgian_registered": True,

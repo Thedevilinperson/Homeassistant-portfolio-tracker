@@ -791,6 +791,25 @@ def _asset_isin(ticker: str) -> str:
         return ""
 
 
+def _resolved_symbol(ticker: str) -> str | None:
+    """Laatst gevonden Yahoo-symbool voor de ISIN van dit activum (gemakskolom,
+    NIET de bron van waarheid — dat is de ISIN zelf)."""
+    try:
+        import database as _db
+        a = _db.get_asset(ticker) or {}
+        return (a.get("resolved_symbol") or "").strip().upper() or None
+    except Exception:
+        return None
+
+
+def _remember_resolved_symbol(ticker: str, symbol: str) -> None:
+    try:
+        import database as _db
+        _db.update_asset(ticker, resolved_symbol=symbol)
+    except Exception as e:
+        logger.warning(f"_remember_resolved_symbol({ticker},{symbol}): {e}")
+
+
 def _yf_symbol(ticker: str) -> str | None:
     """Yahoo-veilig symbool voor een ticker. Is het ticker een ISIN, dan wordt
     eerst een verhandelbaar symbool opgezocht (rauwe ISIN's laten yfinance een
@@ -802,37 +821,51 @@ def _yf_symbol(ticker: str) -> str | None:
 
 
 def get_current_price(ticker: str) -> tuple[float | None, str | None]:
-    """Actuele koers + munt. Probeert online bronnen eerst (Yahoo op ticker, dan via
-    ISIN, dan niet-Yahoo-bronnen) en valt pas als álles faalt terug op een handmatige
-    koers."""
+    """Actuele koers + munt. De ISIN is de bron van waarheid voor koersopzoeking
+    (uniek en ondubbelzinnig, i.t.t. een Yahoo-ticker met beurssuffix). Volgorde:
+    1) ISIN → (gecachet) Yahoo-symbool, 2) ISIN → externe niet-Yahoo-bronnen,
+    3) de opgeslagen ticker rechtstreeks op Yahoo (enkel als er géén ISIN is, of de
+    ISIN niets oplevert), 4) handmatige koers als allerlaatste redmiddel."""
     cached_price, cached_cur = _cached(ticker)
     if cached_price is not None:
         return cached_price, cached_cur
 
     isin = _asset_isin(ticker)
-    # Geen ISIN op het activum, maar het ticker zelf is een ISIN (bv. een warrant die
-    # met de ISIN als ticker werd toegevoegd)? Gebruik die dan.
     ticker_is_isin = _isin_valid(ticker.strip().upper())
     if not _isin_valid(isin) and ticker_is_isin:
         isin = ticker.strip().upper()
 
-    # 1) Yahoo op het ticker zelf — maar niet als het ticker een ISIN is: yfinance
-    #    gooit dan een exception zodra Yahoo de ISIN niet kent ("Invalid ISIN number").
-    price, currency = (None, None) if ticker_is_isin else _price_from_yahoo_symbol(ticker)
+    price, currency = None, None
 
-    # 2) Yahoo via een uit de ISIN afgeleid symbool
-    if price is None and _isin_valid(isin):
-        sym = _yahoo_symbol_for_isin(isin)
-        if sym and sym.upper() != ticker.upper():
-            price, currency = _price_from_yahoo_symbol(sym)
+    # 1) ISIN → Yahoo-symbool (eerst het laatst gevonden/gecachete symbool proberen,
+    #    dat is sneller dan een nieuwe zoekopdracht en meestal nog steeds correct)
+    if _isin_valid(isin):
+        cached_sym = _resolved_symbol(ticker)
+        for sym in ([cached_sym] if cached_sym else []) + [None]:
+            if sym is None:
+                sym = _yahoo_symbol_for_isin(isin)
+            if not sym:
+                continue
+            p, c = _price_from_yahoo_symbol(sym)
+            if p is not None:
+                price, currency = p, c
+                if sym != cached_sym:
+                    _remember_resolved_symbol(ticker, sym)
+                break
 
-    # 3) Externe (niet-Yahoo) bronnen op basis van de ISIN
+    # 2) Externe (niet-Yahoo) bronnen op basis van de ISIN
     if price is None and _isin_valid(isin):
         for provider in _ISIN_PROVIDERS:
             p, c = provider(isin)
             if p is not None:
                 price, currency = p, c
                 break
+
+    # 3) De opgeslagen ticker rechtstreeks op Yahoo — enkel als terugval (geen ISIN,
+    #    of de ISIN leverde niets op). Niet bij een ISIN-als-ticker: yfinance gooit
+    #    dan een exception zodra Yahoo de ISIN niet kent ("Invalid ISIN number").
+    if price is None and not ticker_is_isin:
+        price, currency = _price_from_yahoo_symbol(ticker)
 
     # 4) Handmatige koers — laatste redmiddel
     if price is None:
@@ -931,14 +964,30 @@ def get_close_on_date(ticker: str, on_date: str) -> float | None:
     return None
 
 
+_FX_HIST_CACHE: dict[tuple, float] = {}
+
+
 def get_historical_exchange_rate(from_currency: str, on_date: str,
                                  to_currency: str = "EUR") -> float | None:
     """
     Wisselkoers from→to op (of vlak vóór) een specifieke datum 'YYYY-MM-DD'.
     Gebruikt voor het correct omrekenen van transacties op hun eigen datum.
+
+    Permanent gecachet per (from, to, datum): een AFGESLOTEN handelsdag heeft een
+    vaste slotkoers die niet meer verandert. Zonder deze cache leverde elke aparte
+    aanroep (bv. één keer voor de TOB-preview, één keer bij het opslaan) een eigen
+    netwerkcall op — bij een tijdelijke hapering viel die aparte call terug op de
+    ACTUELE koers, waardoor TOB en het opgeslagen EUR-bedrag op een net iets andere
+    koers gebaseerd konden zijn. Met deze cache geeft dezelfde (munt, datum)-combinatie
+    binnen één sessie altijd exact dezelfde koers terug. De terugval-op-actuele-koers
+    wordt bewust NIET gecachet, zodat een latere aanroep alsnog de echte historische
+    koers kan ophalen zodra die (weer) beschikbaar is.
     """
     if from_currency == to_currency:
         return 1.0
+    key = (from_currency, to_currency, str(on_date)[:10])
+    if key in _FX_HIST_CACHE:
+        return _FX_HIST_CACHE[key]
     pair = f"{from_currency}{to_currency}=X"
     try:
         d = datetime.strptime(on_date[:10], "%Y-%m-%d")
@@ -946,10 +995,12 @@ def get_historical_exchange_rate(from_currency: str, on_date: str,
         end = (d + timedelta(days=1)).strftime("%Y-%m-%d")
         hist = yf.Ticker(pair).history(start=start, end=end)
         if not hist.empty:
-            return float(hist["Close"].iloc[-1])
+            rate = float(hist["Close"].iloc[-1])
+            _FX_HIST_CACHE[key] = rate
+            return rate
     except Exception as e:
         logger.warning(f"get_historical_exchange_rate({pair},{on_date}): {e}")
-    # Val terug op de actuele koers als historisch niet lukt
+    # Val terug op de actuele koers als historisch niet lukt (bewust niet gecachet)
     return get_exchange_rate(from_currency, to_currency)
 
 

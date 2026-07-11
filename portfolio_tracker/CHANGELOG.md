@@ -2,6 +2,41 @@
 
 Alle noemenswaardige wijzigingen aan de Portfolio Tracker add-on.
 
+## 0.29.0
+- Bugfix: historische wisselkoers kon licht variëren tussen de TOB-preview en het effectief
+opslaan van een transactie (twee aparte, ongecachete netwerkcalls voor dezelfde munt/datum; bij
+een tijdelijke hapering viel één ervan terug op de actuele in plaats van de historische koers).
+Historische FX wordt nu permanent gecachet per (munt, datum): een afgesloten handelsdag heeft een
+vaste koers, dus dezelfde combinatie geeft nu altijd exact dezelfde koers terug. Dit verklaart de
+licht afwijkende TOB bij buitenlandse aandelen.
+- Interest en securities lending hoeven niet langer aan een activum gekoppeld te worden. Dividenden
+blijven verplicht een activum (dat IS waarvoor ze uitgekeerd worden), maar interest en securities
+lending tonen nu een vinkje "Niet gekoppeld aan een specifiek activum" (standaard aan) — handig
+voor algemene cash-rekeninginterest. De database-kolom is versoepeld van NOT NULL naar optioneel;
+bestaande databases migreren automatisch met behoud van data. Niet-gekoppelde lijnen tonen
+"— Algemeen (niet gekoppeld) —" in alle overzichten en het cash-grootboek toont voortaan ook het
+juiste label (Interest/Securities lending i.p.v. altijd "Dividend").
+- ISIN is nu de bron van waarheid voor koersopzoeking. Voorheen probeerde de app eerst de opgeslagen
+ticker rechtstreeks op Yahoo — bij ambigue of foutieve tickers (beurssuffixen, gelijkaardige
+ISIN's) kon dat de verkeerde koers opleveren. Heeft een activum een ISIN, dan wordt die nu altijd
+eerst gebruikt om het juiste Yahoo-symbool op te zoeken (en pas als terugval de rauwe ticker
+rechtstreeks). Het gevonden symbool wordt bewaard in de nieuwe kolom 'Gevonden ticker' in het
+activaoverzicht — puur informatief, de ISIN blijft de brondata.
+- Koersdoel instelbaar bij het toevoegen van een activum (i.p.v. pas bij een transactie), inclusief
+dezelfde "🤖 Bepaal via AI"-knop. Ook nadien aanpasbaar via de nieuwe 'Koersdoel'-kolom in het
+activaoverzicht. Een koersdoel op activumniveau heeft voorrang op een ouder transactie-koersdoel.
+Bugfix: "Vul lege velden in" (gedetailleerde dividendinvoer) wiste het gekozen activum, de
+rekening, de datum en de munteenheden. Oorzaak: die knop vernieuwt een nonce die bedoeld was om
+enkel de bedragvelden (①②③④) te verversen, maar alle widgets in het formulier deelden dezelfde
+nonce — inclusief activum/datum/rekening/munt. Die laatste gebruiken nu stabiele keys die niet
+meer resetten wanneer de bedragvelden ververst worden.
+- Bugfix: bedragkolommen in tabellen (bv. "Gerealiseerde meer-/minwaarden") sorteerden verkeerd bij
+een klik op de kolomkop. Oorzaak: bedragen werden als opgemaakte tekst ("€1.234,56") getoond,
+waardoor een sortering alfabetisch i.p.v. numeriek gebeurde. Alle overzichtstabellen met een
+geld-, aantal- of percentagekolom (gerealiseerde W/V, activaresultaten, open posities,
+belastingoverzicht, TOB-detail, AI-kostenoverzicht, cash-grootboek en -bewegingen) gebruiken nu
+numerieke kolommen met enkel de weergave opgemaakt, zodat kolomsortering overal correct werkt.
+
 ## 0.28.2
 - Naam en beurs worden nu automatisch ingevuld bij een ISIN-only activum (bv. een warrant). De
 ISIN-flow riep enkel probe_isin aan, dat alleen prijs/munt/bron teruggeeft — de naam bleef dus

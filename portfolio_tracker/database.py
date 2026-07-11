@@ -65,7 +65,7 @@ def init_db():
 
         CREATE TABLE IF NOT EXISTS dividends (
             id              INTEGER PRIMARY KEY AUTOINCREMENT,
-            ticker          TEXT    NOT NULL,
+            ticker          TEXT,
             date            TEXT    NOT NULL,
             gross_amount    REAL    NOT NULL CHECK(gross_amount > 0),
             withholding_tax REAL    DEFAULT 0,
@@ -266,6 +266,21 @@ def _migrate(conn):
     if not _column_exists(cur, "assets", "manual_price_cur"):
         cur.execute("ALTER TABLE assets ADD COLUMN manual_price_cur TEXT")
 
+    # Yahoo-symbool laatst gevonden VIA de ISIN (cache/weergave). De ISIN blijft de
+    # brondata voor koersopzoeking; dit is enkel een gemakskolom zodat je ziet welk
+    # concreet symbool daaraan gekoppeld werd, zonder dat de ticker zelf de bron van
+    # waarheid is (ambigu bij Yahoo door beurssuffixen en gelijkaardige ISIN's).
+    if not _column_exists(cur, "assets", "resolved_symbol"):
+        cur.execute("ALTER TABLE assets ADD COLUMN resolved_symbol TEXT")
+
+    # Koersdoel rechtstreeks op het activum (in te vullen bij het toevoegen, i.p.v.
+    # pas bij een transactie). Blijft de meest recente transactie-koersdoel bestaan,
+    # dan heeft dat voorrang in de weergave; dit is de standaard-/startwaarde.
+    if not _column_exists(cur, "assets", "price_target"):
+        cur.execute("ALTER TABLE assets ADD COLUMN price_target REAL")
+    if not _column_exists(cur, "assets", "price_target_currency"):
+        cur.execute("ALTER TABLE assets ADD COLUMN price_target_currency TEXT")
+
     # Zorg dat oude rijen een rekening hebben
     cur.execute(
         "UPDATE transactions SET account=? WHERE account IS NULL OR account=''",
@@ -276,8 +291,38 @@ def _migrate(conn):
     # (waarde 0) kunnen worden geregistreerd. SQLite kan een CHECK niet in-place
     # wijzigen, dus de tabel wordt herbouwd met behoud van alle kolommen en data.
     _relax_transactions_price_check(conn, cur)
+    _relax_dividends_ticker_notnull(conn, cur)
 
     conn.commit()
+
+
+def _relax_dividends_ticker_notnull(conn, cur):
+    """Interest en securities lending zijn niet altijd aan een specifiek activum
+    gekoppeld (bv. cash-rekeninginterest). 'ticker' mag daarom leeg zijn — bestaande
+    databases met de oude NOT NULL-constraint worden hier herbouwd, net als bij
+    price_per_unit hierboven. Whitespace-onafhankelijke regex, want de exacte
+    kolomuitlijning in oudere schemaversies kan licht verschillen."""
+    import re
+    row = cur.execute(
+        "SELECT sql FROM sqlite_master WHERE type='table' AND name='dividends'"
+    ).fetchone()
+    sql = row["sql"] if row else None
+    if not sql:
+        return
+    m = re.search(r'(\bticker\s+TEXT)\s+NOT NULL\b', sql)
+    if not m:
+        return  # nieuw schema (al versoepeld) of onverwachte vorm: niets doen
+    new_sql = sql[:m.start()] + m.group(1) + sql[m.end():]
+    new_sql = (new_sql.replace("CREATE TABLE IF NOT EXISTS dividends", "CREATE TABLE dividends_new")
+                      .replace("CREATE TABLE dividends", "CREATE TABLE dividends_new"))
+    cols = [r[1] for r in cur.execute("PRAGMA table_info(dividends)").fetchall()]
+    collist = ", ".join(f'"{c}"' for c in cols)
+    cur.execute("PRAGMA foreign_keys=off")
+    cur.execute(new_sql)
+    cur.execute(f"INSERT INTO dividends_new ({collist}) SELECT {collist} FROM dividends")
+    cur.execute("DROP TABLE dividends")
+    cur.execute("ALTER TABLE dividends_new RENAME TO dividends")
+    cur.execute("PRAGMA foreign_keys=on")
 
 
 def _relax_transactions_price_check(conn, cur):
@@ -616,11 +661,15 @@ def cash_ledger(accounts=None) -> list[dict]:
         else:
             items.append({"date": t["date"][:10], "account": acc, "label": "Verkoop",
                           "delta": tot - fees, "desc": desc, "source": "txn", "ref": t["id"]})
+    _KIND_LABEL = {"dividend": "Dividend", "interest": "Interest",
+                   "securities_lending": "Securities lending"}
     for d in get_dividends():
         if not _use(d.get("account")):
             continue
         items.append({"date": d["date"][:10], "account": d.get("account") or DEFAULT_ACCOUNT,
-                      "label": "Dividend", "delta": _div_cash_eur(d), "desc": d["ticker"],
+                      "label": _KIND_LABEL.get(d.get("kind"), "Dividend"),
+                      "delta": _div_cash_eur(d),
+                      "desc": d["ticker"] or "Algemeen (niet gekoppeld)",
                       "source": "div", "ref": d["id"]})
     for c in get_account_costs():
         if not _use(c.get("account")):
@@ -745,14 +794,16 @@ def get_ai_usage_summary() -> dict:
 
 def add_asset(ticker, name, asset_type="stock", etf_subtype="distributing",
               currency="EUR", exchange=None, isin=None, belgian_registered=1,
-              country="BE"):
+              country="BE", price_target=None, price_target_currency=None):
     conn = get_connection()
     conn.execute(
         """INSERT OR IGNORE INTO assets
-           (ticker,name,asset_type,etf_subtype,currency,exchange,isin,belgian_registered,country)
-           VALUES (?,?,?,?,?,?,?,?,?)""",
+           (ticker,name,asset_type,etf_subtype,currency,exchange,isin,belgian_registered,country,
+            price_target,price_target_currency)
+           VALUES (?,?,?,?,?,?,?,?,?,?,?)""",
         (ticker.upper(), name, asset_type, etf_subtype, currency, exchange, isin,
-         int(belgian_registered), (country or "BE").upper())
+         int(belgian_registered), (country or "BE").upper(),
+         price_target, price_target_currency)
     )
     conn.commit()
     conn.close()
@@ -760,7 +811,8 @@ def add_asset(ticker, name, asset_type="stock", etf_subtype="distributing",
 
 def update_asset(ticker, name=None, asset_type=None, etf_subtype=None,
                  currency=None, exchange=None, isin=None, belgian_registered=None,
-                 country=None):
+                 country=None, resolved_symbol=None, price_target=None,
+                 price_target_currency=None, clear_price_target=False):
     conn = get_connection()
     fields, vals = [], []
     if name        is not None: fields.append("name=?");        vals.append(name)
@@ -772,6 +824,15 @@ def update_asset(ticker, name=None, asset_type=None, etf_subtype=None,
     if country     is not None: fields.append("country=?");     vals.append(country.upper())
     if belgian_registered is not None:
         fields.append("belgian_registered=?"); vals.append(int(belgian_registered))
+    if resolved_symbol is not None:
+        fields.append("resolved_symbol=?"); vals.append(resolved_symbol)
+    if clear_price_target:
+        fields.append("price_target=NULL"); fields.append("price_target_currency=NULL")
+    else:
+        if price_target is not None:
+            fields.append("price_target=?"); vals.append(price_target)
+        if price_target_currency is not None:
+            fields.append("price_target_currency=?"); vals.append(price_target_currency)
     if fields:
         vals.append(ticker.upper())
         conn.execute(f"UPDATE assets SET {','.join(fields)} WHERE ticker=?", vals)
@@ -981,6 +1042,8 @@ def add_dividend(ticker, date, gross_amount, withholding_tax=0.0,
                  gross_eur=None, withholding_eur=None,
                  foreign_wht_withheld=0, belgian_rv_withheld=0,
                  account=None, details=None):
+    """ticker mag None zijn voor interest/securities lending die niet aan een
+    specifiek activum gekoppeld zijn (bv. cash-rekeninginterest)."""
     if gross_eur is None:
         gross_eur = gross_amount * (fx_rate or 1.0)
     if withholding_eur is None:
@@ -1003,7 +1066,7 @@ def add_dividend(ticker, date, gross_amount, withholding_tax=0.0,
             "foreign_wht_cur", "gross_after_wht", "gross_after_wht_cur",
             "belgian_rv_amt", "net_received", "net_received_cur", "net_eur",
             "cash_basis", "cash_eur", "kind"]
-    vals = [ticker.upper(), date, gross_amount, withholding_tax, currency, notes,
+    vals = [ticker.strip().upper() if ticker else None, date, gross_amount, withholding_tax, currency, notes,
             fx_rate, gross_eur, withholding_eur,
             int(foreign_wht_withheld), int(belgian_rv_withheld), account,
             d.get("gross_before_wht"), d.get("gross_before_wht_cur"),

@@ -119,7 +119,11 @@ def asset_name_map() -> dict:
 
 
 def asset_label(ticker: str, names: dict | None = None) -> str:
-    """Toon 'Naam (TICKER)'; valt terug op enkel de ticker als er geen naam is."""
+    """Toon 'Naam (TICKER)'; valt terug op enkel de ticker als er geen naam is.
+    ticker=None (interest/securities lending zonder gekoppeld activum) geeft een
+    duidelijk label i.p.v. de letterlijke tekst 'None'."""
+    if not ticker:
+        return "— Algemeen (niet gekoppeld) —"
     names = names if names is not None else asset_name_map()
     nm = names.get(ticker, ticker)
     return f"{nm} ({ticker})" if nm and nm != ticker else ticker
@@ -283,7 +287,11 @@ def perf_held_summary(accounts=None) -> dict:
 
 def render_realized_history(realized_list, names=None, empty_msg="Nog geen gerealiseerde meer-/minwaarden."):
     """Tabel met gerealiseerde meer-/minwaarden (verkopen), over alle jaren/rekeningen
-    heen zoals meegegeven. Toont ook posities die intussen netto 0 zijn."""
+    heen zoals meegegeven. Toont ook posities die intussen netto 0 zijn.
+
+    Bedrag- en aantalkolommen blijven numeriek (float) — enkel de weergave wordt via
+    column_config geformatteerd. Zo sorteert een klik op de kolomkop numeriek i.p.v.
+    alfabetisch (wat gebeurde toen deze kolommen al opgemaakte '€'-strings waren)."""
     names = names if names is not None else asset_name_map()
     if not realized_list:
         st.info(empty_msg)
@@ -295,12 +303,17 @@ def render_realized_history(realized_list, names=None, empty_msg="Nog geen gerea
             "Datum":         g["date"][:10],
             "Activum":       asset_label(g["ticker"], names),
             "Rekening":      g.get("account") or "—",
-            "Aantal":        f"{g['quantity']:.4f}",
-            "Opbrengst (€)": eur(g["sell_total"]),
-            "Kostbasis (€)": eur(g["cost_basis"]),
-            "W/V (€)":       eur(g["gain_loss"]),
+            "Aantal":        g["quantity"],
+            "Opbrengst (€)": g["sell_total"],
+            "Kostbasis (€)": g["cost_basis"],
+            "W/V (€)":       g["gain_loss"],
         })
-    st.dataframe(pd.DataFrame(rows), width='stretch', hide_index=True)
+    st.dataframe(pd.DataFrame(rows), width='stretch', hide_index=True, column_config={
+        "Aantal":        st.column_config.NumberColumn(format="%.4f"),
+        "Opbrengst (€)": st.column_config.NumberColumn(format="€ %.2f"),
+        "Kostbasis (€)": st.column_config.NumberColumn(format="€ %.2f"),
+        "W/V (€)":       st.column_config.NumberColumn(format="€ %.2f"),
+    })
     tot = sum(g["gain_loss"] for g in realized_list)
     st.caption(f"Totaal gerealiseerde W/V (deze selectie, alle jaren): **{eur(tot)}**")
 
@@ -823,10 +836,15 @@ def page_portfolio():
             n = g - w
         divs_net[d["ticker"]] = divs_net.get(d["ticker"], 0) + n
 
-    # Koersdoelen (laatste per ticker uit transacties; anders AI-koersdoel)
+    # Koersdoelen: activum-niveau (ingesteld bij toevoegen) heeft voorrang — dat is
+    # de meest bewuste, actuele keuze. Anders het laatste transactie-koersdoel, en
+    # als allerlaatste terugval het AI-koersdoel.
     price_targets = {}
+    for a in db.get_assets():
+        if a.get("price_target") is not None:
+            price_targets[a["ticker"]] = a["price_target"]
     for t in db.get_transactions():           # ASC op datum -> laatste wint
-        if t.get("price_target") is not None:
+        if t.get("price_target") is not None and t["ticker"] not in price_targets:
             price_targets[t["ticker"]] = t["price_target"]
     for tk in pv:
         if tk not in price_targets:
@@ -868,20 +886,31 @@ def page_portfolio():
             row = {
                 "W/V":                 sign_icon(net),
                 "Activum":             asset_label(t, nmap),
-                "Aantal (nu)":         f"{r['quantity']:.4f}" if r["quantity"] else "0",
-                "Huidige waarde":      eur(r["current_value"]),
-                "Ongerealiseerd":      eur(r["unrealized"] + (r["perf_basis"] if _pm == "cost"
-                                           else (r["perf_basis"] - r["income_tax"]) if _pm == "invested" else 0)),
-                "Gerealiseerd":        eur(r["realized"]),
-                "Dividenden":          eur(r["dividends"]),
-                "Kosten":              eur(kosten_disp),
+                "Aantal (nu)":         r["quantity"] or 0.0,
+                "Huidige waarde":      r["current_value"],
+                "Ongerealiseerd":      r["unrealized"] + (r["perf_basis"] if _pm == "cost"
+                                           else (r["perf_basis"] - r["income_tax"]) if _pm == "invested" else 0),
+                "Gerealiseerd":        r["realized"],
+                "Dividenden":          r["dividends"],
+                "Kosten":              kosten_disp,
             }
             if any_inctax:
-                row["Personenbel."] = eur(r["income_tax"]) if r["income_tax"] else "—"
-            row["Netto resultaat"] = eur(net)
+                row["Personenbel."] = r["income_tax"] or 0.0
+            row["Netto resultaat"] = net
             row["AI-advies"]       = ai_badge(rec, changes.get(t))
             rrows.append(row)
-        st.dataframe(pd.DataFrame(rrows), width="stretch", hide_index=True)
+        _rr_cfg = {
+            "Aantal (nu)":    st.column_config.NumberColumn(format="%.4f"),
+            "Huidige waarde": st.column_config.NumberColumn(format="€ %.2f"),
+            "Ongerealiseerd": st.column_config.NumberColumn(format="€ %.2f"),
+            "Gerealiseerd":   st.column_config.NumberColumn(format="€ %.2f"),
+            "Dividenden":     st.column_config.NumberColumn(format="€ %.2f"),
+            "Kosten":         st.column_config.NumberColumn(format="€ %.2f"),
+            "Netto resultaat": st.column_config.NumberColumn(format="€ %.2f"),
+        }
+        if any_inctax:
+            _rr_cfg["Personenbel."] = st.column_config.NumberColumn(format="€ %.2f")
+        st.dataframe(pd.DataFrame(rrows), width="stretch", hide_index=True, column_config=_rr_cfg)
         tu = sum(r["unrealized"] for r in result.values())
         tr = sum(r["realized"] for r in result.values())
         tdv = sum(r["dividends"] for r in result.values())
@@ -910,18 +939,28 @@ def page_portfolio():
                 "Ticker":       ticker,
                 "Naam":         (asset.get("name") or ticker)[:20],
                 "Munt":         pos["current_price_currency"] or "EUR",
-                "Aantal":       f"{pos['quantity']:.4f}",
-                "Gem.kostpr.(€)":  f"{pos['avg_cost']:.4f}",
-                "Koers (native)":  f"{pos['current_price']:.4f}" if pos["current_price"] else "—",
-                "Koersdoel":    f"{tgt:.2f}" if tgt else "—",
-                "Potentieel":   pct(upside) if upside is not None else "—",
-                "Huidige waarde": eur(pos["current_value"]),
-                "W/V (%)":      pct(pos["unrealized_gain_loss_pct"]),
-                "Dividend":     eur(div),
-                "Tot. rendement": eur(total_return),
+                "Aantal":       pos["quantity"],
+                "Gem.kostpr.(€)":  pos["avg_cost"],
+                "Koers (native)":  pos["current_price"] if pos["current_price"] else None,
+                "Koersdoel":    tgt,
+                "Potentieel":   upside,
+                "Huidige waarde": pos["current_value"],
+                "W/V (%)":      pos["unrealized_gain_loss_pct"],
+                "Dividend":     div,
+                "Tot. rendement": total_return,
                 "AI-advies":    ai_badge(rec, changes.get(ticker)),
             })
-        st.dataframe(pd.DataFrame(rows), width="stretch", hide_index=True, height=420)
+        st.dataframe(pd.DataFrame(rows), width="stretch", hide_index=True, height=420, column_config={
+            "Aantal":           st.column_config.NumberColumn(format="%.4f"),
+            "Gem.kostpr.(€)":   st.column_config.NumberColumn(format="%.4f"),
+            "Koers (native)":   st.column_config.NumberColumn(format="%.4f"),
+            "Koersdoel":        st.column_config.NumberColumn(format="%.2f"),
+            "Potentieel":       st.column_config.NumberColumn(format="%+.2f%%"),
+            "Huidige waarde":   st.column_config.NumberColumn(format="€ %.2f"),
+            "W/V (%)":          st.column_config.NumberColumn(format="%+.2f%%"),
+            "Dividend":         st.column_config.NumberColumn(format="€ %.2f"),
+            "Tot. rendement":   st.column_config.NumberColumn(format="€ %.2f"),
+        })
 
         total_val  = overview["total_portfolio_value"]
         total_cost = overview["total_cost_basis"]
@@ -1193,6 +1232,43 @@ def page_assets():
             _fxs, _snap_eur_prev = compute_eur(snap_val, currency, tax_mod.SNAPSHOT_DATE)
             st.caption(f"≈ €{_snap_eur_prev:,.4f}/stuk (koers 31/12/2025: {_fxs:.4f})")
 
+        # Koersdoel meteen bij het toevoegen instellen (i.p.v. pas bij een transactie).
+        # Staging analoog aan het koersdoel in het transactieformulier, maar met eigen
+        # keys (as_pt_*) zodat beide formulieren elkaars widgetstatus niet delen.
+        st.session_state.setdefault(k("pt_stage"), 0.0)
+        st.session_state.setdefault("as_pt_nonce", 0)
+        ptn = st.session_state["as_pt_nonce"]
+        ptc1, ptc2 = st.columns([2, 1])
+        with ptc1:
+            price_target = st.number_input(
+                f"🎯 Koersdoel (optioneel, {currency})", min_value=0.0, step=0.01,
+                format="%.2f", value=float(st.session_state[k("pt_stage")]),
+                key=f"as_pt_input_{n}_{ptn}",
+                help="Je koersdoel voor dit activum — verschijnt op het dashboard en wordt "
+                     "gebruikt bij het AI-advies. Kan later nog aangepast worden via een "
+                     "transactie of in het overzicht hieronder.")
+        with ptc2:
+            st.write(""); st.write("")
+            if st.button("🤖 Bepaal via AI", key=k("ai_pt")):
+                if not ticker.strip():
+                    st.warning("Vul eerst een ticker in.")
+                elif not db.get_setting("openai_api_key", ""):
+                    st.warning("Geen OpenAI-sleutel — stel die in via ⚙️ Instellingen.")
+                else:
+                    with st.spinner("AI bepaalt koersdoel..."):
+                        res = ai_advisor.suggest_price_target(ticker.strip().upper())
+                    if res.get("error"):
+                        st.error(res["error"])
+                    else:
+                        st.session_state[k("pt_stage")] = float(res["price_target"])
+                        st.session_state["as_pt_nonce"] = ptn + 1
+                        st.session_state[k("pt_info")] = (
+                            f"🎯 AI-koersdoel {res['price_target']:.2f} {res['currency']} "
+                            f"(model {res.get('model','?')}). {res.get('rationale','')} {res.get('scenario','')}")
+                        st.rerun()
+        if st.session_state.get(k("pt_info")):
+            st.caption(st.session_state.pop(k("pt_info")))
+
         if st.session_state.get(k("fetched")):
             _src = st.session_state.get(k("isin_only_src"))
             if _src is not None:
@@ -1227,12 +1303,15 @@ def page_assets():
                 t = ticker.strip().upper()
                 db.add_asset(t, name.strip(), asset_type, etf_subtype,
                              currency, exchange.strip() or None, isin.strip() or None,
-                             belgian_registered=int(belg_reg), country=country)
+                             belgian_registered=int(belg_reg), country=country,
+                             price_target=(price_target or None),
+                             price_target_currency=(currency if price_target else None))
                 if snap_val and snap_val > 0:
                     _fx, snap_eur = compute_eur(snap_val, currency, tax_mod.SNAPSHOT_DATE)
                     db.set_asset_snapshot(t, float(snap_val), snap_eur)
                 clear_cache()
                 st.session_state["as_nonce"] = n + 1   # formulier leegmaken
+                st.session_state["as_pt_nonce"] = ptn + 1
                 st.success(f"✅ {t} — {name.strip()} toegevoegd!")
                 st.rerun()
 
@@ -1278,6 +1357,8 @@ def page_assets():
                 "Land":       ctry if ctry in clist else "BE",
                 "Beurs":      a.get("exchange") or "",
                 "ISIN":       a.get("isin") or "",
+                "Gevonden ticker": a.get("resolved_symbol") or "",
+                "Koersdoel":  round(a["price_target"], 4) if a.get("price_target") is not None else None,
                 "Fotomoment": round(a["snapshot_price"], 4) if a.get("snapshot_price") is not None else None,
                 "Handmatige koers": round(mp, 4) if mp is not None else None,
                 "Laatste koers": round(mp, 4) if mp is not None else (round(lp["price"], 4) if lp else None),
@@ -1298,7 +1379,18 @@ def page_assets():
                 "Land":       cc.SelectboxColumn(options=clist,
                                                  help="Land van herkomst — bepaalt de buitenlandse bronbelasting."),
                 "Beurs":      cc.TextColumn(),
-                "ISIN":       cc.TextColumn(),
+                "ISIN":       cc.TextColumn(help="De ISIN is de bron van waarheid voor koersopzoeking — "
+                                                  "uniek per effect, i.t.t. een Yahoo-ticker die door "
+                                                  "beurssuffixen ambigu kan zijn. Vul ze in voor de meest "
+                                                  "betrouwbare koersen."),
+                "Gevonden ticker": cc.TextColumn(disabled=True,
+                                                 help="Het Yahoo-symbool dat laatst via de ISIN gevonden werd "
+                                                      "(informatief). De ISIN blijft de bron van waarheid; "
+                                                      "dit veld is enkel een gemakskolom."),
+                "Koersdoel":  cc.NumberColumn(min_value=0.0, format="%.4f",
+                                             help="Je koersdoel (native munt) — verschijnt op het dashboard "
+                                                  "en bij het AI-advies. Leeg = geen koersdoel op activumniveau "
+                                                  "(dan geldt het laatste transactie- of AI-koersdoel)."),
                 "Fotomoment": cc.NumberColumn(min_value=0.0, format="%.4f",
                                               help="Slotkoers 31/12/2025 (native). Leeg = geen fotomoment."),
                 "Handmatige koers": cc.NumberColumn(min_value=0.0, format="%.4f",
@@ -1322,17 +1414,22 @@ def page_assets():
                     orig = rows[i]
                     if all(_cell_eq(r[k], orig[k]) for k in
                            ("Naam", "Type", "ETF-type", "BE", "Munt", "Land", "Beurs", "ISIN",
-                            "Fotomoment", "Handmatige koers")):
+                            "Koersdoel", "Fotomoment", "Handmatige koers")):
                         continue
                     atype = TYPE_KEY.get(str(r["Type"]), a["asset_type"])
                     asub  = SUB_KEY.get(str(r["ETF-type"]), a.get("etf_subtype") or "distributing") or "distributing"
                     ncur  = str(r["Munt"]) if r["Munt"] in ACUR else (a.get("currency") or "EUR")
                     ctry  = str(r["Land"]) if r["Land"] in clist else "BE"
+                    tgt = r["Koersdoel"]
+                    has_tgt = not (tgt is None or pd.isna(tgt) or float(tgt) <= 0)
                     db.update_asset(a["ticker"], name=(str(r["Naam"]).strip() or a["ticker"]),
                                     asset_type=atype, etf_subtype=asub, currency=ncur,
                                     exchange=(str(r["Beurs"]).strip() or ""),
                                     isin=(str(r["ISIN"]).strip() or ""),
-                                    belgian_registered=int(bool(r["BE"])), country=ctry)
+                                    belgian_registered=int(bool(r["BE"])), country=ctry,
+                                    price_target=(float(tgt) if has_tgt else None),
+                                    price_target_currency=(ncur if has_tgt else None),
+                                    clear_price_target=(not has_tgt))
                     snap = r["Fotomoment"]
                     if snap is None or pd.isna(snap) or float(snap) <= 0:
                         db.set_asset_snapshot(a["ticker"], None, None)
@@ -1973,25 +2070,51 @@ def page_dividends():
                 st.success(st.session_state.pop("div_added_msg"))
             dn = st.session_state.get("div_amt_nonce", 0)
             dk = lambda s: f"div_{s}_{dn}"
+            # Stabiele keys (géén nonce): activum/datum/rekening/soort/munt/cash-keuze
+            # mogen NIET resetten wanneer 'Vul lege velden in' de bedragvelden ververst
+            # — enkel de bedragvelden zelf (A/B/C/D, RV%, eenvoudige bruto/ingehouden)
+            # gebruiken de nonce-key, zodat ze via 'pre' opnieuw ingevuld kunnen worden.
+            sk = lambda s: f"div_stable_{s}"
             CURS = ["EUR", "USD", "GBP", "CHF"]
-
-            cc1, cc2, cc3 = st.columns(3)
-            d_ticker  = cc1.selectbox("Activum *", tickers, key=dk("tkr"),
-                                      format_func=lambda t: asset_label(t, div_names))
-            d_date    = cc2.date_input("Datum *", value=date.today(), min_value=date(2000,1,1), max_value=date.today(), key=dk("date"))
-            d_account = cc3.selectbox("Rekening *", db.get_accounts(), key=dk("acct"),
-                                      help="De rekening waarop dit dividend is uitgekeerd. "
-                                           "Hetzelfde dividend op een andere rekening voer je als een aparte lijn in.")
-            asset_cur = amap.get(d_ticker, {}).get("currency", "EUR")
-            cur_opts  = CURS if asset_cur in CURS else CURS + [asset_cur]
 
             _KIND_LBL = {"dividend": "💰 Dividend", "interest": "🏦 Interest",
                          "securities_lending": "🔁 Securities lending"}
             _kinds = list(_KIND_LBL.keys())
-            d_kind = st.radio("Soort inkomst", _kinds, horizontal=True, key=dk("kind"),
+            d_kind = st.radio("Soort inkomst", _kinds, horizontal=True, key=sk("kind"),
                               format_func=lambda k: _KIND_LBL[k],
                               help="Dividend telt mee voor de vrijstelling van €833 p.p.; interest en "
                                    "securities lending niet (die hebben hun eigen fiscale regels).")
+
+            # Interest is meestal cash-rekeninginterest (niet aan één specifiek
+            # activum gekoppeld); securities lending is dat niet noodzakelijk
+            # (kan een vergoeding voor de hele portefeuille zijn). Dividend blijft
+            # altijd aan een activum gekoppeld — dat IS letterlijk waarvoor het
+            # uitgekeerd wordt.
+            if d_kind != "dividend":
+                _no_asset = st.checkbox(
+                    "Niet gekoppeld aan een specifiek activum (bv. algemene "
+                    "cash-rekeninginterest)", value=True, key=sk("no_asset"),
+                    help="Standaard aan voor interest/securities lending, aangezien dit meestal "
+                         "een algemene rekeningvergoeding is. Vink uit als dit bedrag wél bij één "
+                         "specifiek activum hoort (bv. securities-lendingvergoeding voor een "
+                         "uitgeleende positie).")
+            else:
+                _no_asset = False
+
+            cc1, cc2, cc3 = st.columns(3)
+            if _no_asset:
+                cc1.text_input("Activum", value="— Algemeen (niet gekoppeld) —", disabled=True,
+                               key=sk("tkr_disabled"))
+                d_ticker = None
+            else:
+                d_ticker = cc1.selectbox("Activum *", tickers, key=sk("tkr"),
+                                         format_func=lambda t: asset_label(t, div_names))
+            d_date    = cc2.date_input("Datum *", value=date.today(), min_value=date(2000,1,1), max_value=date.today(), key=sk("date"))
+            d_account = cc3.selectbox("Rekening *", db.get_accounts(), key=sk("acct"),
+                                      help="De rekening waarop dit bedrag is uitgekeerd. "
+                                           "Hetzelfde bedrag op een andere rekening voer je als een aparte lijn in.")
+            asset_cur = amap.get(d_ticker, {}).get("currency", "EUR") if d_ticker else "EUR"
+            cur_opts  = CURS if asset_cur in CURS else CURS + [asset_cur]
 
             mode = st.radio("Invoerwijze", ["Eenvoudig", "Gedetailleerd (bronbelasting + RV)"],
                             horizontal=True, key="div_mode")
@@ -2002,7 +2125,7 @@ def page_dividends():
                     gross    = st.number_input("Bruto dividend *", min_value=0.0, step=0.01,
                                                format="%.2f", value=None, key=dk("s_gross"))
                     currency = st.selectbox("Munt", cur_opts, index=cur_opts.index(asset_cur),
-                                            key=dk(f"s_cur_{d_ticker}"))
+                                            key=sk(f"s_cur_{d_ticker}"))
                 with sc2:
                     wh_amt = st.number_input("Ingehouden voorheffing (bedrag)", min_value=0.0,
                                              step=0.01, format="%.2f", value=None, key=dk("s_wh"))
@@ -2022,8 +2145,9 @@ def page_dividends():
                                         details={"kind": d_kind, "net_eur": gross_eur - wh_eur})
                         clear_cache()
                         st.session_state["div_amt_nonce"] = dn + 1
+                        _lbl = d_ticker or "algemeen (niet gekoppeld)"
                         st.session_state["div_added_msg"] = (
-                            f"✅ Dividend {currency} {g - w:.2f} netto voor {d_ticker} op {d_account} toegevoegd!")
+                            f"✅ Dividend {currency} {g - w:.2f} netto voor {_lbl} op {d_account} toegevoegd!")
                         st.rerun()
 
             else:  # Gedetailleerd
@@ -2048,7 +2172,7 @@ def page_dividends():
                 # verse muntvelden met de juiste standaardmunt.
                 def cur_box_t(col, keyname):
                     return col.selectbox("Munt", cur_opts, index=cur_opts.index(asset_cur),
-                                         key=dk(f"{keyname}_{d_ticker}"), label_visibility="collapsed")
+                                         key=sk(f"{keyname}_{d_ticker}"), label_visibility="collapsed")
 
                 r1a, r1b = st.columns([3, 1])
                 A = r1a.number_input("① Bruto dividend (vóór buitenlandse bronbelasting)",
@@ -2112,14 +2236,14 @@ def page_dividends():
                                    "zodat je ze kunt nakijken en zo nodig aanpassen vóór het opslaan."):
                     st.session_state["div_prefill"] = {
                         "A": rA, "B": rB, "C": rC, "D": rD, "rv_pct": rv_pct,
-                        "cash_basis": st.session_state.get(dk("cashbasis"), "④ Netto"),
+                        "cash_basis": st.session_state.get(sk("cashbasis"), "④ Netto"),
                     }
                     st.session_state["div_amt_nonce"] = dn + 1
                     st.rerun()
 
                 cash_choice = bc2.radio(
                     "Cash-boeking op basis van", ["④ Netto", "③ Bruto na bronbelasting", "① Bruto vóór bronbelasting"],
-                    horizontal=True, key=dk("cashbasis"),
+                    horizontal=True, key=sk("cashbasis"),
                     index=["④ Netto", "③ Bruto na bronbelasting", "① Bruto vóór bronbelasting"].index(pre["cash_basis"]) if pre.get("cash_basis") in ("④ Netto", "③ Bruto na bronbelasting", "① Bruto vóór bronbelasting") else 0,
                     help="Welk bedrag als dividend in het cash-grootboek (💶 Cash) geboekt wordt. "
                          "Standaard het netto (④) — wat je broker effectief stort. Kies ③ of ① als je "
@@ -2170,8 +2294,9 @@ def page_dividends():
                                         account=d_account, details=details)
                         clear_cache()
                         st.session_state["div_amt_nonce"] = dn + 1
+                        _lbl = d_ticker or "algemeen (niet gekoppeld)"
                         st.session_state["div_added_msg"] = (
-                            f"✅ Dividend voor {d_ticker} op {d_account} toegevoegd (netto ≈ {eur(net_eur)}; "
+                            f"✅ Dividend voor {_lbl} op {d_account} toegevoegd (netto ≈ {eur(net_eur)}; "
                             f"cash-boeking: {cash_choice}).")
                         st.rerun()
 
@@ -2491,12 +2616,17 @@ def page_tax():
             sign_icon(g["gain_loss"]): sign_icon(g["gain_loss"]),
             "Ticker":      g["ticker"],
             "Verkoopdatum": g["date"],
-            "Aantal":      f"{g['quantity']:.4f}",
-            "Kostbasis":   eur(g["cost_basis"]),
-            "Verkoopwaarde": eur(g["sell_total"]),
-            "Winst/Verlies": eur(g["gain_loss"]),
+            "Aantal":      g["quantity"],
+            "Kostbasis":   g["cost_basis"],
+            "Verkoopwaarde": g["sell_total"],
+            "Winst/Verlies": g["gain_loss"],
         } for g in sorted(year_gains, key=lambda x: x["date"], reverse=True)]
-        st.dataframe(pd.DataFrame(rows), width='stretch', hide_index=True)
+        st.dataframe(pd.DataFrame(rows), width='stretch', hide_index=True, column_config={
+            "Aantal":        st.column_config.NumberColumn(format="%.4f"),
+            "Kostbasis":     st.column_config.NumberColumn(format="€ %.2f"),
+            "Verkoopwaarde": st.column_config.NumberColumn(format="€ %.2f"),
+            "Winst/Verlies": st.column_config.NumberColumn(format="€ %.2f"),
+        })
     else:
         st.info(f"Geen gerealiseerde transacties in {sel_year}.")
 
@@ -2511,12 +2641,15 @@ def page_tax():
             "Ticker": t["ticker"],
             "Type":   "Aankoop" if t["transaction_type"] == "buy" else "Verkoop",
             "Datum":  t["date"],
-            "Transactiewaarde": eur(t["total_amount"]),
-            "TOB":    eur(t["tob_tax"]),
+            "Transactiewaarde": t["total_amount"],
+            "TOB":    t["tob_tax"],
         } for t in txns_year if t["tob_tax"]]
         if tob_rows:
             with st.expander("TOB-detail per transactie"):
-                st.dataframe(pd.DataFrame(tob_rows), width='stretch', hide_index=True)
+                st.dataframe(pd.DataFrame(tob_rows), width='stretch', hide_index=True, column_config={
+                    "Transactiewaarde": st.column_config.NumberColumn(format="€ %.2f"),
+                    "TOB":              st.column_config.NumberColumn(format="€ %.2f"),
+                })
 
     # ── Dividendfiscaliteit ───────────────────────────────────────────────────
     st.divider()
@@ -2603,10 +2736,14 @@ def page_ai_advisor():
                 st.dataframe(pd.DataFrame([{
                     "Model": r["model"],
                     "Oproepen": r["n"],
-                    "Input-tokens": f"{r['pt']:,}",
-                    "Output-tokens": f"{r['ct']:,}",
-                    "Kost (USD)": f"${r['c']:.4f}",
-                } for r in usage["by_model"]]), width='stretch', hide_index=True)
+                    "Input-tokens": r["pt"],
+                    "Output-tokens": r["ct"],
+                    "Kost (USD)": r["c"],
+                } for r in usage["by_model"]]), width='stretch', hide_index=True, column_config={
+                    "Input-tokens":  st.column_config.NumberColumn(format="%d"),
+                    "Output-tokens": st.column_config.NumberColumn(format="%d"),
+                    "Kost (USD)":    st.column_config.NumberColumn(format="$ %.4f"),
+                })
             if usage["by_function"]:
                 st.caption("Per functie")
                 func_labels = {"tax_optimization": "Belastingadvies",
@@ -2618,8 +2755,10 @@ def page_ai_advisor():
                 st.dataframe(pd.DataFrame([{
                     "Functie": func_labels.get(r["function"], r["function"]),
                     "Oproepen": r["n"],
-                    "Kost (USD)": f"${r['c']:.4f}",
-                } for r in usage["by_function"]]), width='stretch', hide_index=True)
+                    "Kost (USD)": r["c"],
+                } for r in usage["by_function"]]), width='stretch', hide_index=True, column_config={
+                    "Kost (USD)": st.column_config.NumberColumn(format="$ %.4f"),
+                })
 
             st.divider()
             pr1, pr2 = st.columns([3, 1])
@@ -2640,8 +2779,11 @@ def page_ai_advisor():
                         st.rerun()
             pricing = ai_advisor.get_model_pricing()
             st.dataframe(pd.DataFrame([{
-                "Model": m, "Input ($/1M)": f"{p[0]:.2f}", "Output ($/1M)": f"{p[1]:.2f}",
-            } for m, p in pricing.items()]), width='stretch', hide_index=True)
+                "Model": m, "Input ($/1M)": p[0], "Output ($/1M)": p[1],
+            } for m, p in pricing.items()]), width='stretch', hide_index=True, column_config={
+                "Input ($/1M)":  st.column_config.NumberColumn(format="%.2f"),
+                "Output ($/1M)": st.column_config.NumberColumn(format="%.2f"),
+            })
             st.caption("ℹ️ Richtprijzen medio 2026; werkelijke kosten kunnen afwijken. "
                        "Controleer je OpenAI-dashboard voor de exacte factuur.")
         st.divider()
@@ -3148,13 +3290,18 @@ def page_evolution():
         rows.append({
             "Rekening":       acct,
             "Posities":       s["n_positions"],
-            "Kostenbasis":    eur(s["cost_basis"]),
-            "Huidige waarde": eur(s["current_value"]),
-            "W/V (€)":        eur(s["gain_loss"]),
-            "W/V (%)":        pct(s["gain_loss_pct"]),
+            "Kostenbasis":    s["cost_basis"],
+            "Huidige waarde": s["current_value"],
+            "W/V (€)":        s["gain_loss"],
+            "W/V (%)":        s["gain_loss_pct"],
         })
     if rows:
-        st.dataframe(pd.DataFrame(rows), width='stretch', hide_index=True)
+        st.dataframe(pd.DataFrame(rows), width='stretch', hide_index=True, column_config={
+            "Kostenbasis":    st.column_config.NumberColumn(format="€ %.2f"),
+            "Huidige waarde": st.column_config.NumberColumn(format="€ %.2f"),
+            "W/V (€)":        st.column_config.NumberColumn(format="€ %.2f"),
+            "W/V (%)":        st.column_config.NumberColumn(format="%+.2f%%"),
+        })
         fig_cmp = go.Figure(go.Bar(
             x=[r["Rekening"] for r in rows],
             y=[summ[r["Rekening"]]["gain_loss_pct"] for r in rows],
@@ -3197,15 +3344,18 @@ def page_cash():
             for a, r in sorted(per.items()):
                 rows.append({
                     "Rekening":       a,
-                    "Stortingen":     eur(r["deposits"]),
-                    "Opnames":        eur(-r["withdrawals"]),
-                    "Aankopen":       eur(-r["buys"]),
-                    "Verkopen":       eur(r["sells"]),
-                    "Dividenden":     eur(r["dividends"]),
-                    "Rekeningkosten": eur(-r["costs"]),
-                    "Beschikbaar":    eur(r["available"]),
+                    "Stortingen":     r["deposits"],
+                    "Opnames":        -r["withdrawals"],
+                    "Aankopen":       -r["buys"],
+                    "Verkopen":       r["sells"],
+                    "Dividenden":     r["dividends"],
+                    "Rekeningkosten": -r["costs"],
+                    "Beschikbaar":    r["available"],
                 })
-            st.dataframe(pd.DataFrame(rows), width="stretch", hide_index=True)
+            _money_cfg = {c: st.column_config.NumberColumn(format="€ %.2f") for c in
+                         ("Stortingen", "Opnames", "Aankopen", "Verkopen",
+                          "Dividenden", "Rekeningkosten", "Beschikbaar")}
+            st.dataframe(pd.DataFrame(rows), width="stretch", hide_index=True, column_config=_money_cfg)
             st.caption("Aankopen en rekeningkosten verlagen de cash (−); verkopen en dividenden verhogen ze (+). "
                        "Een negatieve beschikbare cash betekent dat er meer is uitgegeven dan gestort — "
                        "registreer dan je ontbrekende stortingen. Betaalde je de personenbelasting op "
@@ -3253,16 +3403,20 @@ def page_cash():
         else:
             lbl = {"Storting": "🟢 Storting", "Opname": "🔴 Opname", "Aankoop": "🔻 Aankoop",
                    "Verkoop": "🔺 Verkoop", "Dividend": "💰 Dividend",
+                   "Interest": "🏦 Interest", "Securities lending": "🔁 Securities lending",
                    "Rekeningkost": "🧾 Rekeningkost", "Toekenning": "🎁 Toekenning"}
             rows = [{
                 "Datum":    it["date"],
                 "Rekening": it["account"],
                 "Type":     lbl.get(it["label"], it["label"]),
                 "Omschrijving": it["desc"],
-                "Mutatie":  eur(it["delta"]),
-                "Saldo":    eur(it["balance"]),
+                "Mutatie":  it["delta"],
+                "Saldo":    it["balance"],
             } for it in reversed(ledger)]   # nieuwste bovenaan
-            st.dataframe(pd.DataFrame(rows), width="stretch", hide_index=True)
+            st.dataframe(pd.DataFrame(rows), width="stretch", hide_index=True, column_config={
+                "Mutatie": st.column_config.NumberColumn(format="€ %.2f"),
+                "Saldo":   st.column_config.NumberColumn(format="€ %.2f"),
+            })
             st.caption("Volledig grootboek: stortingen/opnames samen met de automatisch afgeleide "
                        "bewegingen uit aankopen (−), verkopen (+), dividenden (+) en rekeningkosten (−). "
                        "'Saldo' is het lopende cashsaldo per rekening. Toekenningen (performance shares) "
