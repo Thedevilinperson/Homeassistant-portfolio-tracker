@@ -249,14 +249,32 @@ _BF_BROWSER_HEADERS = {
 
 
 def _bf_session():
-    """Eén gedeelde requests.Session voor alle Börse-Frankfurt-verkeer. Belangrijk:
-    de sessie bezoekt eerst de homepage zodat WAF-cookies verzameld worden — losse
-    requests zonder cookies krijgen HTTP 403."""
+    """Eén gedeelde sessie voor alle Börse-Frankfurt-verkeer. Bij voorkeur via
+    curl_cffi met Chrome-imitatie: hun WAF blokkeert clients op TLS-vingerafdruk,
+    en de standaard Python-requests-handdruk wordt als bot herkend (403 met leeg
+    antwoord, ondanks correcte salt en headers). curl_cffi zit al in de container
+    (dependency van yfinance). Terugval: gewone requests.Session. De sessie bezoekt
+    eerst de homepage zodat WAF-cookies verzameld worden."""
     global _BF_SESSION
     if _BF_SESSION is None:
-        import requests
-        s = requests.Session()
-        s.headers.update(_BF_BROWSER_HEADERS)
+        s = None
+        try:
+            from curl_cffi import requests as curl_requests
+            s = curl_requests.Session(impersonate="chrome")
+            # curl_cffi zet zelf consistente Chrome-headers (UA, sec-ch-ua, encoding);
+            # enkel context toevoegen, de imitatie niet overschrijven.
+            s.headers.update({
+                "Origin":  "https://www.boerse-frankfurt.de",
+                "Referer": "https://www.boerse-frankfurt.de/",
+                "Accept-Language": "de-DE,de;q=0.9,en;q=0.8",
+            })
+            logger.info("_bf_session: curl_cffi met Chrome-imitatie actief")
+        except Exception as e:
+            logger.warning(f"_bf_session: curl_cffi niet bruikbaar ({e}); terugval op requests "
+                           "(kans op 403 door TLS-vingerafdruk)")
+            import requests
+            s = requests.Session()
+            s.headers.update(_BF_BROWSER_HEADERS)
         _BF_SESSION = s
     return _BF_SESSION
 

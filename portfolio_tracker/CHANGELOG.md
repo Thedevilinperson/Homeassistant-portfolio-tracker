@@ -2,6 +2,17 @@
 
 Alle noemenswaardige wijzigingen aan de Portfolio Tracker add-on.
 
+## 0.27.8
+- TLS-vingerafdruk was de resterende 403-oorzaak bij Börse Frankfurt. De 0.27.7-log toonde
+'salt=dynamisch' — salt en headers klopten dus — en tóch een lege 403: hun WAF herkent de
+TLS-handdruk van Python-requests als bot, ongeacht de headers. De Börse-Frankfurt-sessie loopt nu
+via curl_cffi met Chrome-imitatie (dezelfde techniek en dezelfde bibliotheek waarmee yfinance
+Yahoo's botdetectie omzeilt; zit al in de container). curl_cffi zet daarbij zelf consistente
+Chrome-headers; alleen Origin/Referer/taal worden toegevoegd zodat de imitatie intact blijft.
+Is curl_cffi onverhoopt niet bruikbaar, dan valt de code terug op gewone requests en meldt de log
+dat expliciet. De sessie-aanmaak, de terugval en de volledige request-flow met dynamische salt
+zijn getest; ook de timeout-signatuur van curl_cffi is geverifieerd.
+
 ## 0.27.7
 - Brotli-bug in de salt-detectie opgelost. Het HTML-snippet in de 0.27.6-log toonde binaire data:
 de homepage van Börse Frankfurt kwam Brotli-gecomprimeerd binnen omdat de headers 'br'
