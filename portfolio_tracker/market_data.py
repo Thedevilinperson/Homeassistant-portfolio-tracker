@@ -595,11 +595,68 @@ def _price_lang_schwarz(isin: str) -> tuple[float | None, str | None]:
     return None, None
 
 
+_ONVISTA_TYPE_PATH = {
+    "STOCK": "stocks", "FUND": "funds", "BOND": "bonds", "DERIVATIVE": "derivatives",
+    "INDEX": "indices", "ETF": "etfs", "CURRENCY": "currencies",
+}
+
+
+def _price_onvista(isin: str) -> tuple[float | None, str | None]:
+    """(prijs, munt) via de open onvista-API (api.onvista.de) — geen salt of
+    TLS-verdediging, dekt ook derivaten zoals warrants/certificaten. Werkwijze
+    (zelfde patroon als het pyOnvista-project): instrument zoeken op ISIN via
+    /instruments/search/facet, daarna /api/v1/<type>/ISIN:<isin>/snapshot en de
+    koers uit quote.last (terugval: bid/ask, daarna quoteList-noteringen)."""
+    if not _isin_valid(isin):
+        return None, None
+    import requests
+    headers = {"User-Agent": _BF_BROWSER_HEADERS["User-Agent"],
+               "Accept": "application/json, text/plain, */*",
+               "Referer": "https://www.onvista.de/"}
+    base = "https://api.onvista.de/api/v1"
+    try:
+        resp = requests.get(f"{base}/instruments/search/facet",
+                            params={"perType": 10, "searchValue": isin},
+                            headers=headers, timeout=8)
+        if not resp.ok:
+            logger.info(f"_price_onvista({isin}): zoek-HTTP {resp.status_code}")
+            return None, None
+        etype = None
+        for facet in (resp.json() or {}).get("facets", []):
+            for it in facet.get("results", []) or []:
+                if (it.get("isin") or "").upper() == isin:
+                    etype = it.get("entityType")
+                    break
+            if etype:
+                break
+        if not etype:
+            logger.info(f"_price_onvista({isin}): geen instrument gevonden")
+            return None, None
+        paths = [_ONVISTA_TYPE_PATH.get(etype, etype.lower() + "s"), etype]
+        for p in paths:
+            resp2 = requests.get(f"{base}/{p}/ISIN:{isin}/snapshot",
+                                 headers=headers, timeout=8)
+            if not resp2.ok:
+                continue
+            snap = resp2.json() or {}
+            quotes = [snap.get("quote") or {}]
+            quotes += ((snap.get("quoteList") or {}).get("list") or [])
+            for q in quotes:
+                price = _to_float(q.get("last") or q.get("bid") or q.get("ask"))
+                if price:
+                    cur = q.get("isoCurrency") or (snap.get("instrument") or {}).get("isoCurrency") or "EUR"
+                    return price, cur
+        logger.info(f"_price_onvista({isin}): snapshot zonder bruikbare koers (type {etype})")
+    except Exception as e:
+        logger.warning(f"_price_onvista({isin}): {e}")
+    return None, None
+
+
 # Externe ISIN-bronnen, in volgorde geprobeerd na Yahoo. Uitbreidbaar met extra
 # bronnen door een functie (isin)->(prijs,munt) toe te voegen aan deze lijst.
-# Börse Frankfurt eerst (dekt warrants/certificaten), dan Tradegate, dan Lang &
-# Schwarz als toegankelijker vangnet zonder salt-beveiliging.
-_ISIN_PROVIDERS = [_price_boerse_frankfurt, _price_tradegate, _price_lang_schwarz]
+# onvista eerst: open API zonder salt/TLS-verdediging die ook derivaten dekt.
+# Daarna Börse Frankfurt (intraday bied/laat), Tradegate en Lang & Schwarz.
+_ISIN_PROVIDERS = [_price_onvista, _price_boerse_frankfurt, _price_tradegate, _price_lang_schwarz]
 
 
 def probe_isin(isin: str) -> tuple[float | None, str | None, str | None]:
@@ -616,7 +673,7 @@ def probe_isin(isin: str) -> tuple[float | None, str | None, str | None]:
         if p is not None:
             return p, c, f"Yahoo ({sym})"
     names = {"_price_tradegate": "Tradegate", "_price_boerse_frankfurt": "Börse Frankfurt",
-             "_price_lang_schwarz": "Lang & Schwarz"}
+             "_price_lang_schwarz": "Lang & Schwarz", "_price_onvista": "onvista"}
     for provider in _ISIN_PROVIDERS:
         p, c = provider(isin)
         if p is not None:

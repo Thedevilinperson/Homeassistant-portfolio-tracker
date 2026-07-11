@@ -1196,7 +1196,7 @@ def page_assets():
                 else:
                     st.info("ℹ️ Deze ISIN staat niet op Yahoo en er werd (nog) geen externe koers gevonden. "
                             "Vul een **naam** in en klik op Toevoegen — de app blijft koersen proberen via de "
-                            "ISIN (Tradegate, Börse Frankfurt). Lukt dat niet, zet dan een **handmatige koers** "
+                            "ISIN (onvista, Börse Frankfurt, Tradegate, Lang & Schwarz). Lukt dat niet, zet dan een **handmatige koers** "
                             "in het overzicht als laatste redmiddel.")
             else:
                 st.success("✨ Velden ingevuld via Yahoo Finance — controleer en pas aan waar nodig, en klik daarna op Toevoegen.")
@@ -1286,7 +1286,7 @@ def page_assets():
                                               help="Slotkoers 31/12/2025 (native). Leeg = geen fotomoment."),
                 "Handmatige koers": cc.NumberColumn(min_value=0.0, format="%.4f",
                                               help="Laatste redmiddel: enkel gebruikt als geen enkele onlinebron "
-                                                   "(Yahoo op ticker of ISIN, Tradegate, Börse Frankfurt) een koers "
+                                                   "(Yahoo, onvista, Börse Frankfurt, Tradegate, Lang & Schwarz) een koers "
                                                    "vindt. Zet de ISIN correct in — dan werken de meeste warrants "
                                                    "automatisch. Leeg = volledig automatisch."),
                 "Laatste koers": cc.NumberColumn(disabled=True, format="%.4f"),
@@ -1294,7 +1294,7 @@ def page_assets():
         st.caption("✏️ Bewerk rechtstreeks in de tabel en klik op 'Wijzigingen opslaan'. TOB-tarief, "
                    "buitenlandse bronbelasting en de EUR-fotomomentwaarde volgen automatisch. "
                    "Staat een effect niet op Yahoo (bv. een warrant)? Vul de **ISIN** in — koersen "
-                   "worden dan via de ISIN opgehaald (Yahoo, Tradegate, Börse Frankfurt). Een "
+                   "worden dan via de ISIN opgehaald (Yahoo, onvista, Börse Frankfurt, Tradegate, L&S). Een "
                    "'Handmatige koers' is enkel het laatste redmiddel.")
 
         if st.button("💾 Wijzigingen opslaan", type="primary", key="asset_save_inline"):

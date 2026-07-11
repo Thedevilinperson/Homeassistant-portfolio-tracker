@@ -2,6 +2,18 @@
 
 Alle noemenswaardige wijzigingen aan de Portfolio Tracker add-on.
 
+## 0.28.1
+- Nieuwe primaire ISIN-koersbron: onvista. Ondanks correcte dynamische salt, browserheaders,
+cookies én Chrome-TLS-imitatie (0.27.8) blijft Börse Frankfurt 403 geven — hun beveiliging is
+vermoedelijk verder aangescherpt dan het bekende 2022-algoritme (er bestaan zelfs projecten die
+hiervoor naar Selenium-browserautomatisering grepen). In plaats van die wapenwedloop verder te
+voeren is de open onvista-API (api.onvista.de) toegevoegd als eerste externe bron: geen salt of
+TLS-verdediging, dekt ook derivaten zoals warrants/certificaten. Het patroon volgt het bewezen
+pyOnvista-project: instrument zoeken op ISIN, daarna een snapshot per instrumenttype met
+quote.last (terugval: bid/laat en quoteList-noteringen; onbekende instrumenttypes proberen een
+tweede URL-vorm). De keten is nu: Yahoo → onvista → Börse Frankfurt → Tradegate → Lang & Schwarz
+→ handmatige koers. De formulierteksten benoemen de nieuwe bronnen.
+
 ## 0.28.0
 - Vier robuustheidsverbeteringen aan de koersbronnen (n.a.v. code-review):
   - Canonieke URL-encoding voor de trace-id-hash. De gehashte string moet byte-identiek zijn aan de
