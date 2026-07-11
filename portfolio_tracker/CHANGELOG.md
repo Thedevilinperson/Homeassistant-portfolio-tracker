@@ -2,6 +2,15 @@
 
 Alle noemenswaardige wijzigingen aan de Portfolio Tracker add-on.
 
+## 0.27.7
+- Brotli-bug in de salt-detectie opgelost. Het HTML-snippet in de 0.27.6-log toonde binaire data:
+de homepage van Börse Frankfurt kwam Brotli-gecomprimeerd binnen omdat de headers 'br'
+adverteerden, terwijl requests Brotli alleen uitpakt als het brotli-pakket geïnstalleerd is (en
+dat zit niet in de container). De salt-detectie zocht dus scripttags in gecomprimeerde bytes. De
+sessie adverteert nu enkel 'gzip, deflate' (die pakt requests altijd zelf uit), met een extra
+vangnet dat een onverhoopt toch Brotli-gecomprimeerd antwoord uitpakt als het pakket aanwezig is.
+Alle vijf salt-extractiepaden zijn geregresseerd.
+
 ## 0.27.6
 - Salt-detectie Börse Frankfurt generiek gemaakt. De log van 0.27.5 toonde de exacte oorzaak: de
 homepage werd wel opgehaald, maar de detectie vond er 'geen main-bundle' in — de site gebruikt

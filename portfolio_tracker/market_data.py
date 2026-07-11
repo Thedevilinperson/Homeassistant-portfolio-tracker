@@ -236,7 +236,10 @@ _BF_BROWSER_HEADERS = {
     "User-Agent": ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
                    "(KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36"),
     "Accept-Language": "de-DE,de;q=0.9,en;q=0.8",
-    "Accept-Encoding": "gzip, deflate, br",
+    # Bewust GEEN 'br': requests pakt Brotli alleen uit als het brotli-pakket is
+    # geïnstalleerd; anders krijg je gecomprimeerde bytes als 'tekst' terug en
+    # vindt de salt-detectie niets in de homepage.
+    "Accept-Encoding": "gzip, deflate",
     "Sec-Fetch-Site": "same-site",
     "Sec-Fetch-Mode": "cors",
     "Sec-Fetch-Dest": "empty",
@@ -279,6 +282,14 @@ def _bf_salt(force: bool = False) -> str:
             why = f"homepage HTTP {resp.status_code}"
         else:
             html = resp.text or ""
+            # Vangnet: sommige CDN's sturen toch Brotli; pak uit als het pakket er is.
+            enc = (getattr(resp, "headers", {}) or {}).get("Content-Encoding", "").lower()
+            if "br" in enc and "<" not in html[:200]:
+                try:
+                    import brotli
+                    html = brotli.decompress(resp.content).decode("utf-8", "replace")
+                except Exception:
+                    pass
             # 1) Salt soms rechtstreeks in de HTML (inline config)
             m = re.search(SALT_RE, html)
             if m:
