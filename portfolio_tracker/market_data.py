@@ -72,6 +72,34 @@ def _lookup_isin(tkr, info: dict, ticker: str) -> str:
 
 
 def get_stock_info(ticker: str) -> dict:
+    cand = (ticker or "").strip().upper()
+    # Een ISIN rechtstreeks aan yf.Ticker geven gooit een exception zodra Yahoo de
+    # ISIN niet kent ("Invalid ISIN number"). Los een ISIN daarom eerst op naar een
+    # verhandelbaar Yahoo-symbool via het search-endpoint; lukt dat niet, geef dan
+    # meteen found=False terug zodat de ISIN-only-flow (externe bronnen) het overneemt.
+    if _isin_valid(cand):
+        sym = _yahoo_symbol_for_isin(cand)
+        if not sym:
+            return {"found": False, "name": ticker, "currency": "EUR",
+                    "exchange": "", "type": "stock", "isin": cand}
+        try:
+            tkr  = yf.Ticker(sym)
+            info = tkr.info or {}
+            qt = info.get("quoteType", "").lower()
+            if info.get("longName") or info.get("shortName") or info.get("regularMarketPrice") is not None:
+                return {
+                    "found":    True,
+                    "name":     info.get("longName") or info.get("shortName") or ticker,
+                    "currency": info.get("currency", "EUR"),
+                    "exchange": info.get("exchange", ""),
+                    "type":     "etf" if qt == "etf" else "stock",
+                    "isin":     cand,
+                    "symbol":   sym,
+                }
+        except Exception as e:
+            logger.warning(f"get_stock_info({ticker}) via ISIN-symbool {sym}: {e}")
+        return {"found": False, "name": ticker, "currency": "EUR",
+                "exchange": "", "type": "stock", "isin": cand}
     try:
         tkr  = yf.Ticker(ticker)
         info = tkr.info or {}
@@ -84,25 +112,6 @@ def get_stock_info(ticker: str) -> dict:
             or info.get("previousClose") is not None
         )
         if not found:
-            # Ticker gaf niets op Yahoo. Is het (of lijkt het op) een ISIN, probeer
-            # dan een verhandelbaar symbool via de ISIN te vinden.
-            cand = ticker.strip().upper()
-            if _isin_valid(cand):
-                sym = _yahoo_symbol_for_isin(cand)
-                if sym:
-                    tkr  = yf.Ticker(sym)
-                    info = tkr.info or {}
-                    qt = info.get("quoteType", "").lower()
-                    if info.get("longName") or info.get("shortName") or info.get("regularMarketPrice") is not None:
-                        return {
-                            "found":    True,
-                            "name":     info.get("longName") or info.get("shortName") or ticker,
-                            "currency": info.get("currency", "EUR"),
-                            "exchange": info.get("exchange", ""),
-                            "type":     "etf" if qt == "etf" else "stock",
-                            "isin":     cand,
-                            "symbol":   sym,
-                        }
             return {"found": False, "name": ticker, "currency": "EUR",
                     "exchange": "", "type": "stock", "isin": ""}
         return {
@@ -199,7 +208,13 @@ def _price_tradegate(isin: str) -> tuple[float | None, str | None]:
                             params={"isin": isin},
                             headers={"User-Agent": "Mozilla/5.0"}, timeout=6)
         if resp.ok:
-            data = resp.json()
+            try:
+                data = resp.json()
+            except ValueError:
+                # Geen JSON terug: Tradegate kent deze ISIN wellicht niet (bv. een
+                # certificaat dat er niet noteert). Geen fout, gewoon volgende bron.
+                logger.info(f"_price_tradegate({isin}): geen notering op Tradegate")
+                return None, None
             price = _to_float(data.get("last") or data.get("bid") or data.get("ask"))
             if price:
                 return price, (data.get("currency") or "EUR")
@@ -215,9 +230,9 @@ _BF_SALT_FALLBACK = "w4icATTGtnjAZMbkL3kJwxMfEAKDa3MN"
 
 
 def _bf_salt() -> str:
-    """Haal de (wisselende) salt van boerse-frankfurt.de dynamisch uit de JS-bundle,
-    zodat de beveiligingsheaders blijven kloppen als Börse Frankfurt de salt wijzigt.
-    Resultaat wordt ~24u gecachet; bij falen valt hij terug op een bekende salt."""
+    """Haal de (wisselende) salt van boerse-frankfurt.de dynamisch uit de JS-bundle
+    (zelfde aanpak als het bewezen werkende bf4py-pakket), zodat de headers blijven
+    kloppen als Börse Frankfurt de salt wijzigt. ~24u gecachet; met terugval."""
     import time
     now = time.time()
     if _BF_SALT_CACHE["salt"] and (now - _BF_SALT_CACHE["ts"] < 86400):
@@ -227,18 +242,14 @@ def _bf_salt() -> str:
         import re
         import requests
         html = requests.get("https://www.boerse-frankfurt.de/",
-                            headers={"User-Agent": "Mozilla/5.0"}, timeout=6).text
-        bundles = re.findall(r'src="([^"]*?(?:main|runtime|polyfills)[^"]*?\.js)"', html)
-        for b in bundles:
-            url = b if b.startswith("http") else "https://www.boerse-frankfurt.de/" + b.lstrip("/")
-            try:
-                js = requests.get(url, headers={"User-Agent": "Mozilla/5.0"}, timeout=8).text
-            except Exception:
-                continue
-            m = re.search(r'salt:\s*"([A-Za-z0-9+/=_-]{16,})"', js)
-            if m:
-                salt = m.group(1)
-                break
+                            headers={"User-Agent": "Mozilla/5.0"}, timeout=8).text
+        files = re.findall(r'(?<=src=")main\.\w*\.js', html)
+        if files:
+            js = requests.get("https://www.boerse-frankfurt.de/" + files[0],
+                              headers={"User-Agent": "Mozilla/5.0"}, timeout=10).text
+            salts = re.findall(r'(?<=salt:")\w+', js)
+            if salts:
+                salt = salts[0]
     except Exception as e:
         logger.warning(f"_bf_salt dynamisch ophalen faalde: {e}")
     salt = salt or _BF_SALT_FALLBACK
@@ -246,59 +257,134 @@ def _bf_salt() -> str:
     return salt
 
 
-def _bf_headers(url: str) -> dict:
-    """Bereken de vereiste Börse-Frankfurt-headers (Client-Date, X-Client-TraceId,
-    X-Security). X-Security gebruikt de tijd in Frankfurt (Europe/Berlin), ongeacht
-    de tijdzone van deze server."""
-    import hashlib
+def _frankfurt_now():
+    """Huidige tijd in Frankfurt (Europe/Berlin), ook zonder tzdata in de container:
+    val dan terug op een handmatige CET/CEST-berekening (laatste zondag van maart
+    t.e.m. laatste zondag van oktober = zomertijd, UTC+2; anders UTC+1)."""
     import datetime
     try:
         from zoneinfo import ZoneInfo
-        fra_now = datetime.datetime.now(ZoneInfo("Europe/Berlin"))
+        return datetime.datetime.now(ZoneInfo("Europe/Berlin"))
     except Exception:
-        fra_now = datetime.datetime.utcnow() + datetime.timedelta(hours=1)
-    now_utc = datetime.datetime.now(datetime.timezone.utc)
-    client_date = now_utc.isoformat(timespec="milliseconds").replace("+00:00", "Z")
+        utc = datetime.datetime.now(datetime.timezone.utc)
+        year = utc.year
+        # laatste zondag van maart, 01:00 UTC -> zomertijd aan; laatste zondag oktober, 01:00 UTC -> uit
+        def last_sunday(month):
+            d = datetime.datetime(year, month + 1, 1, 1, tzinfo=datetime.timezone.utc) - datetime.timedelta(days=1)
+            return d - datetime.timedelta(days=(d.weekday() + 1) % 7)
+        dst = last_sunday(3) <= utc < last_sunday(10)
+        return utc + datetime.timedelta(hours=2 if dst else 1)
+
+
+def _bf_headers(url: str) -> dict:
+    """Vereiste Börse-Frankfurt-headers: Client-Date (UTC ISO), X-Client-TraceId
+    (md5 van datum+URL+salt) en X-Security (md5 van de Frankfurt-tijd JJJJMMDDUUMM).
+    Algoritme geverifieerd tegen het gedocumenteerde voorbeeld en tegen bf4py."""
+    import hashlib
+    import datetime
+    now_utc = datetime.datetime.now(datetime.timezone.utc).replace(tzinfo=None)
+    client_date = now_utc.isoformat(timespec="milliseconds") + "Z"
     salt = _bf_salt()
     return {
-        "Client-Date":      client_date,
-        "X-Client-TraceId": hashlib.md5((client_date + url + salt).encode()).hexdigest(),
-        "X-Security":       hashlib.md5(fra_now.strftime("%Y%m%d%H%M").encode()).hexdigest(),
-        "Accept":           "application/json, text/plain, */*",
+        "client-date":      client_date,
+        "x-client-traceid": hashlib.md5((client_date + url + salt).encode()).hexdigest(),
+        "x-security":       hashlib.md5(_frankfurt_now().strftime("%Y%m%d%H%M").encode()).hexdigest(),
+        "accept":           "application/json, text/plain, */*",
         "User-Agent":       "Mozilla/5.0",
         "Origin":           "https://www.boerse-frankfurt.de",
         "Referer":          "https://www.boerse-frankfurt.de/",
     }
 
 
-# Handelsplaatsen (MIC) waarop we een koers proberen. Warrants/certificaten van
-# bv. ING Markets noteren doorgaans op de Frankfurtse Zertifikate-beurs (XFRA).
-_BF_MICS = ["XFRA", "XETR", "XSTU", "XGAT"]
+def _bf_request(function: str, params: dict):
+    """GET naar https://api.boerse-frankfurt.de/v1/data/<function>?<params> met de
+    vereiste headers. Geeft de JSON terug, of None bij een fout/afwijzing."""
+    import urllib.parse
+    import requests
+    url = "https://api.boerse-frankfurt.de/v1/data/" + function + "?" + urllib.parse.urlencode(params)
+    try:
+        resp = requests.get(url, headers=_bf_headers(url), timeout=(3.5, 10))
+        if not resp.ok or not resp.text:
+            logger.warning(f"_bf_request({function}): HTTP {resp.status_code}")
+            return None
+        data = resp.json()
+        if isinstance(data, dict) and data.get("messages"):
+            logger.warning(f"_bf_request({function}): geweigerd: {data['messages']}")
+            return None
+        return data
+    except Exception as e:
+        logger.warning(f"_bf_request({function}): {e}")
+        return None
+
+
+# Handelsplaatsen (MIC) die we proberen als het instrument ze niet zelf meldt.
+# Warrants/certificaten (bv. ING Markets) noteren doorgaans op XFRA (Börse
+# Frankfurt Zertifikate) of XSC1/XSCO (Scoach); aandelen/ETF's op XETR.
+_BF_MICS = ["XFRA", "XSC1", "XSCO", "XETR", "XSTU"]
+
+
+def _bf_available_mics(isin: str) -> list:
+    """Vraag de handelsplaatsen van dit instrument op via instrument_information;
+    val terug op de standaardlijst als dat niet lukt."""
+    data = _bf_request("instrument_information", {"isin": isin})
+    mics = []
+    try:
+        def _collect(obj):
+            if isinstance(obj, dict):
+                for k, v in obj.items():
+                    if k in ("mic", "micCode") and isinstance(v, str) and len(v) == 4:
+                        mics.append(v.upper())
+                    else:
+                        _collect(v)
+            elif isinstance(obj, list):
+                for it in obj:
+                    _collect(it)
+        _collect(data)
+    except Exception:
+        pass
+    seen, ordered = set(), []
+    for m in mics + _BF_MICS:
+        if m not in seen:
+            seen.add(m)
+            ordered.append(m)
+    return ordered
 
 
 def _price_boerse_frankfurt(isin: str) -> tuple[float | None, str | None]:
-    """(prijs, munt) via de Börse-Frankfurt-API. Werkt ook voor warrants/certificaten
-    (bv. ING Markets, ISIN NL0015002RI2). Gebruikt de vereiste beveiligingsheaders met
-    een dynamisch opgehaalde salt, en probeert enkele handelsplaatsen."""
+    """(prijs, munt) via de Börse-Frankfurt-API. Werkt ook voor warrants en
+    certificaten (bv. ING Markets NL0015002RI2). Probeert per handelsplaats eerst
+    de recentste bied-/laatkoers (intraday) en daarna de laatste EOD-slotkoers."""
     if not _isin_valid(isin):
         return None, None
-    import requests
-    base = "https://api.boerse-frankfurt.de/v1/data/quote_box/single"
-    for mic in _BF_MICS:
-        url = f"{base}?isin={isin}&mic={mic}"
-        try:
-            resp = requests.get(url, headers=_bf_headers(url), timeout=8)
-            if not resp.ok:
-                continue
-            data = resp.json() or {}
-            price = _to_float(data.get("lastPrice"))
-            if price is None:
-                # geen last -> val terug op bied/laat (bv. bij illiquide certificaten)
-                price = _to_float(data.get("bidPrice") or data.get("askPrice"))
+    import datetime
+    for mic in _bf_available_mics(isin)[:6]:
+        # 1) Recentste bied/laat (dekt illiquide certificaten zonder recente trade)
+        now = datetime.datetime.now(datetime.timezone.utc)
+        frm = (now - datetime.timedelta(days=5)).isoformat(timespec="seconds").replace("+00:00", "Z")
+        to  = now.isoformat(timespec="seconds").replace("+00:00", "Z")
+        data = _bf_request("bid_ask_history",
+                           {"limit": 1, "offset": 0, "isin": isin, "mic": mic,
+                            "from": frm, "to": to})
+        if isinstance(data, dict) and data.get("data"):
+            row = data["data"][0]
+            price = _to_float(row.get("bidPrice") or row.get("askPrice")
+                              or row.get("bidLimit") or row.get("askLimit"))
             if price:
-                return price, (data.get("currency") or data.get("tradingCurrency") or "EUR")
-        except Exception as e:
-            logger.warning(f"_price_boerse_frankfurt({isin},{mic}): {e}")
+                return price, "EUR"
+        # 2) Laatste EOD-slotkoers (afgelopen 14 dagen)
+        today = datetime.date.today()
+        data = _bf_request("price_history",
+                           {"isin": isin, "mic": mic, "limit": 20, "offset": 0,
+                            "minDate": (today - datetime.timedelta(days=14)).isoformat(),
+                            "maxDate": today.isoformat(),
+                            "cleanSplit": False, "cleanPayout": False,
+                            "cleanSubscription": False})
+        if isinstance(data, dict) and data.get("data"):
+            rows = sorted(data["data"], key=lambda r: r.get("date") or "", reverse=True)
+            for r in rows:
+                price = _to_float(r.get("close") or r.get("last"))
+                if price:
+                    return price, "EUR"
     return None, None
 
 
@@ -349,11 +435,13 @@ def get_current_price(ticker: str) -> tuple[float | None, str | None]:
     isin = _asset_isin(ticker)
     # Geen ISIN op het activum, maar het ticker zelf is een ISIN (bv. een warrant die
     # met de ISIN als ticker werd toegevoegd)? Gebruik die dan.
-    if not _isin_valid(isin) and _isin_valid(ticker.strip().upper()):
+    ticker_is_isin = _isin_valid(ticker.strip().upper())
+    if not _isin_valid(isin) and ticker_is_isin:
         isin = ticker.strip().upper()
 
-    # 1) Yahoo op het ticker zelf
-    price, currency = _price_from_yahoo_symbol(ticker)
+    # 1) Yahoo op het ticker zelf — maar niet als het ticker een ISIN is: yfinance
+    #    gooit dan een exception zodra Yahoo de ISIN niet kent ("Invalid ISIN number").
+    price, currency = (None, None) if ticker_is_isin else _price_from_yahoo_symbol(ticker)
 
     # 2) Yahoo via een uit de ISIN afgeleid symbool
     if price is None and _isin_valid(isin):

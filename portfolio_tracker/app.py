@@ -1139,11 +1139,13 @@ def page_assets():
             exchange = st.text_input("Beurs", key=k("exch"), placeholder="bv. NMS, AMS")
             isin     = st.text_input("ISIN", key=k("isin"), placeholder="bv. IE00BK5BQT80")
             _clist = list(tax_mod.COUNTRY_NAMES.keys())
-            _cdef  = st.session_state.get(k("country"), "BE")
-            if _cdef not in _clist:
-                _clist = _clist + [_cdef]
-            country = st.selectbox("Land van herkomst", _clist,
-                                   index=_clist.index(_cdef), key=k("country"),
+            # Default via session state (géén index-parameter): de fetch-flows zetten
+            # het land ook via st.session_state, en Streamlit staat niet toe dat een
+            # widget zowel een default als een session-state-waarde krijgt.
+            st.session_state.setdefault(k("country"), "BE")
+            if st.session_state[k("country")] not in _clist:
+                _clist = _clist + [st.session_state[k("country")]]
+            country = st.selectbox("Land van herkomst", _clist, key=k("country"),
                                    format_func=lambda c: f"{c} — {tax_mod.COUNTRY_NAMES.get(c, c)}",
                                    help="Bepaalt het tarief van de buitenlandse bronbelasting bij "
                                         "dividenden (zie ⚙️ Instellingen). Tip: het land van de "

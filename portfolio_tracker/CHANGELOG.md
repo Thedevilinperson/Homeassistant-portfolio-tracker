@@ -2,6 +2,34 @@
 
 Alle noemenswaardige wijzigingen aan de Portfolio Tracker add-on.
 
+## 0.27.4
+- Restpunten uit de logs van de ISIN-flow opgelost (aanvulling op 0.27.3):
+  - Geen 'Invalid ISIN number'-exceptions meer. yfinance gooit een exception zodra je een ISIN als
+ticker doorgeeft die Yahoo niet kent; daardoor werd de ISIN-fallback in get_stock_info nooit
+bereikt en vervuilde elke prijsverversing de log. Een ISIN wordt nu eerst via het
+Yahoo-search-endpoint naar een verhandelbaar symbool vertaald; lukt dat niet, dan gaat de flow
+meteen (zonder exception) naar de externe bronnen. Ook get_current_price slaat de rechtstreekse
+Yahoo-call over wanneer het ticker een ISIN is.
+  - Tradegate-lognoise beperkt: een niet-JSON-antwoord (ISIN noteert er niet, zoals bij het
+ING-certificaat) wordt nu herkend als 'geen notering' i.p.v. een parsefout.
+  - Streamlit-waarschuwing bij 'Land van herkomst' opgelost: de selectbox kreeg zowel een
+default (index) als een waarde via session state (gezet door de info-ophaalflow). De default
+loopt nu volledig via session state, zodat de warning met stacktrace uit de log verdwijnt.
+
+## 0.27.3
+- Börse Frankfurt effectief werkend voor warrants/certificaten. De 0.27.2-provider gebruikte
+'quote_box/single' — dat blijkt een streaming-endpoint te zijn, geen gewone JSON-call, waardoor er
+nooit een koers terugkwam. De provider is herschreven op basis van de bewezen werkende
+bf4py-aanpak met echte JSON-endpoints: eerst worden de handelsplaatsen van het instrument
+opgevraagd (instrument_information), daarna per handelsplaats de recentste bied-/laatkoers
+(bid_ask_history — dekt illiquide certificaten zonder recente trade, zoals de 'Geld'-koers 12,22
+van de ING-warrant) en anders de laatste EOD-slotkoers (price_history, afgelopen 14 dagen). De
+MIC-lijst bevat nu ook de Zertifikate-platformen (XFRA/XSC1/XSCO). Verder is de
+zomertijd-terugval gecorrigeerd (X-Security gebruikt Frankfurt-tijd; zonder tzdata in de container
+wordt CET/CEST nu handmatig juist berekend i.p.v. vast +1u) en volgt de salt-extractie exact het
+werkende bf4py-patroon. De volledige request-flow (headers, MIC-detectie, bid/ask- en EOD-pad) is
+getest tegen een nagebootste API.
+
 ## 0.27.2
 - Solide koersen voor warrants/certificaten via Börse Frankfurt. De Börse-Frankfurt-provider is
 herschreven zodat hij effectief werkt voor structured products zoals ING-Markets-warrants (bv.
