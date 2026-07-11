@@ -2,6 +2,24 @@
 
 Alle noemenswaardige wijzigingen aan de Portfolio Tracker add-on.
 
+## 0.28.0
+- Vier robuustheidsverbeteringen aan de koersbronnen (n.a.v. code-review):
+  - Canonieke URL-encoding voor de trace-id-hash. De gehashte string moet byte-identiek zijn aan de
+effectief verstuurde URL; daarom nu strikt percent-encoding (%20 i.p.v. '+', zodat geen enkele
+HTTP-client iets hernormaliseert), JS-stijl booleans ('true'/'false' i.p.v. Pythons
+'True'/'False') en een vaste parametervolgorde.
+  - Betere salt-diagnose: staat het woord 'salt' wél in een bundle maar matcht het patroon niet
+(hernoemd, geobfusceerd of verstopt in een groter config-object), dan logt de melding voortaan
+de context rond die plek — zo is bij een toekomstige wijziging meteen zichtbaar hoe de nieuwe
+vorm eruitziet.
+  - Exponentiële backoff i.p.v. een vaste blokkade van 10 minuten: bij een aanhoudende 403 pauzeert
+Börse Frankfurt nu 30s, dan 60s, 120s, ... tot maximaal 10 minuten, en een geslaagde call reset
+de teller. Zo blokkeert één tijdelijke weigering de interactieve app niet onnodig lang.
+  - Nieuwe koersbron Lang & Schwarz (ls-tc.de) als extra vangnet ná Börse Frankfurt en Tradegate:
+een toegankelijker platform zonder salt-beveiliging dat veel warrants/certificaten verhandelt.
+Instrument wordt op ISIN opgezocht, de koers komt uit de recentste chartdata; elk afwijkend
+antwoord wordt gelogd en valt netjes door naar de volgende bron.
+
 ## 0.27.8
 - TLS-vingerafdruk was de resterende 403-oorzaak bij Börse Frankfurt. De 0.27.7-log toonde
 'salt=dynamisch' — salt en headers klopten dus — en tóch een lege 403: hun WAF herkent de

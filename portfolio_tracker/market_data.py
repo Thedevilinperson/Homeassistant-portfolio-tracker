@@ -229,7 +229,23 @@ _BF_SALT_CACHE: dict = {"salt": None, "ts": 0.0, "source": None}
 _BF_SALT_FALLBACK = "w4icATTGtnjAZMbkL3kJwxMfEAKDa3MN"
 
 _BF_SESSION = None
-_BF_BLOCK = {"until": 0.0, "last_force": 0.0}
+_BF_BLOCK = {"until": 0.0, "last_force": 0.0, "fails": 0}
+
+
+def _bf_urlencode(params: dict) -> str:
+    """Canonieke, deterministische query-string voor de trace-id-hash. De server
+    herrekent de hash over de URL die hij ontvangt; de gehashte string moet dus
+    byte-identiek zijn aan wat effectief verstuurd wordt. Daarom: percent-encoding
+    (quote, dus %20 i.p.v. '+', zodat geen enkele HTTP-client iets hernormaliseert),
+    JS-stijl booleans ('true'/'false' i.p.v. Pythons 'True'/'False') en een vaste
+    (insertie-)volgorde van de parameters."""
+    import urllib.parse
+    norm = []
+    for k, v in params.items():
+        if isinstance(v, bool):
+            v = "true" if v else "false"
+        norm.append((k, v))
+    return urllib.parse.urlencode(norm, quote_via=urllib.parse.quote)
 
 # Volwaardige browserheaders: de WAF van boerse-frankfurt.de weigert kale clients.
 _BF_BROWSER_HEADERS = {
@@ -325,6 +341,7 @@ def _bf_salt(force: bool = False) -> str:
                 ordered.sort(key=lambda f: (0 if "main" in f else (1 if ("index" in f or "chunk" in f) else 2)))
                 if not ordered:
                     why = f"geen script-bundles in homepage; begin: {html[:120]!r}"
+                salt_context = None
                 for f in ordered[:6]:
                     url = f if f.startswith("http") else "https://www.boerse-frankfurt.de/" + f.lstrip("/")
                     try:
@@ -335,9 +352,18 @@ def _bf_salt(force: bool = False) -> str:
                     if m:
                         salt = m.group(1)
                         break
+                    # Diagnose: komt het woord 'salt' voor maar matcht het patroon
+                    # niet, bewaar dan de context — dat verraadt de nieuwe vorm
+                    # (hernoemd, geobfusceerd of in een groter config-object).
+                    if salt_context is None:
+                        i = js.lower().find("salt")
+                        if i >= 0:
+                            salt_context = js[max(0, i - 20):i + 60]
                 if ordered and not salt:
                     names = ", ".join(x.split("/")[-1].split("?")[0] for x in ordered[:4])
                     why = f"salt niet gevonden in {len(ordered)} bundle(s): {names}"
+                    if salt_context:
+                        why += f" | context rond 'salt': {salt_context!r}"
     except Exception as e:
         why = str(e)
     if salt:
@@ -388,15 +414,16 @@ def _bf_headers(url: str) -> dict:
 
 def _bf_request(function: str, params: dict, _retry: bool = True):
     """GET naar https://api.boerse-frankfurt.de/v1/data/<function>?<params> via de
-    gedeelde sessie (cookies!) met de vereiste headers. Bij een 403 wordt eenmalig
-    de salt vers opgehaald en opnieuw geprobeerd (de salt roteert af en toe). Blijft
-    het 403, dan pauzeert de provider 10 minuten (circuit-breaker) om logspam en
-    trage verversingen te vermijden. Logt status én een stukje van het antwoord."""
+    gedeelde sessie met de vereiste headers. Bij een 403 wordt eenmalig de salt vers
+    opgehaald en opnieuw geprobeerd (de salt roteert af en toe). Blijft het 403, dan
+    pauzeert de provider met exponentiële backoff (30s, 60s, 120s, ... max 10 min)
+    zodat een tijdelijke weigering de interactieve app niet lang blokkeert; een
+    geslaagde call reset de backoff. Logt status én een stukje van het antwoord."""
     import time
     import urllib.parse
     if time.time() < _BF_BLOCK["until"]:
         return None  # recent geblokkeerd (403): even niet opnieuw proberen
-    url = "https://api.boerse-frankfurt.de/v1/data/" + function + "?" + urllib.parse.urlencode(params)
+    url = "https://api.boerse-frankfurt.de/v1/data/" + function + "?" + _bf_urlencode(params)
     try:
         s = _bf_session()
         resp = s.get(url, headers=_bf_headers(url), timeout=(3.5, 10))
@@ -407,11 +434,13 @@ def _bf_request(function: str, params: dict, _retry: bool = True):
             _bf_salt(force=True)
             return _bf_request(function, params, _retry=False)
         if resp.status_code == 403:
+            _BF_BLOCK["fails"] = min(_BF_BLOCK["fails"] + 1, 6)
+            pause = min(600, 30 * (2 ** (_BF_BLOCK["fails"] - 1)))  # 30,60,120,240,480,600
+            _BF_BLOCK["until"] = time.time() + pause
             body = (resp.text or "")[:120].replace("\n", " ")
             logger.warning(f"_bf_request({function}): HTTP 403 blijft na verse salt "
                            f"(salt={_BF_SALT_CACHE.get('source')}) | {body} — "
-                           "Börse Frankfurt 10 min gepauzeerd")
-            _BF_BLOCK["until"] = time.time() + 600
+                           f"Börse Frankfurt {pause}s gepauzeerd (poging {_BF_BLOCK['fails']})")
             return None
         if not resp.ok or not resp.text:
             body = (resp.text or "")[:120].replace("\n", " ")
@@ -422,6 +451,7 @@ def _bf_request(function: str, params: dict, _retry: bool = True):
         if isinstance(data, dict) and data.get("messages"):
             logger.warning(f"_bf_request({function}): geweigerd: {data['messages']}")
             return None
+        _BF_BLOCK["fails"] = 0  # succes: backoff resetten
         return data
     except Exception as e:
         logger.warning(f"_bf_request({function}): {e}")
@@ -499,10 +529,77 @@ def _price_boerse_frankfurt(isin: str) -> tuple[float | None, str | None]:
     return None, None
 
 
+def _price_lang_schwarz(isin: str) -> tuple[float | None, str | None]:
+    """(prijs, munt) via Lang & Schwarz (ls-tc.de) — een toegankelijker platform
+    zonder salt-beveiliging, als vangnet naast Börse Frankfurt en Tradegate. L&S
+    verhandelt veel warrants/certificaten. Werkwijze: instrument opzoeken op ISIN
+    (JSON-search) en daarna de recentste koers uit de mini-chartdata halen. Alle
+    stappen zijn defensief: elk afwijkend antwoord wordt gelogd en levert gewoon
+    (None, None) op zodat de volgende bron het overneemt."""
+    if not _isin_valid(isin):
+        return None, None
+    import requests
+    headers = {"User-Agent": _BF_BROWSER_HEADERS["User-Agent"],
+               "Accept": "application/json, text/plain, */*",
+               "Referer": "https://www.ls-tc.de/"}
+    try:
+        resp = requests.get("https://www.ls-tc.de/_rpc/json/.lstc/instrument/search/main",
+                            params={"q": isin, "localeId": 2},
+                            headers=headers, timeout=8)
+        if not resp.ok:
+            logger.info(f"_price_lang_schwarz({isin}): zoek-HTTP {resp.status_code}")
+            return None, None
+        try:
+            found = resp.json()
+        except ValueError:
+            logger.info(f"_price_lang_schwarz({isin}): zoekantwoord geen JSON")
+            return None, None
+        # Antwoord kan een lijst zijn of een dict met een lijst erin
+        items = found if isinstance(found, list) else \
+            (found.get("items") or found.get("data") or found.get("instruments") or [])
+        inst_id = None
+        for it in items:
+            if isinstance(it, dict):
+                if (it.get("isin") or "").upper() in ("", isin):
+                    inst_id = it.get("instrumentId") or it.get("id")
+                    if inst_id:
+                        break
+        if not inst_id:
+            logger.info(f"_price_lang_schwarz({isin}): geen instrument gevonden")
+            return None, None
+        resp2 = requests.get("https://www.ls-tc.de/_rpc/json/instrument/chart/dataForInstrument",
+                             params={"container": "chart1", "instrumentId": inst_id,
+                                     "marketId": 1, "quotetype": "mid",
+                                     "series": "intraday,history", "type": "mini"},
+                             headers=headers, timeout=8)
+        if not resp2.ok:
+            logger.info(f"_price_lang_schwarz({isin}): chart-HTTP {resp2.status_code}")
+            return None, None
+        try:
+            chart = resp2.json()
+        except ValueError:
+            logger.info(f"_price_lang_schwarz({isin}): chartantwoord geen JSON")
+            return None, None
+        series = (chart or {}).get("series") or {}
+        for key in ("intraday", "history"):
+            sdata = series.get(key) or {}
+            pts = sdata.get("data") or []
+            if pts:
+                last = pts[-1]
+                price = _to_float(last[1] if isinstance(last, (list, tuple)) and len(last) > 1 else last)
+                if price:
+                    return price, "EUR"
+        logger.info(f"_price_lang_schwarz({isin}): geen koerspunten in chartdata")
+    except Exception as e:
+        logger.warning(f"_price_lang_schwarz({isin}): {e}")
+    return None, None
+
+
 # Externe ISIN-bronnen, in volgorde geprobeerd na Yahoo. Uitbreidbaar met extra
-# bronnen (bv. een ING-Markets-provider) door een functie (isin)->(prijs,munt) toe
-# te voegen aan deze lijst. Börse Frankfurt eerst: dekt warrants/certificaten.
-_ISIN_PROVIDERS = [_price_boerse_frankfurt, _price_tradegate]
+# bronnen door een functie (isin)->(prijs,munt) toe te voegen aan deze lijst.
+# Börse Frankfurt eerst (dekt warrants/certificaten), dan Tradegate, dan Lang &
+# Schwarz als toegankelijker vangnet zonder salt-beveiliging.
+_ISIN_PROVIDERS = [_price_boerse_frankfurt, _price_tradegate, _price_lang_schwarz]
 
 
 def probe_isin(isin: str) -> tuple[float | None, str | None, str | None]:
@@ -518,7 +615,8 @@ def probe_isin(isin: str) -> tuple[float | None, str | None, str | None]:
         p, c = _price_from_yahoo_symbol(sym)
         if p is not None:
             return p, c, f"Yahoo ({sym})"
-    names = {"_price_tradegate": "Tradegate", "_price_boerse_frankfurt": "Börse Frankfurt"}
+    names = {"_price_tradegate": "Tradegate", "_price_boerse_frankfurt": "Börse Frankfurt",
+             "_price_lang_schwarz": "Lang & Schwarz"}
     for provider in _ISIN_PROVIDERS:
         p, c = provider(isin)
         if p is not None:
