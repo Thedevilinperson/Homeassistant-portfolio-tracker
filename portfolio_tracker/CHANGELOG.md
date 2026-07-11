@@ -2,6 +2,23 @@
 
 Alle noemenswaardige wijzigingen aan de Portfolio Tracker add-on.
 
+## 0.28.2
+- Naam en beurs worden nu automatisch ingevuld bij een ISIN-only activum (bv. een warrant). De
+ISIN-flow riep enkel probe_isin aan, dat alleen prijs/munt/bron teruggeeft — de naam bleef dus
+altijd leeg, ook al werd de koers wel gevonden. Nieuwe functie probe_isin_meta haalt de naam (en
+het type) op via onvista, met een terugval op de instrument_information van Börse Frankfurt. De
+melding onder het formulier onderscheidt nu expliciet vier gevallen (naam+koers gevonden,
+enkel koers, enkel naam, geen van beide) zodat duidelijk is wat je zelf nog moet invullen.
+- 'Invalid ISIN number'-crash bij het fotomoment (31/12) opgelost. get_close_on_date (gebruikt
+door de knop 'Ophalen 31/12/2025') gaf voor een ISIN-only activum nog steeds de rauwe ISIN aan
+yfinance door, met dezelfde 'Invalid ISIN number'-exception tot gevolg als eerder al bij
+get_stock_info en get_current_price was opgelost. Lost nu eerst een Yahoo-symbool op; is er
+geen, dan valt de fotomomentwaarde terug op de slotkoers via onvista (chart_history) of Tradegate.
+- Ook get_market_state gebruikt nu dezelfde ISIN-naar-Yahoo-symboolvertaling.
+De onvista-provider is opgesplitst in herbruikbare bouwstenen (zoeken/snapshot), zodat zowel de
+actuele koers, de naam/type als de fotomomentwaarde er gebruik van kunnen maken zonder de
+zoekopdracht te dupliceren.
+
 ## 0.28.1
 - Nieuwe primaire ISIN-koersbron: onvista. Ondanks correcte dynamische salt, browserheaders,
 cookies én Chrome-TLS-imitatie (0.27.8) blijft Börse Frankfurt 403 geven — hun beveiliging is

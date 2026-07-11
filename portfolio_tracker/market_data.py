@@ -600,56 +600,123 @@ _ONVISTA_TYPE_PATH = {
     "INDEX": "indices", "ETF": "etfs", "CURRENCY": "currencies",
 }
 
+_ONVISTA_HEADERS_BASE = {
+    "Accept": "application/json, text/plain, */*",
+    "Referer": "https://www.onvista.de/",
+}
+
+
+def _onvista_headers() -> dict:
+    h = dict(_ONVISTA_HEADERS_BASE)
+    h["User-Agent"] = _BF_BROWSER_HEADERS["User-Agent"]
+    return h
+
+
+def _onvista_search(isin: str) -> dict | None:
+    """Zoek een instrument op ISIN via de open onvista-API. Geeft het gevonden
+    item terug (met o.a. entityType, entityValue en name), of None."""
+    if not _isin_valid(isin):
+        return None
+    import requests
+    try:
+        resp = requests.get("https://api.onvista.de/api/v1/instruments/search/facet",
+                            params={"perType": 10, "searchValue": isin},
+                            headers=_onvista_headers(), timeout=8)
+        if not resp.ok:
+            logger.info(f"_onvista_search({isin}): HTTP {resp.status_code}")
+            return None
+        for facet in (resp.json() or {}).get("facets", []):
+            for it in facet.get("results", []) or []:
+                if (it.get("isin") or "").upper() == isin:
+                    return it
+        logger.info(f"_onvista_search({isin}): geen instrument gevonden")
+    except Exception as e:
+        logger.warning(f"_onvista_search({isin}): {e}")
+    return None
+
+
+def _onvista_snapshot(isin: str, etype: str) -> dict | None:
+    """Snapshot van een instrument (quote + noteringen), of None."""
+    import requests
+    for p in [_ONVISTA_TYPE_PATH.get(etype, (etype or "").lower() + "s"), etype]:
+        if not p:
+            continue
+        try:
+            resp = requests.get(f"https://api.onvista.de/api/v1/{p}/ISIN:{isin}/snapshot",
+                                headers=_onvista_headers(), timeout=8)
+            if resp.ok:
+                return resp.json() or {}
+        except Exception as e:
+            logger.warning(f"_onvista_snapshot({isin},{p}): {e}")
+    return None
+
 
 def _price_onvista(isin: str) -> tuple[float | None, str | None]:
     """(prijs, munt) via de open onvista-API (api.onvista.de) — geen salt of
     TLS-verdediging, dekt ook derivaten zoals warrants/certificaten. Werkwijze
-    (zelfde patroon als het pyOnvista-project): instrument zoeken op ISIN via
-    /instruments/search/facet, daarna /api/v1/<type>/ISIN:<isin>/snapshot en de
-    koers uit quote.last (terugval: bid/ask, daarna quoteList-noteringen)."""
-    if not _isin_valid(isin):
+    (zelfde patroon als het pyOnvista-project): instrument zoeken op ISIN,
+    daarna een snapshot en de koers uit quote.last (terugval: bid/laat, daarna
+    quoteList-noteringen)."""
+    it = _onvista_search(isin)
+    if not it:
         return None, None
-    import requests
-    headers = {"User-Agent": _BF_BROWSER_HEADERS["User-Agent"],
-               "Accept": "application/json, text/plain, */*",
-               "Referer": "https://www.onvista.de/"}
-    base = "https://api.onvista.de/api/v1"
-    try:
-        resp = requests.get(f"{base}/instruments/search/facet",
-                            params={"perType": 10, "searchValue": isin},
-                            headers=headers, timeout=8)
-        if not resp.ok:
-            logger.info(f"_price_onvista({isin}): zoek-HTTP {resp.status_code}")
-            return None, None
-        etype = None
-        for facet in (resp.json() or {}).get("facets", []):
-            for it in facet.get("results", []) or []:
-                if (it.get("isin") or "").upper() == isin:
-                    etype = it.get("entityType")
-                    break
-            if etype:
-                break
-        if not etype:
-            logger.info(f"_price_onvista({isin}): geen instrument gevonden")
-            return None, None
-        paths = [_ONVISTA_TYPE_PATH.get(etype, etype.lower() + "s"), etype]
-        for p in paths:
-            resp2 = requests.get(f"{base}/{p}/ISIN:{isin}/snapshot",
-                                 headers=headers, timeout=8)
-            if not resp2.ok:
-                continue
-            snap = resp2.json() or {}
-            quotes = [snap.get("quote") or {}]
-            quotes += ((snap.get("quoteList") or {}).get("list") or [])
-            for q in quotes:
-                price = _to_float(q.get("last") or q.get("bid") or q.get("ask"))
-                if price:
-                    cur = q.get("isoCurrency") or (snap.get("instrument") or {}).get("isoCurrency") or "EUR"
-                    return price, cur
-        logger.info(f"_price_onvista({isin}): snapshot zonder bruikbare koers (type {etype})")
-    except Exception as e:
-        logger.warning(f"_price_onvista({isin}): {e}")
+    snap = _onvista_snapshot(isin, it.get("entityType") or "")
+    if snap is None:
+        logger.info(f"_price_onvista({isin}): geen snapshot (type {it.get('entityType')})")
+        return None, None
+    quotes = [snap.get("quote") or {}]
+    quotes += ((snap.get("quoteList") or {}).get("list") or [])
+    for q in quotes:
+        price = _to_float(q.get("last") or q.get("bid") or q.get("ask"))
+        if price:
+            cur = q.get("isoCurrency") or (snap.get("instrument") or {}).get("isoCurrency") or "EUR"
+            return price, cur
+    logger.info(f"_price_onvista({isin}): snapshot zonder bruikbare koers")
     return None, None
+
+
+def _onvista_close_on_date(isin: str, on_date: str) -> float | None:
+    """Slotkoers op of vlak vóór 'YYYY-MM-DD' via onvista chart_history — voor
+    effecten zonder Yahoo-notering (bv. warrants, fotomomentwaarde 31/12)."""
+    import requests
+    from datetime import datetime as _dt, timedelta as _td
+    it = _onvista_search(isin)
+    if not it:
+        return None
+    etype, uid = it.get("entityType"), it.get("entityValue")
+    snap = _onvista_snapshot(isin, etype or "")
+    if not snap or not uid:
+        return None
+    notations = ((snap.get("quoteList") or {}).get("list") or [])
+    id_notation = None
+    for n in notations:
+        id_notation = ((n.get("market") or {}).get("idNotation")) or n.get("idNotation")
+        if id_notation:
+            break
+    if not id_notation:
+        logger.info(f"_onvista_close_on_date({isin}): geen notering (idNotation) gevonden")
+        return None
+    try:
+        d = _dt.strptime(on_date[:10], "%Y-%m-%d")
+        resp = requests.get(
+            f"https://api.onvista.de/api/v1/instruments/{etype}/{uid}/chart_history",
+            params={"idNotation": id_notation, "resolution": "1D",
+                    "startDate": (d - _td(days=10)).strftime("%Y-%m-%d"),
+                    "endDate": (d + _td(days=1)).strftime("%Y-%m-%d")},
+            headers=_onvista_headers(), timeout=8)
+        if not resp.ok:
+            logger.info(f"_onvista_close_on_date({isin}): chart-HTTP {resp.status_code}")
+            return None
+        data = resp.json() or {}
+        lasts = data.get("last") or []
+        if lasts:
+            price = _to_float(lasts[-1])
+            if price:
+                return round(price, 4)
+        logger.info(f"_onvista_close_on_date({isin}): geen datapunten in venster")
+    except Exception as e:
+        logger.warning(f"_onvista_close_on_date({isin}): {e}")
+    return None
 
 
 # Externe ISIN-bronnen, in volgorde geprobeerd na Yahoo. Uitbreidbaar met extra
@@ -657,6 +724,40 @@ def _price_onvista(isin: str) -> tuple[float | None, str | None]:
 # onvista eerst: open API zonder salt/TLS-verdediging die ook derivaten dekt.
 # Daarna Börse Frankfurt (intraday bied/laat), Tradegate en Lang & Schwarz.
 _ISIN_PROVIDERS = [_price_onvista, _price_boerse_frankfurt, _price_tradegate, _price_lang_schwarz]
+
+
+def probe_isin_meta(isin: str) -> dict:
+    """Zoek naam/type/beurs voor een ISIN die niet op Yahoo staat, zodat het
+    activaformulier ook 'Naam' en 'Beurs' kan voorinvullen. Probeert eerst
+    onvista (geeft naam + type terug), anders de instrument_information van
+    Börse Frankfurt. Geeft {} terug als niets gevonden wordt."""
+    if not _isin_valid(isin):
+        return {}
+    it = _onvista_search(isin)
+    if it:
+        etype = (it.get("entityType") or "").upper()
+        type_map = {"STOCK": "stock", "FUND": "etf", "ETF": "etf", "DERIVATIVE": "stock",
+                   "BOND": "bond"}
+        return {"name": it.get("name") or "", "type": type_map.get(etype, "stock"),
+               "exchange": ""}
+    data = _bf_request("instrument_information", {"isin": isin})
+    if isinstance(data, dict):
+        name = None
+        def _find_name(obj):
+            nonlocal name
+            if name or not isinstance(obj, dict):
+                return
+            for key in ("name", "instrumentName", "shortName"):
+                v = obj.get(key)
+                if isinstance(v, str) and v:
+                    name = v
+                    return
+            for v in obj.values():
+                _find_name(v)
+        _find_name(data)
+        if name:
+            return {"name": name, "type": "stock", "exchange": "Frankfurt"}
+    return {}
 
 
 def probe_isin(isin: str) -> tuple[float | None, str | None, str | None]:
@@ -688,6 +789,16 @@ def _asset_isin(ticker: str) -> str:
         return (a.get("isin") or "").strip().upper()
     except Exception:
         return ""
+
+
+def _yf_symbol(ticker: str) -> str | None:
+    """Yahoo-veilig symbool voor een ticker. Is het ticker een ISIN, dan wordt
+    eerst een verhandelbaar symbool opgezocht (rauwe ISIN's laten yfinance een
+    exception gooien zodra Yahoo ze niet kent). Geen symbool -> None."""
+    cand = (ticker or "").strip().upper()
+    if _isin_valid(cand):
+        return _yahoo_symbol_for_isin(cand)
+    return ticker
 
 
 def get_current_price(ticker: str) -> tuple[float | None, str | None]:
@@ -786,7 +897,28 @@ def convert_to_eur(amount: float, currency: str) -> float | None:
 def get_close_on_date(ticker: str, on_date: str) -> float | None:
     """Slotkoers (native valuta) op of vlak vóór 'YYYY-MM-DD'. Voor het fotomoment
     (31/12/2025). auto_adjust=False zodat de koers de werkelijke slotkoers van die
-    dag is (zonder latere split-/dividendcorrectie)."""
+    dag is (zonder latere split-/dividendcorrectie). Is het ticker een ISIN zonder
+    Yahoo-notering (bv. een warrant), dan wordt eerst een Yahoo-symbool opgezocht
+    en anders teruggevallen op onvista/Tradegate — geen rauwe ISIN naar yfinance
+    (dat gooit een 'Invalid ISIN number'-exception)."""
+    cand = (ticker or "").strip().upper()
+    if _isin_valid(cand):
+        sym = _yahoo_symbol_for_isin(cand)
+        if sym:
+            try:
+                d = datetime.strptime(on_date[:10], "%Y-%m-%d")
+                start = (d - timedelta(days=10)).strftime("%Y-%m-%d")
+                end = (d + timedelta(days=1)).strftime("%Y-%m-%d")
+                hist = yf.Ticker(sym).history(start=start, end=end, auto_adjust=False)
+                if not hist.empty:
+                    return round(float(hist["Close"].iloc[-1]), 4)
+            except Exception as e:
+                logger.warning(f"get_close_on_date({ticker},{on_date}) via {sym}: {e}")
+        price = _onvista_close_on_date(cand, on_date)
+        if price is not None:
+            return price
+        p, _ = _price_tradegate(cand)
+        return p
     try:
         d = datetime.strptime(on_date[:10], "%Y-%m-%d")
         start = (d - timedelta(days=10)).strftime("%Y-%m-%d")
@@ -882,8 +1014,11 @@ def is_market_open(exchange: str) -> bool:
 
 
 def get_market_state(ticker: str) -> str:
+    sym = _yf_symbol(ticker)
+    if not sym:
+        return "UNKNOWN"
     try:
-        info = yf.Ticker(ticker).info
+        info = yf.Ticker(sym).info
         return info.get("marketState", "CLOSED")
     except Exception:
         return "UNKNOWN"

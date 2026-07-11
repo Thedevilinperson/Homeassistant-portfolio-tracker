@@ -1082,13 +1082,20 @@ def page_assets():
                     _tk = ticker.strip().upper()
                     if not info.get("found") and md._isin_valid(_tk):
                         # Geen Yahoo-notering, maar het is een geldige ISIN (bv. een warrant).
-                        # Vul ISIN + land in en probeer de munt/koers via externe bronnen.
+                        # Vul naam/type/beurs/land in en probeer de munt/koers via externe bronnen.
                         with st.spinner("ISIN testen op externe bronnen..."):
                             _p, _c, _src = md.probe_isin(_tk)
+                            _meta = md.probe_isin_meta(_tk)
                         st.session_state[k("isin")] = _tk
                         st.session_state[k("country")] = _tk[:2]
                         st.session_state[k("cur")] = _c or "EUR"
                         st.session_state[k("isin_only_src")] = _src or ""
+                        if _meta.get("name"):
+                            st.session_state[k("name")] = _meta["name"]
+                        if _meta.get("type"):
+                            st.session_state[k("type")] = _meta["type"]
+                        if _meta.get("exchange"):
+                            st.session_state[k("exch")] = _meta["exchange"]
                         st.session_state[k("fetched")] = True
                         st.rerun()
                     elif not info.get("found"):
@@ -1190,14 +1197,24 @@ def page_assets():
             _src = st.session_state.get(k("isin_only_src"))
             if _src is not None:
                 # ISIN-only activum (geen Yahoo-notering, bv. een warrant)
-                if _src:
-                    st.success(f"✅ ISIN herkend — automatische koers beschikbaar via **{_src}**. "
-                               "Vul enkel nog een **naam** in (en controleer munt/land) en klik op Toevoegen.")
+                _name_found = bool(st.session_state.get(k("name")))
+                if _src and _name_found:
+                    st.success(f"✅ ISIN herkend — naam ingevuld en automatische koers beschikbaar "
+                               f"via **{_src}**. Controleer de velden en klik op Toevoegen.")
+                elif _src:
+                    st.success(f"✅ ISIN herkend — automatische koers beschikbaar via **{_src}**, "
+                               "maar geen naam gevonden. Vul zelf een **naam** in en klik op Toevoegen.")
+                elif _name_found:
+                    st.info("ℹ️ Naam gevonden, maar (nog) geen automatische koers. Controleer de "
+                            "velden en klik op Toevoegen — de app blijft koersen proberen via de "
+                            "ISIN (onvista, Börse Frankfurt, Tradegate, Lang & Schwarz). Lukt dat "
+                            "niet, zet dan een **handmatige koers** in het overzicht als laatste redmiddel.")
                 else:
-                    st.info("ℹ️ Deze ISIN staat niet op Yahoo en er werd (nog) geen externe koers gevonden. "
-                            "Vul een **naam** in en klik op Toevoegen — de app blijft koersen proberen via de "
-                            "ISIN (onvista, Börse Frankfurt, Tradegate, Lang & Schwarz). Lukt dat niet, zet dan een **handmatige koers** "
-                            "in het overzicht als laatste redmiddel.")
+                    st.info("ℹ️ Deze ISIN staat niet op Yahoo en er werd (nog) geen naam of externe koers "
+                            "gevonden. Vul zelf een **naam** in en klik op Toevoegen — de app blijft koersen "
+                            "proberen via de ISIN (onvista, Börse Frankfurt, Tradegate, Lang & Schwarz). "
+                            "Lukt dat niet, zet dan een **handmatige koers** in het overzicht als laatste "
+                            "redmiddel.")
             else:
                 st.success("✨ Velden ingevuld via Yahoo Finance — controleer en pas aan waar nodig, en klik daarna op Toevoegen.")
 
