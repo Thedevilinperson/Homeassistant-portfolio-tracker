@@ -3,14 +3,12 @@ scheduler.py — APScheduler achtergrondproces
 Draait naast de Streamlit-app via run.sh.
 
 Jobs:
-  • Elke 5 minuten   → actuele koersen opslaan in price_history
-  • Euronext 09:05   → marktevaluatie opening
-  • Euronext 13:15   → marktevaluatie middag
-  • Euronext 17:35   → marktevaluatie sluiting
-  • NYSE/NASDAQ 15:35→ marktevaluatie opening
-  • NYSE/NASDAQ 18:45→ marktevaluatie middag
-  • NYSE/NASDAQ 22:05→ marktevaluatie sluiting
-  • Werkdag 08:00    → dagelijks belastingoptimalisatieadvies
+  • Elke 5 minuten        → koersen van de portefeuille opslaan in price_history
+  • Werkdag 07:45         → LUIK 2: marktopportuniteiten (6 koopideeën wereldwijd)
+  • Werkdag 18:00         → LUIK 1: dagelijks portefeuilleadvies (ratings + tekst)
+  • Dagelijks 22:30       → koersen van de voorgestelde aandelen opvolgen
+  • 1e van de maand 07:30 → AI-modelprijzen verversen
+  • 1e van de maand 08:00 → belastingoptimalisatieadvies
 """
 from __future__ import annotations
 
@@ -72,13 +70,61 @@ def job_track_prices():
 
 
 def job_daily_advice():
-    """Genereer één keer per dag een volledig portefeuilleadvies (ratings + tekst)."""
-    logger.info("🤖 Dagelijks portefeuilleadvies genereren...")
+    """LUIK 1 — dagelijks advies over de BESTAANDE portefeuille (ratings + tekst)."""
+    logger.info("🤖 Luik 1: dagelijks portefeuilleadvies genereren...")
     res = ai_advisor.generate_daily_portfolio_advice()
     if res.get("error"):
-        logger.warning(f"Dagelijks advies niet gegenereerd: {res['error'][:80]}")
+        logger.warning(f"Luik 1 niet gegenereerd: {res['error'][:80]}")
     else:
-        logger.info(f"✅ Dagelijks advies opgeslagen ({res.get('stored', 0)} ratings)")
+        logger.info(f"✅ Luik 1 opgeslagen ({res.get('stored', 0)} ratings)")
+
+
+def job_market_opportunities():
+    """LUIK 2 — dagelijkse koopopportuniteiten in de wereldwijde markt: 2 defensieve,
+    2 matig speculatieve en 2 sterk speculatieve aandelen, met onderbouwing."""
+    logger.info("🌍 Luik 2: marktopportuniteiten zoeken...")
+    res = ai_advisor.generate_market_opportunities()
+    if res.get("error"):
+        logger.warning(f"Luik 2 niet gegenereerd: {res['error'][:80]}")
+        return
+    pb = res.get("per_bucket", {})
+    logger.info(f"✅ Luik 2: {res.get('stored', 0)} koopidee(ën) "
+                f"(defensief {pb.get('defensive', 0)}, matig {pb.get('moderate', 0)}, "
+                f"speculatief {pb.get('speculative', 0)}) — "
+                f"websearch={'ja' if res.get('websearch') else 'nee (trainingskennis)'}")
+    # Meteen de koersen van de nieuwe ideeën vastleggen, zodat het rendement sinds
+    # advies vanaf dag één opvolgbaar is.
+    job_track_idea_prices()
+
+
+def job_track_idea_prices():
+    """Volg de koers op van elk aandeel dat de AI de afgelopen ~100 dagen als
+    koopopportuniteit voorstelde. Zo toont de app het rendement sinds advies
+    (7 dagen / 1 maand / 3 maanden) rechtstreeks uit de database, zonder netwerkcalls
+    tijdens het renderen. Draait één keer per dag (na de Amerikaanse slotbel), niet om
+    de 5 minuten: deze aandelen zitten niet in de portefeuille, dus intraday-precisie
+    is overbodig en zou nodeloos veel calls kosten."""
+    from datetime import timedelta
+    since = (datetime.now() - timedelta(days=100)).strftime("%Y-%m-%d")
+    tickers = db.get_idea_tickers_since(since, limit=200)
+    if not tickers:
+        logger.info("Geen AI-koopideeën om op te volgen — overgeslagen.")
+        return
+    logger.info(f"🔎 Koersen van {len(tickers)} voorgesteld(e) aande(e)l(en) opvolgen...")
+    prices = md.get_prices_for_tickers(tickers)
+    saved, failed = 0, []
+    for ticker, info in prices.items():
+        if info["price"] is not None:
+            db.save_price(ticker, info["price"], info.get("currency", "EUR"))
+            saved += 1
+        else:
+            failed.append(ticker)
+    logger.info(f"✅ {saved}/{len(tickers)} koersen van koopideeën opgeslagen")
+    if failed:
+        logger.warning(f"⚠️ Geen koers voor voorgestelde aandelen: {', '.join(failed)} "
+                       "(ticker mogelijk verkeerd opgegeven door de AI — het rendement sinds "
+                       "advies blijft dan leeg voor deze namen).")
+    db.cleanup_old_market_ideas(keep_days=400)
 
 
 def job_tax_optimization():
@@ -151,6 +197,24 @@ def main():
         job_daily_advice,
         trigger=CronTrigger(day_of_week="mon-fri", hour=18, minute=0, timezone=BRUSSELS),
         id="daily_advice",
+        replace_existing=True,
+        misfire_grace_time=3600,
+    )
+
+    # ── LUIK 2: marktopportuniteiten, elke werkdag om 07:45 (vóór de opening) ──
+    scheduler.add_job(
+        job_market_opportunities,
+        trigger=CronTrigger(day_of_week="mon-fri", hour=7, minute=45, timezone=BRUSSELS),
+        id="market_ideas",
+        replace_existing=True,
+        misfire_grace_time=3600,
+    )
+
+    # ── Koersopvolging van de voorgestelde aandelen: dagelijks 22:30 (na de VS) ──
+    scheduler.add_job(
+        job_track_idea_prices,
+        trigger=CronTrigger(hour=22, minute=30, timezone=BRUSSELS),
+        id="idea_prices",
         replace_existing=True,
         misfire_grace_time=3600,
     )

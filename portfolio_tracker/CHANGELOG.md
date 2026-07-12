@@ -2,6 +2,50 @@
 
 Alle noemenswaardige wijzigingen aan de Portfolio Tracker add-on.
 
+## 0.31.0
+- Het dagelijkse AI-advies bestaat nu uit twee duidelijk gescheiden luiken, en het dashboard
+toont een dagresultaat per positie.
+  - Luik 1 - Portefeuilleadvies (dagelijks, 18:00). Ongewijzigd van opzet, maar strikt
+afgebakend: het gaat nu UITSLUITEND over de aandelen die je al bezit, met (sterk) kopen /
+behouden / (sterk) verkopen per positie. De kop "Koopopportuniteiten" is uit dit advies
+verwijderd - die verhuist volledig naar luik 2. Zo blijven beide adviezen los van elkaar
+leesbaar en opvolgbaar.
+  - Luik 2 - Marktopportuniteiten (dagelijks, 07:45, nieuw). Elke werkdag vóór de opening
+speurt de AI de WERELDWIJDE markt af naar nieuwe koopideeën buiten je portefeuille, op basis
+van bedrijfsprestaties en cijfers, vooruitzichten, macro-economische inzichten, geopolitiek
+en financiële berichtgeving. Per dag exact 6 voorstellen:
+    - 2x defensief (focus op groei en eventueel dividendrendement)
+    - 2x matig speculatief
+    - 2x sterk speculatief
+    - Elk idee komt met onderbouwing, katalysatoren, de belangrijkste risico's, een koersdoel op
+12 maanden en een rating. Alles staat in drie visueel gescheiden blokken op de AI-pagina.
+- Live websearch voor luik 2. Zonder live zoekopdracht kan een taalmodel enkel uit zijn
+trainingskennis putten - "recente financiële berichtgeving" is dan per definitie verouderd.
+Luik 2 gebruikt daarom de websearch-tool van OpenAI (Responses-API), zodat het model zelf
+actuele koersen, resultaten en nieuws opzoekt. Ondersteunt je model de tool niet of faalt de
+call, dan valt de app stil terug op een gewoon advies op basis van trainingskennis - dat
+wordt dan expliciet gelogd én in de app gemeld, zodat je nooit denkt dat iets "live" is
+terwijl het dat niet is. Aan/uit via Instellingen -> AI.
+- Opvolging over 7 dagen, 1 maand en 3 maanden. Elk voorgesteld aandeel wordt bijgehouden
+in een nieuwe tabel market_ideas. Per periode toont de app per aandeel het GEMIDDELDE ADVIES:
+de ratings van die periode worden omgezet naar een score (sterk kopen +2, kopen +1, behouden
+0, verkopen -1, sterk verkopen -2), gemiddeld, en weer naar een label vertaald. Daarnaast:
+hoe vaak het aandeel werd voorgesteld, in welke risicoklasse(n), de startkoers, de koers nu
+en het rendement sinds het eerste advies. Een nieuwe schedulerjob (dagelijks 22:30, na de
+Amerikaanse slotbel) volgt de koers van elk voorgesteld aandeel op, zodat dat rendement uit
+de database komt en de pagina zonder netwerkcalls laadt.
+- Dashboard: dagelijkse P/L per positie (nieuw). Een blok "Dagresultaat vandaag" toont per
+open positie de vorige slotkoers, de koers nu, het dagverschil in % en de dag-P/L in euro,
+plus een totaal, het aantal stijgers/dalers en de beste/zwakste naam van de dag. Referentie
+is de laatste koers die vóór vandaag is vastgelegd (de planner schrijft elke 5 minuten weg,
+dus in de praktijk de slotkoers van de vorige beursdag). De omrekening naar euro gebeurt met
+de wisselkoers die al in de positie zit - geen extra FX-call. Let op: dit vult zich pas
+vanaf de eerste volledige dag dat de planner draait; posities zonder oudere koers worden
+netjes overgeslagen en onderaan de tabel benoemd.
+- Instellingen. Nieuw: aan/uit voor luik 2 en voor de live websearch. De AI-kostenpagina
+splitst de nieuwe functie apart uit ("② Marktopportuniteiten"), zodat je ziet wat websearch
+kost.
+
 ## 0.30.0
 Nieuwe koersbron + fors snellere app.
 - Euronext Live als vijfde koersbron (lost NL0015002RI2 op). De ING Markets-warrant

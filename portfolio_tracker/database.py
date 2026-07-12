@@ -119,6 +119,31 @@ def init_db():
         CREATE INDEX IF NOT EXISTS idx_ai_ratings_batch ON ai_ratings(batch_id);
         CREATE INDEX IF NOT EXISTS idx_ai_ratings_ticker ON ai_ratings(ticker);
 
+        CREATE TABLE IF NOT EXISTS market_ideas (
+            id              INTEGER PRIMARY KEY AUTOINCREMENT,
+            batch_id        TEXT    NOT NULL,
+            idea_date       TEXT    NOT NULL,   -- YYYY-MM-DD
+            bucket          TEXT    NOT NULL,   -- defensive | moderate | speculative
+            ticker          TEXT    NOT NULL,   -- Yahoo-symbool (met beurssuffix)
+            name            TEXT,
+            exchange        TEXT,
+            isin            TEXT,
+            currency        TEXT    DEFAULT 'EUR',
+            rating          TEXT,               -- strong_buy .. strong_sell
+            price_at_advice REAL,               -- koers (native) op het moment van het advies
+            price_target    REAL,
+            dividend_yield  REAL,
+            horizon         TEXT,
+            rationale       TEXT,
+            catalysts       TEXT,
+            risks           TEXT,
+            model           TEXT,
+            created_at      TEXT    DEFAULT (datetime('now'))
+        );
+        CREATE INDEX IF NOT EXISTS idx_market_ideas_date ON market_ideas(idea_date);
+        CREATE INDEX IF NOT EXISTS idx_market_ideas_ticker ON market_ideas(ticker);
+        CREATE INDEX IF NOT EXISTS idx_market_ideas_batch ON market_ideas(batch_id);
+
         CREATE TABLE IF NOT EXISTS ai_usage (
             id                INTEGER PRIMARY KEY AUTOINCREMENT,
             function          TEXT,
@@ -1168,6 +1193,102 @@ def get_latest_price(ticker: str) -> dict | None:
     ).fetchone()
     conn.close()
     return dict(row) if row else None
+
+
+# ── Marktopportuniteiten (luik 2 van het dagelijkse AI-advies) ───────────────
+
+def save_market_idea(batch_id: str, idea_date: str, bucket: str, ticker: str,
+                     name=None, exchange=None, isin=None, currency="EUR",
+                     rating=None, price_at_advice=None, price_target=None,
+                     dividend_yield=None, horizon=None, rationale=None,
+                     catalysts=None, risks=None, model=None):
+    """Sla één koopidee uit het marktadvies op."""
+    conn = get_connection()
+    conn.execute(
+        """INSERT INTO market_ideas
+           (batch_id,idea_date,bucket,ticker,name,exchange,isin,currency,rating,
+            price_at_advice,price_target,dividend_yield,horizon,rationale,
+            catalysts,risks,model)
+           VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+        (batch_id, idea_date, bucket, ticker.upper(), name, exchange, isin, currency,
+         rating, price_at_advice, price_target, dividend_yield, horizon, rationale,
+         catalysts, risks, model),
+    )
+    conn.commit()
+    conn.close()
+
+
+def get_market_ideas(batch_id: str | None = None, since_date: str | None = None,
+                     ticker: str | None = None, limit: int | None = None) -> list[dict]:
+    """Koopideeën, nieuwste eerst. since_date = 'YYYY-MM-DD' (inclusief)."""
+    conn = get_connection()
+    q, p, conds = "SELECT * FROM market_ideas", [], []
+    if batch_id:
+        conds.append("batch_id=?"); p.append(batch_id)
+    if since_date:
+        conds.append("idea_date>=?"); p.append(since_date)
+    if ticker:
+        conds.append("ticker=?"); p.append(ticker.upper())
+    if conds:
+        q += " WHERE " + " AND ".join(conds)
+    q += " ORDER BY idea_date DESC, id ASC"
+    if limit:
+        q += " LIMIT ?"; p.append(limit)
+    rows = conn.execute(q, p).fetchall()
+    conn.close()
+    return [dict(r) for r in rows]
+
+
+def get_latest_idea_batch() -> str | None:
+    """Batch-id van de meest recente ronde marktopportuniteiten."""
+    conn = get_connection()
+    row = conn.execute(
+        "SELECT batch_id FROM market_ideas ORDER BY idea_date DESC, id DESC LIMIT 1"
+    ).fetchone()
+    conn.close()
+    return row["batch_id"] if row else None
+
+
+def get_idea_tickers_since(since_date: str, limit: int = 200) -> list[str]:
+    """Unieke tickers uit de koopideeën sinds een datum — de scheduler volgt hun
+    koers op zodat het rendement sinds advies zonder netwerkcalls getoond kan
+    worden. Nieuwste ideeën eerst, afgetopt op 'limit'."""
+    conn = get_connection()
+    rows = conn.execute(
+        """SELECT ticker, MAX(idea_date) AS d FROM market_ideas
+           WHERE idea_date >= ? GROUP BY ticker ORDER BY d DESC LIMIT ?""",
+        (since_date, limit),
+    ).fetchall()
+    conn.close()
+    return [r["ticker"] for r in rows]
+
+
+def cleanup_old_market_ideas(keep_days: int = 400):
+    conn = get_connection()
+    conn.execute("DELETE FROM market_ideas WHERE idea_date < date('now', ? || ' days')",
+                 (f"-{keep_days}",))
+    conn.commit()
+    conn.close()
+
+
+def get_previous_closes(tickers: list[str], before_date: str) -> dict[str, dict]:
+    """Laatst opgeslagen koers STRIKT vóór 'before_date' (YYYY-MM-DD), per ticker,
+    in één query. Dat is de referentie voor de dagelijkse P/L: de laatste koers van
+    de vorige (beurs)dag. Tickers zonder oudere koers ontbreken in het resultaat."""
+    if not tickers:
+        return {}
+    keys = [t.upper() for t in tickers]
+    placeholders = ",".join("?" * len(keys))
+    conn = get_connection()
+    rows = conn.execute(
+        f"""SELECT ticker, price, currency, MAX(timestamp) AS timestamp
+            FROM price_history
+            WHERE ticker IN ({placeholders}) AND timestamp < ?
+            GROUP BY ticker""",
+        keys + [f"{before_date} 00:00:00"],
+    ).fetchall()
+    conn.close()
+    return {r["ticker"]: dict(r) for r in rows}
 
 
 def get_latest_prices(tickers: list[str]) -> dict[str, dict]:

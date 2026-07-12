@@ -144,6 +144,45 @@ RATING_LABELS = {
     "strong_sell": "Sterk verkopen",
 }
 
+# Numerieke schaal om ADVIEZEN TE MIDDELEN over een periode (7 d / 1 m / 3 m).
+# Een gemiddelde van bv. 'sterk kopen' + 'kopen' + 'behouden' = 1.0 -> 'Kopen'.
+RATING_SCORE = {"strong_buy": 2.0, "buy": 1.0, "hold": 0.0, "sell": -1.0, "strong_sell": -2.0}
+
+
+def score_to_rating(score: float) -> str:
+    """Gemiddelde score terug naar het dichtstbijzijnde ratinglabel."""
+    if score >= 1.5:
+        return "strong_buy"
+    if score >= 0.5:
+        return "buy"
+    if score >= -0.5:
+        return "hold"
+    if score >= -1.5:
+        return "sell"
+    return "strong_sell"
+
+
+# ── Luik 2: marktopportuniteiten (buiten de eigen portefeuille) ───────────────
+# Drie risicoklassen, elk 2 ideeën per dag.
+MARKET_BUCKETS = ["defensive", "moderate", "speculative"]
+BUCKET_LABELS = {
+    "defensive":   "🛡️ Defensief — groei + eventueel dividendrendement",
+    "moderate":    "⚖️ Matig speculatief",
+    "speculative": "🚀 Sterk speculatief",
+}
+BUCKET_SHORT = {"defensive": "Defensief", "moderate": "Matig spec.",
+                "speculative": "Sterk spec."}
+# Aliassen: het model mag Nederlandse of Engelse labels teruggeven.
+_BUCKET_ALIASES = {
+    "defensive": "defensive", "defensief": "defensive", "defensive_growth": "defensive",
+    "moderate": "moderate", "matig": "moderate", "matig_speculatief": "moderate",
+    "moderately_speculative": "moderate", "gematigd": "moderate",
+    "speculative": "speculative", "speculatief": "speculative",
+    "sterk_speculatief": "speculative", "highly_speculative": "speculative",
+    "high_risk": "speculative",
+}
+IDEAS_PER_BUCKET = 2
+
 
 # ── Interne hulpfuncties ──────────────────────────────────────────────────────
 
@@ -281,6 +320,51 @@ def _chat(client: OpenAI, model: str, system_msg: str, user_msg: str,
     return response.choices[0].message.content or ""
 
 
+def market_websearch_enabled() -> bool:
+    """Mag het marktadvies live het web doorzoeken? Standaard AAN: zonder live
+    zoekopdracht kan de AI enkel uit haar trainingskennis putten en is 'recente
+    financiële berichtgeving' per definitie verouderd."""
+    return db.get_setting("ai_market_websearch", "1") != "0"
+
+
+def _chat_websearch(client: OpenAI, model: str, system_msg: str, user_msg: str,
+                    max_tokens: int = MAX_TOKENS, track_as: str = "market_ideas") -> tuple[str, bool]:
+    """Zoals _chat, maar via de Responses-API MET de ingebouwde websearch-tool van
+    OpenAI: het model haalt zelf actuele koersen, resultaten en berichtgeving op.
+    Geeft (tekst, websearch_gebruikt) terug.
+
+    Valt stil terug op het gewone chat-endpoint als websearch uitstaat, als het
+    gekozen model de tool niet ondersteunt of als de call om welke reden ook faalt —
+    het advies komt er dan nog steeds, enkel op basis van trainingskennis. Dat wordt
+    gelogd én in de app getoond, zodat je nooit denkt dat iets 'live' is terwijl het
+    dat niet is."""
+    if market_websearch_enabled():
+        try:
+            resp = client.responses.create(
+                model=model,
+                tools=[{"type": "web_search_preview"}],
+                instructions=system_msg,
+                input=user_msg,
+                max_output_tokens=max_tokens,
+            )
+            text = getattr(resp, "output_text", "") or ""
+            try:
+                usage = getattr(resp, "usage", None)
+                pt = getattr(usage, "input_tokens", 0) or 0
+                ct = getattr(usage, "output_tokens", 0) or 0
+                db.record_ai_usage(track_as, model, pt, ct, estimate_cost_usd(model, pt, ct))
+            except Exception as exc:
+                logger.warning(f"AI-gebruik registreren mislukt: {exc}")
+            if text.strip():
+                return text, True
+            logger.warning("_chat_websearch: leeg antwoord met websearch — terugval op gewone chat")
+        except Exception as exc:
+            logger.warning(f"_chat_websearch: websearch niet beschikbaar ({exc}) — "
+                           "terugval op gewone chat (enkel trainingskennis)")
+    return _chat(client, model, system_msg, user_msg, max_tokens=max_tokens,
+                 temperature=0.5, track_as=track_as), False
+
+
 def _parse_json(text: str):
     """Robuust JSON parsen, ook als het model markdown-fences toevoegt."""
     t = (text or "").strip()
@@ -318,7 +402,7 @@ def privacy_level() -> str:
 
 
 def ai_function_enabled(fn: str) -> bool:
-    """Is een AI-functie ingeschakeld? fn in {'tax','daily'}."""
+    """Is een AI-functie ingeschakeld? fn in {'tax','daily','market'}."""
     return db.get_setting(f"ai_enable_{fn}", "1") != "0"
 
 
@@ -562,9 +646,15 @@ Antwoord UITSLUITEND met geldige JSON in exact dit formaat (geen markdown):
 # ── Dagelijks portefeuilleadvies (ratings + tekst in één) ─────────────────────
 
 def generate_daily_portfolio_advice() -> dict:
-    """Eén dagelijks advies voor de hele portefeuille: produceert zowel een tekstadvies
-    als per-ticker ratings (buy/hold/sell). De ratings voeden de synthese-tabellen op de
-    portefeuillepagina; de tekst vult het tekstgedeelte daar. Privacy-bewust."""
+    """LUIK 1 van het dagelijkse advies: uitsluitend de BESTAANDE portefeuille.
+    Produceert zowel een tekstadvies als per-ticker ratings
+    ((sterk) kopen / behouden / (sterk) verkopen). De ratings voeden de
+    synthese-tabellen op de portefeuille- en dashboardpagina; de tekst vult het
+    tekstgedeelte daar. Privacy-bewust.
+
+    Nieuwe koopopportuniteiten BUITEN de portefeuille horen hier bewust NIET thuis:
+    die zitten in luik 2 (generate_market_opportunities), zodat beide luiken los van
+    elkaar leesbaar en opvolgbaar zijn."""
     if not ai_function_enabled("daily"):
         return {"error": "Het dagelijkse portefeuilleadvies staat uit. Schakel het in via ⚙️ Instellingen → AI."}
     client, model = _get_client()
@@ -587,10 +677,15 @@ PORTEFEUILLE:
 
 {_profiel_blok(actx)}
 
-OPDRACHT:
-Geef één volledig dagelijks portefeuilleadvies. Antwoord UITSLUITEND met geldige JSON (geen markdown errond), in exact dit formaat:
+OPDRACHT (LUIK 1 — UITSLUITEND DE BESTAANDE PORTEFEUILLE):
+Geef één dagelijks advies over de posities die de belegger NU aanhoudt: (sterk) kopen /
+behouden / (sterk) verkopen. Stel hier GEEN nieuwe aandelen voor die niet in de
+portefeuille zitten — die koopopportuniteiten komen in een apart luik (luik 2) aan bod.
+Focus dus volledig op bijkopen, behouden, afbouwen of verkopen van wat er al is.
+
+Antwoord UITSLUITEND met geldige JSON (geen markdown errond), in exact dit formaat:
 {{
-  "advies_tekst": "Markdown met de koppen: **📊 Marktoverzicht** (2-3 zinnen macro + tech/sector), **📋 Posities** (per positie: korte situatie + duidelijke aanbeveling BIJKOPEN/HOUDEN/VERKOPEN + reden), **🎯 Koopopportuniteiten** (1-3 ideeën passend bij profiel en volume), **📌 Conclusie** (1-2 zinnen). Sluit af met een korte disclaimer dat dit geen gepersonaliseerd financieel advies is.",
+  "advies_tekst": "Markdown met de koppen: **📊 Marktoverzicht** (2-3 zinnen macro + tech/sector, voor zover relevant voor DEZE posities), **📋 Posities** (per positie: korte situatie + duidelijke aanbeveling BIJKOPEN/HOUDEN/AFBOUWEN/VERKOPEN + reden), **📌 Conclusie** (1-2 zinnen: waar zit het grootste risico en de grootste kans binnen de huidige portefeuille). Sluit af met een korte disclaimer dat dit geen gepersonaliseerd financieel advies is.",
   "ratings": [
     {{"ticker": "<exact het label uit de portefeuille hierboven>", "rating": "<één van: {valid}>", "price_target": 0.0, "currency": "EUR", "rationale": "max 1-2 zinnen, profiel-bewust"}}
   ]
@@ -646,6 +741,273 @@ Geef voor ELKE positie een rating.
     except Exception as exc:
         logger.error(f"generate_daily_portfolio_advice: {exc}")
         return {"error": f"Kon AI-antwoord niet verwerken: {exc}"}
+
+
+# ── LUIK 2: marktopportuniteiten buiten de portefeuille ───────────────────────
+
+MARKET_PERSONA = (
+    "Je bent een topanalist bij een beursresearch-desk die dagelijks de WERELDWIJDE "
+    "markt afspeurt naar concrete koopopportuniteiten voor een particuliere Belgische "
+    "belegger. Je kijkt uitdrukkelijk BUITEN de bestaande portefeuille: je zoekt nieuwe "
+    "namen. Je weegt af: bedrijfsprestaties (omzet- en margegroei, vrije kasstroom, "
+    "balans, waardering), vooruitzichten en guidance, macro-economie (rente, inflatie, "
+    "groei, sectorrotatie, valuta), geopolitiek (handelsconflicten, defensie, energie, "
+    "grondstoffen, regelgeving) en recente financiële berichtgeving. "
+    "Je bent kritisch en concreet, geen hype: elk idee krijgt een onderbouwing, "
+    "katalysatoren én de belangrijkste risico's. Je noemt altijd het exacte "
+    "Yahoo-Finance-ticker MET beurssuffix (bv. ASML.AS, AIR.PA, MC.PA, NVDA, SHELL.AS), "
+    "want dat wordt gebruikt om de koers automatisch op te volgen. "
+    "Je schrijft in helder Nederlands en vermeldt dat dit geen gepersonaliseerd "
+    "financieel advies is."
+)
+
+
+def generate_market_opportunities() -> dict:
+    """LUIK 2 van het dagelijkse advies: zoekt koopopportuniteiten in de WERELDWIJDE
+    markt, los van de bestaande portefeuille. Levert per dag 6 ideeën:
+    2 defensief (groei + eventueel dividend), 2 matig speculatief en 2 sterk
+    speculatief — elk met onderbouwing, katalysatoren en risico's.
+
+    Elk idee krijgt ook een rating op dezelfde schaal als luik 1, zodat de adviezen
+    over 7 dagen / 1 maand / 3 maanden gemiddeld kunnen worden (zie
+    market_idea_synthesis). De koers op het moment van het advies wordt mee
+    opgeslagen, zodat het rendement sinds advies opvolgbaar is.
+
+    Gebruikt indien mogelijk de websearch-tool van OpenAI (actuele berichtgeving);
+    valt anders terug op trainingskennis (wordt gemeld in het resultaat)."""
+    if not ai_function_enabled("market"):
+        return {"error": "Het dagelijkse marktadvies (luik 2) staat uit. "
+                         "Schakel het in via ⚙️ Instellingen → AI."}
+    client, model = _get_client()
+    if not client:
+        return {"error": "Geen OpenAI API-sleutel geconfigureerd."}
+
+    level = privacy_level()
+    ctx = _build_portfolio_context()
+
+    # Wat de belegger al heeft (om dubbels te vermijden). Bij volledige anonimisering
+    # geven we geen namen mee; het model krijgt dan enkel types/sectorgewichten.
+    if level == "full":
+        held_txt = ("(niet meegedeeld wegens privacymodus — vermijd dubbels kan niet "
+                    "gecontroleerd worden)")
+    else:
+        held_txt = ", ".join(f"{p['ticker']} ({p['naam']})" for p in ctx["posities"]) or "geen"
+
+    cash = 0.0
+    try:
+        cash = db.compute_cash_positions()["totals"]["available"]
+    except Exception as exc:
+        logger.warning(f"generate_market_opportunities: cash niet bepaald ({exc})")
+    iv = _investment_volume()
+    budget_txt = (f"Beschikbare cash: €{cash:,.0f}. "
+                  f"Geschat investeringsvolume: €{iv['per_maand']:,.0f}/maand, "
+                  f"€{iv['per_jaar']:,.0f}/jaar.") if level == "off" else \
+                 "Particuliere belegger met beperkte instapbedragen."
+
+    profielen = ", ".join(f"{a['rekening']}: {a['profiel']}" for a in ctx.get("per_rekening", [])) or "neutraal"
+    today = datetime.now().strftime("%d/%m/%Y")
+    valid = ", ".join(RATING_ORDER)
+
+    user = f"""DATUM: {today}  |  MODEL: {model}
+
+REEDS IN PORTEFEUILLE (niet opnieuw voorstellen): {held_txt}
+BELEGGINGSPROFIEL PER REKENING: {profielen}
+BUDGET: {budget_txt}
+
+OPDRACHT (LUIK 2 — KOOPOPPORTUNITEITEN IN DE WERELDWIJDE MARKT):
+Zoek vandaag exact 6 NIEUWE koopideeën buiten de bestaande portefeuille, verdeeld over
+drie risicoklassen:
+  • 2x bucket "defensive"   — defensieve aandelen met focus op GROEI en eventueel
+    DIVIDENDRENDEMENT: robuuste balans, voorspelbare kasstromen, prijszettingsmacht.
+  • 2x bucket "moderate"    — matig speculatief: groeiverhaal met bewezen omzet, maar
+    duidelijke uitvoerings- of waarderingsrisico's.
+  • 2x bucket "speculative" — sterk speculatief: hoog risico/hoge potentiële opbrengst
+    (turnaround, small cap, doorbraaktechnologie, cyclisch dieptepunt, ...).
+
+Onderbouw elk idee op basis van: bedrijfsprestaties en cijfers, vooruitzichten,
+macro-economische inzichten, geopolitiek en recente financiële berichtgeving.
+Geef bij elk idee ook een rating op deze schaal: {valid}.
+Kies liquide, voor een Belgische particulier vlot verhandelbare effecten (Euronext, Xetra,
+LSE, US-beurzen). Geef het EXACTE Yahoo-Finance-ticker met beurssuffix.
+
+Antwoord UITSLUITEND met geldige JSON (geen markdown errond), in exact dit formaat:
+{{
+  "marktbeeld": "3-5 zinnen: het macro-, geopolitieke en nieuwskader van vandaag waarbinnen deze ideeën passen",
+  "ideeen": [
+    {{"bucket": "defensive|moderate|speculative",
+      "ticker": "ASML.AS",
+      "naam": "ASML Holding",
+      "beurs": "Euronext Amsterdam",
+      "isin": "NL0010273215",
+      "munt": "EUR",
+      "advies": "<één van: {valid}>",
+      "koersdoel_12m": 0.0,
+      "dividendrendement_pct": 0.0,
+      "horizon": "bv. 12-18 maanden",
+      "onderbouwing": "3-5 zinnen: bedrijfsprestaties, vooruitzichten, waardering, macro/geopolitiek",
+      "katalysatoren": "concrete triggers op korte termijn (resultaten, orders, regelgeving, ...)",
+      "risicos": "de 2-3 belangrijkste risico's"
+    }}
+  ]
+}}
+Exact 6 ideeën, exact 2 per bucket.
+"""
+    try:
+        raw, used_web = _chat_websearch(client, model, MARKET_PERSONA, user,
+                                        max_tokens=3500, track_as="market_ideas")
+        data = _parse_json(raw)
+        if not isinstance(data, dict):
+            return {"error": "AI-antwoord niet bruikbaar."}
+        ideas = data.get("ideeen") or data.get("ideas") or []
+        if not ideas:
+            return {"error": "AI gaf geen koopideeën terug."}
+
+        batch_id = datetime.now().strftime("%Y%m%d%H%M%S")
+        idea_date = datetime.now().strftime("%Y-%m-%d")
+        stored, per_bucket = 0, {b: 0 for b in MARKET_BUCKETS}
+
+        for it in ideas:
+            if not isinstance(it, dict):
+                continue
+            ticker = str(it.get("ticker") or "").strip().upper()
+            if not ticker:
+                continue
+            bucket = _BUCKET_ALIASES.get(
+                str(it.get("bucket") or "").strip().lower().replace(" ", "_"))
+            if bucket not in MARKET_BUCKETS:
+                continue
+            rating = str(it.get("advies") or it.get("rating") or "").lower().replace(" ", "_")
+            if rating not in RATING_LABELS:
+                rating = "buy"   # luik 2 stelt koopideeën voor; val terug op 'kopen'
+
+            # Koers op het moment van het advies vastleggen -> rendement opvolgbaar.
+            price, currency = None, None
+            try:
+                price, currency = md.get_current_price(ticker)
+            except Exception as exc:
+                logger.warning(f"generate_market_opportunities: koers {ticker} faalde ({exc})")
+            if price is None:
+                logger.info(f"generate_market_opportunities: geen koers gevonden voor {ticker} "
+                            "— idee wordt opgeslagen zonder startkoers (rendement niet meetbaar)")
+
+            db.save_market_idea(
+                batch_id, idea_date, bucket, ticker,
+                name=it.get("naam") or it.get("name"),
+                exchange=it.get("beurs") or it.get("exchange"),
+                isin=(it.get("isin") or "").upper() or None,
+                currency=currency or it.get("munt") or it.get("currency") or "EUR",
+                rating=rating,
+                price_at_advice=price,
+                price_target=_num(it.get("koersdoel_12m") or it.get("price_target")),
+                dividend_yield=_num(it.get("dividendrendement_pct") or it.get("dividend_yield")),
+                horizon=it.get("horizon"),
+                rationale=it.get("onderbouwing") or it.get("rationale"),
+                catalysts=it.get("katalysatoren") or it.get("catalysts"),
+                risks=it.get("risicos") or it.get("risks"),
+                model=model,
+            )
+            stored += 1
+            per_bucket[bucket] += 1
+
+        # Het marktbeeld bewaren we als tekstevaluatie (aparte soort dan luik 1).
+        marktbeeld = data.get("marktbeeld", "") or ""
+        if not used_web:
+            marktbeeld += ("\n\n_⚠️ Zonder live websearch gegenereerd — gebaseerd op de "
+                           "trainingskennis van het model, niet op de berichtgeving van vandaag._")
+        db.save_ai_evaluation("market_ideas", marktbeeld, timing=batch_id,
+                              tickers=",".join(sorted({i["ticker"] for i in
+                                                       db.get_market_ideas(batch_id=batch_id)})))
+
+        logger.info(f"Marktopportuniteiten: {stored} idee(ën) opgeslagen "
+                    f"(defensief {per_bucket['defensive']}, matig {per_bucket['moderate']}, "
+                    f"speculatief {per_bucket['speculative']}), websearch={used_web}")
+        return {"batch_id": batch_id, "stored": stored, "per_bucket": per_bucket,
+                "marktbeeld": marktbeeld, "websearch": used_web}
+    except OpenAIError as exc:
+        logger.error(f"generate_market_opportunities: {exc}")
+        return {"error": f"OpenAI-fout: {exc}"}
+    except Exception as exc:
+        logger.error(f"generate_market_opportunities: {exc}")
+        return {"error": f"Kon AI-antwoord niet verwerken: {exc}"}
+
+
+def _num(v):
+    """Tolerant getal uit het AI-antwoord. Het model schrijft koersdoelen soms als
+    'CHF 95,5', '€ 250', '3,1%' of 'ca. 42' — we halen er het eerste getal uit
+    (komma of punt als decimaalteken). Geen getal -> None."""
+    if v is None or isinstance(v, bool):
+        return None
+    if isinstance(v, (int, float)):
+        return float(v)
+    import re
+    m = re.search(r"-?\d+(?:[.,]\d+)?", str(v))
+    if not m:
+        return None
+    try:
+        return float(m.group(0).replace(",", "."))
+    except ValueError:
+        return None
+
+
+MARKET_PERIODS = [("7d", "7 dagen", 7), ("1m", "1 maand", 30), ("3m", "3 maanden", 90)]
+
+
+def market_idea_synthesis(days: int) -> list[dict]:
+    """Vat de koopideeën van de afgelopen 'days' dagen samen PER TICKER, met het
+    GEMIDDELDE advies over die periode.
+
+    Per ticker: hoe vaak voorgesteld, in welke bucket(s), het gemiddelde advies
+    (gemiddelde ratingscore -> label), het laatste advies, en het rendement sinds het
+    eerste advies (koers nu t.o.v. de koers op het moment van dat eerste advies).
+    De koers 'nu' komt uit price_history (de scheduler volgt de idee-tickers dagelijks
+    op) — geen netwerkcalls tijdens het renderen. Geen koersdata -> rendement None.
+    """
+    from datetime import timedelta
+    since = (datetime.now() - timedelta(days=days)).strftime("%Y-%m-%d")
+    ideas = db.get_market_ideas(since_date=since)
+    if not ideas:
+        return []
+
+    by_ticker: dict[str, list[dict]] = {}
+    for it in ideas:
+        by_ticker.setdefault(it["ticker"], []).append(it)
+
+    latest = db.get_latest_prices(list(by_ticker.keys()))
+
+    out = []
+    for tk, rows in by_ticker.items():
+        rows_sorted = sorted(rows, key=lambda r: (r["idea_date"], r["id"]))
+        first, last = rows_sorted[0], rows_sorted[-1]
+        scores = [RATING_SCORE[r["rating"]] for r in rows_sorted if r.get("rating") in RATING_SCORE]
+        avg = sum(scores) / len(scores) if scores else 0.0
+        buckets = sorted({r["bucket"] for r in rows_sorted})
+
+        start = first.get("price_at_advice")
+        now_row = latest.get(tk)
+        now_price = now_row["price"] if now_row else None
+        ret_pct = None
+        if start and now_price:
+            ret_pct = (now_price - start) / start * 100
+
+        out.append({
+            "ticker":        tk,
+            "naam":          last.get("name") or tk,
+            "buckets":       buckets,
+            "n":             len(rows_sorted),
+            "avg_score":     round(avg, 2),
+            "avg_rating":    score_to_rating(avg),
+            "latest_rating": last.get("rating"),
+            "eerste_advies": first["idea_date"],
+            "laatste_advies": last["idea_date"],
+            "startkoers":    start,
+            "huidige_koers": now_price,
+            "rendement_pct": ret_pct,
+            "munt":          last.get("currency") or "EUR",
+            "koersdoel":     last.get("price_target"),
+        })
+    # Sterkste gemiddelde advies eerst, daarna het vaakst herhaald
+    out.sort(key=lambda r: (-r["avg_score"], -r["n"], r["ticker"]))
+    return out
 
 
 # ── AI-koersdoel voor één ticker (apart model) ────────────────────────────────

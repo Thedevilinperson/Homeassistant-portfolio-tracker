@@ -138,6 +138,44 @@ def clear_cache():
     get_overview.clear()
 
 
+def daily_pl(pv: dict) -> dict:
+    """Dagelijkse winst/verlies per positie.
+
+    Referentie is de laatste koers die vóór vandaag in price_history staat (de
+    scheduler schrijft elke 5 minuten weg, dus dat is in de praktijk de slotkoers
+    van de vorige beursdag). Alles komt uit de database: geen netwerkcalls.
+
+    Per ticker: {prev, price, change_pct, pl_eur, quantity}. De omrekening naar EUR
+    gebeurt met de wisselkoers die al in de positie zit (huidige waarde gedeeld door
+    aantal x koers), zodat er geen aparte FX-call nodig is. Tickers zonder koers van
+    een vorige dag ontbreken in het resultaat (bv. net toegevoegd, of de scheduler
+    draait nog geen volledige dag)."""
+    if not pv:
+        return {}
+    today = datetime.now().strftime("%Y-%m-%d")
+    prev_map = db.get_previous_closes(list(pv.keys()), today)
+    out = {}
+    for ticker, pos in pv.items():
+        prev_row = prev_map.get(ticker.upper())
+        price = pos.get("current_price")
+        qty = pos.get("quantity") or 0
+        if not prev_row or not price or not qty:
+            continue
+        prev = prev_row["price"]
+        if not prev:
+            continue
+        cur_val = pos.get("current_value")
+        fx = (cur_val / (qty * price)) if (cur_val and qty and price) else 1.0
+        out[ticker] = {
+            "prev":       prev,
+            "price":      price,
+            "quantity":   qty,
+            "change_pct": (price - prev) / prev * 100,
+            "pl_eur":     (price - prev) * qty * fx,
+        }
+    return out
+
+
 def _section_radio(key: str, labels: list) -> str:
     """Blijvende sectiekeuze i.p.v. st.tabs. Anders dan st.tabs onthoudt dit de
     gekozen sectie over reruns heen (bv. na het kiezen van een filter), zodat de
@@ -696,6 +734,65 @@ def page_dashboard():
     _cash_avail = db.compute_cash_positions(accset)["totals"]["available"]
     st.caption(f"💶 **Beschikbare cash** (deze selectie): **{eur(_cash_avail)}** — om aandelen mee te "
                "kopen. Stortingen/opnames beheer je op de **💶 Cash**-pagina.")
+
+    st.divider()
+
+    # ── Dagresultaat per positie ─────────────────────────────────────────────
+    st.subheader("📆 Dagresultaat vandaag")
+    dpl = daily_pl(pv)
+    if not dpl:
+        st.info("Nog geen dagresultaat: daarvoor is minstens één koers van een vorige dag nodig. "
+                "De achtergrondplanner legt elke 5 minuten koersen vast — morgen staat dit hier.")
+    else:
+        day_total = sum(d["pl_eur"] for d in dpl.values())
+        base_val = sum((pv[t]["current_value"] or 0) - dpl[t]["pl_eur"] for t in dpl)
+        day_pct = (day_total / base_val * 100) if base_val else 0.0
+        winners = sum(1 for d in dpl.values() if d["pl_eur"] > 0)
+        losers = sum(1 for d in dpl.values() if d["pl_eur"] < 0)
+
+        d1, d2, d3 = st.columns([2, 1, 2])
+        d1.metric("Dagresultaat portefeuille", eur(day_total), delta=pct(day_pct),
+                  delta_color=delta_color(day_total),
+                  help="Som van de dagelijkse winst/verlies van alle open posities in deze "
+                       "selectie, t.o.v. de laatste koers van de vorige (beurs)dag.")
+        d2.metric("Stijgers / dalers", f"{winners} / {losers}", delta_color="off")
+        _best = max(dpl.items(), key=lambda kv: kv[1]["pl_eur"])
+        _worst = min(dpl.items(), key=lambda kv: kv[1]["pl_eur"])
+        _nm = asset_name_map()
+        d3.markdown(f"🏆 **Beste vandaag:** {_nm.get(_best[0], _best[0])} "
+                    f"({pct(_best[1]['change_pct'])}, {eur(_best[1]['pl_eur'])})  \n"
+                    f"🐌 **Zwakste vandaag:** {_nm.get(_worst[0], _worst[0])} "
+                    f"({pct(_worst[1]['change_pct'])}, {eur(_worst[1]['pl_eur'])})")
+
+        names_dp = asset_name_map()
+        drows = []
+        for t in sorted(dpl, key=lambda x: dpl[x]["pl_eur"], reverse=True):
+            d = dpl[t]
+            drows.append({
+                "": sign_icon(d["pl_eur"]),
+                "Activum":        asset_label(t, names_dp),
+                "Aantal":         d["quantity"],
+                "Vorige slot":    d["prev"],
+                "Koers nu":       d["price"],
+                "Δ vandaag (%)":  d["change_pct"],
+                "Dag-P/L (€)":    d["pl_eur"],
+                "Huidige waarde": pv[t]["current_value"],
+            })
+        st.dataframe(pd.DataFrame(drows), width="stretch", hide_index=True, column_config={
+            "Aantal":         st.column_config.NumberColumn(format="%.4f"),
+            "Vorige slot":    st.column_config.NumberColumn(format="%.4f"),
+            "Koers nu":       st.column_config.NumberColumn(format="%.4f"),
+            "Δ vandaag (%)":  st.column_config.NumberColumn(format="%+.2f%%"),
+            "Dag-P/L (€)":    st.column_config.NumberColumn(format="€ %+.2f"),
+            "Huidige waarde": st.column_config.NumberColumn(format="€ %.2f"),
+        })
+        _missing = [t for t in pv if t not in dpl]
+        cap = ("Referentie = de laatste vastgelegde koers van de vorige (beurs)dag. Koersen en "
+               "vorige slotkoersen staan in de native munt; de dag-P/L staat in euro.")
+        if _missing:
+            cap += (f"  ·  Geen vorige koers voor: {', '.join(names_dp.get(t, t) for t in _missing)} "
+                    "(nog te weinig koershistoriek).")
+        st.caption(cap)
 
     st.divider()
 
@@ -2753,6 +2850,153 @@ def page_tax():
 
 # ── PAGINA: AI Advisor ────────────────────────────────────────────────────────
 
+def render_market_opportunities():
+    """Luik 2: koopopportuniteiten uit de wereldwijde markt + de opvolging ervan
+    over 7 dagen, 1 maand en 3 maanden (met het gemiddelde advies per periode)."""
+    st.subheader("② 🌍 Marktopportuniteiten — buiten je portefeuille")
+    st.caption("Elke werkdag (07:45, vóór de opening) speurt de AI de wereldwijde markt af naar "
+               "**nieuwe** koopideeën op basis van bedrijfsprestaties, vooruitzichten, "
+               "macro-economie, geopolitiek en financiële berichtgeving: **2 defensieve** "
+               "(groei + eventueel dividend), **2 matig speculatieve** en **2 sterk speculatieve** "
+               "aandelen — elk met onderbouwing, katalysatoren en risico's.")
+
+    if not ai_advisor.ai_function_enabled("market"):
+        st.warning("Deze functie staat uit. Schakel ze in via ⚙️ Instellingen → AI.")
+    if not ai_advisor.market_websearch_enabled():
+        st.warning("🔌 Live websearch staat uit: de AI put enkel uit haar trainingskennis en kent "
+                   "de berichtgeving van vandaag dus niet. Zet ze aan via ⚙️ Instellingen → AI.")
+
+    if st.button("🌍 Zoek nu marktopportuniteiten", type="primary", key="gen_market"):
+        with st.spinner("AI doorzoekt de wereldwijde markt (dit kan een halve minuut duren)..."):
+            res = ai_advisor.generate_market_opportunities()
+        if res.get("error"):
+            st.error(res["error"])
+        else:
+            src = "met live websearch" if res.get("websearch") else \
+                  "zonder websearch (enkel trainingskennis)"
+            st.success(f"✅ {res['stored']} koopidee(ën) gegenereerd {src}.")
+        st.rerun()
+
+    # ── De ideeën van de laatste ronde ───────────────────────────────────────
+    batch = db.get_latest_idea_batch()
+    if not batch:
+        st.info("Nog geen marktopportuniteiten. Klik hierboven of wacht op de dagelijkse run.")
+        return
+
+    ideas = db.get_market_ideas(batch_id=batch)
+    note = db.get_ai_evaluations("market_ideas", limit=1)
+    st.markdown(f"#### 📅 Ideeën van {ideas[0]['idea_date']}")
+    if note and (note[0].get("content") or "").strip():
+        st.markdown("**🌐 Marktbeeld**")
+        st.markdown(note[0]["content"])
+
+    by_bucket = {}
+    for it in ideas:
+        by_bucket.setdefault(it["bucket"], []).append(it)
+
+    for bucket in ai_advisor.MARKET_BUCKETS:
+        rows = by_bucket.get(bucket, [])
+        st.markdown(f"##### {ai_advisor.BUCKET_LABELS[bucket]}")
+        if not rows:
+            st.caption("Geen idee in deze klasse voor deze ronde.")
+            continue
+        cols = st.columns(len(rows))
+        for col, it in zip(cols, rows):
+            with col:
+                with st.container(border=True):
+                    st.markdown(f"**{it.get('name') or it['ticker']}** · `{it['ticker']}`")
+                    meta = [it.get("exchange") or "", it.get("currency") or ""]
+                    st.caption(" · ".join(m for m in meta if m))
+                    m1, m2 = st.columns(2)
+                    m1.metric("Advies", ai_advisor.RATING_LABELS.get(it.get("rating"), "—"))
+                    if it.get("price_target"):
+                        up = None
+                        if it.get("price_at_advice"):
+                            up = (it["price_target"] - it["price_at_advice"]) / it["price_at_advice"] * 100
+                        m2.metric("Koersdoel 12m", f"{it['price_target']:.2f}",
+                                  delta=pct(up) if up is not None else None,
+                                  delta_color=delta_color(up))
+                    facts = []
+                    if it.get("price_at_advice"):
+                        facts.append(f"Koers bij advies: **{it['price_at_advice']:.2f} "
+                                     f"{it.get('currency') or ''}**")
+                    if it.get("dividend_yield"):
+                        facts.append(f"Dividendrendement: **{it['dividend_yield']:.2f}%**")
+                    if it.get("horizon"):
+                        facts.append(f"Horizon: **{it['horizon']}**")
+                    if facts:
+                        st.caption("  ·  ".join(facts))
+                    if it.get("rationale"):
+                        st.markdown(f"**Onderbouwing** — {it['rationale']}")
+                    if it.get("catalysts"):
+                        st.markdown(f"**⚡ Katalysatoren** — {it['catalysts']}")
+                    if it.get("risks"):
+                        st.markdown(f"**⚠️ Risico's** — {it['risks']}")
+
+    # ── Opvolging: gemiddeld advies per periode ──────────────────────────────
+    st.divider()
+    st.markdown("#### 📈 Opvolging van de adviezen")
+    st.caption("Elk voorgesteld aandeel wordt bijgehouden. Per periode zie je het **gemiddelde "
+               "advies** (het gemiddelde van alle ratings die dat aandeel in die periode kreeg), "
+               "hoe vaak het werd voorgesteld en het rendement sinds het eerste advies.")
+
+    plabels = {lbl: days for _, lbl, days in ai_advisor.MARKET_PERIODS}
+    sel = _section_radio("market_period", list(plabels.keys()))
+    days = plabels[sel]
+    synth = ai_advisor.market_idea_synthesis(days)
+
+    if not synth:
+        st.info(f"Nog geen adviezen in de laatste {sel.lower()}.")
+        return
+
+    rets = [r["rendement_pct"] for r in synth if r["rendement_pct"] is not None]
+    s1, s2, s3 = st.columns(3)
+    s1.metric(f"Voorgestelde aandelen ({sel.lower()})", str(len(synth)))
+    s2.metric("Totaal adviezen", str(sum(r["n"] for r in synth)))
+    if rets:
+        avg_ret = sum(rets) / len(rets)
+        s3.metric("Gem. rendement sinds 1e advies", pct(avg_ret),
+                  delta_color=delta_color(avg_ret),
+                  help="Gemiddeld koersrendement (native munt) van de voorgestelde aandelen, "
+                       "gemeten vanaf de koers op het moment van hun eerste advies.")
+    else:
+        s3.metric("Gem. rendement sinds 1e advies", "—",
+                  help="Nog geen opgevolgde koersen. De planner legt de koers van elk voorgesteld "
+                       "aandeel dagelijks vast; morgen staat hier een cijfer.")
+
+    srows = []
+    for r in synth:
+        srows.append({
+            "":                  sign_icon(r["rendement_pct"]) if r["rendement_pct"] is not None else "⚪",
+            "Aandeel":           f"{r['naam']} ({r['ticker']})",
+            "Klasse":            " + ".join(ai_advisor.BUCKET_SHORT[b] for b in r["buckets"]),
+            "Adviezen":          r["n"],
+            "Gemiddeld advies":  ai_badge(r["avg_rating"]),
+            "Score":             r["avg_score"],
+            "Laatste advies":    ai_badge(r["latest_rating"]),
+            "1e advies":         r["eerste_advies"],
+            "Startkoers":        r["startkoers"],
+            "Koers nu":          r["huidige_koers"],
+            "Rendement":         r["rendement_pct"],
+            "Koersdoel 12m":     r["koersdoel"],
+        })
+    st.dataframe(pd.DataFrame(srows), width="stretch", hide_index=True, column_config={
+        "Adviezen":      st.column_config.NumberColumn(format="%d"),
+        "Score":         st.column_config.NumberColumn(
+                             format="%+.2f",
+                             help="Gemiddelde ratingscore: +2 sterk kopen, +1 kopen, 0 behouden, "
+                                  "−1 verkopen, −2 sterk verkopen."),
+        "Startkoers":    st.column_config.NumberColumn(format="%.2f"),
+        "Koers nu":      st.column_config.NumberColumn(format="%.2f"),
+        "Rendement":     st.column_config.NumberColumn(format="%+.2f%%"),
+        "Koersdoel 12m": st.column_config.NumberColumn(format="%.2f"),
+    })
+    st.caption("Koersen in de native munt van elk aandeel. Het rendement is een zuiver "
+               "koersrendement (geen dividenden, geen wisselkoerseffect) en is dus geen "
+               "gerealiseerd resultaat — het meet enkel hoe het advies het sindsdien doet. "
+               "Dit is geen gepersonaliseerd financieel advies.")
+
+
 def page_ai_advisor():
     st.title("🤖 AI Beleggingsadviseur")
 
@@ -2794,7 +3038,8 @@ def page_ai_advisor():
             if usage["by_function"]:
                 st.caption("Per functie")
                 func_labels = {"tax_optimization": "Belastingadvies",
-                               "daily_advice": "Dagelijks advies",
+                               "daily_advice": "① Portefeuilleadvies",
+                               "market_ideas": "② Marktopportuniteiten",
                                "market_evaluation": "Marktevaluatie (oud)",
                                "portfolio_ratings": "Portefeuille-ratings (oud)",
                                "price_target": "Koersdoel", "chat": "Overig",
@@ -2841,9 +3086,17 @@ def page_ai_advisor():
         _pl = "bedragen verborgen (percentages)" if _plvl == "amounts" else "volledig anoniem (ook tickers)"
         st.caption(f"🔒 Privacymodus actief: **{_pl}**. Pas aan via ⚙️ Instellingen → AI.")
 
+    st.info("Het **dagelijkse advies bestaat uit twee luiken**:  \n"
+            "**① Portefeuilleadvies** — (sterk) kopen / behouden / (sterk) verkopen op wat je "
+            "**nu al bezit**.  \n"
+            "**② Marktopportuniteiten** — nieuwe koopideeën uit de **wereldwijde markt**, "
+            "los van je portefeuille: elke dag 2 defensieve, 2 matig speculatieve en "
+            "2 sterk speculatieve aandelen.")
+
     _aisec = _section_radio("ai_section", [
+        "① 📋 Portefeuilleadvies (dagelijks)",
+        "② 🌍 Marktopportuniteiten (dagelijks)",
         "💡 Belastingoptimalisatie (maandelijks)",
-        "🤖 Dagelijks portefeuilleadvies",
     ])
 
     if _aisec == "💡 Belastingoptimalisatie (maandelijks)":
@@ -2870,11 +3123,16 @@ def page_ai_advisor():
                     st.markdown(ev["content"])
                     st.divider()
 
-    if _aisec == "🤖 Dagelijks portefeuilleadvies":
-        st.subheader("🤖 Dagelijks portefeuilleadvies")
-        st.caption("Eén advies per werkdag (18:00) voor de hele portefeuille. Levert zowel dit "
-                   "tekstadvies als de koop/houden/verkoop-ratings die de tabellen op de "
-                   "**💼 Portefeuille**-pagina voeden.")
+    if _aisec == "② 🌍 Marktopportuniteiten (dagelijks)":
+        render_market_opportunities()
+
+    if _aisec == "① 📋 Portefeuilleadvies (dagelijks)":
+        st.subheader("① 📋 Portefeuilleadvies — enkel je bestaande posities")
+        st.caption("Eén advies per werkdag (18:00) over de aandelen die je **nu al bezit**: "
+                   "(sterk) kopen, behouden of (sterk) verkopen. Levert zowel dit tekstadvies als "
+                   "de ratings die de tabellen op de **💼 Portefeuille**-pagina en het dashboard "
+                   "voeden. Nieuwe aandelen buiten je portefeuille komen bewust niet hier aan bod "
+                   "— die vind je in luik ② Marktopportuniteiten.")
         if not ai_advisor.ai_function_enabled("daily"):
             st.warning("Deze functie staat uit. Schakel ze in via ⚙️ Instellingen → AI.")
         devals = db.get_ai_evaluations("daily_advice", limit=10)
@@ -2959,11 +3217,24 @@ def page_settings():
         st.caption("Bij 'volledig anoniem' krijgt de AI geen tickers, namen of bedragen — enkel type, "
                    "profiel en gewicht. Het advies blijft bruikbaar maar is iets minder specifiek; de "
                    "ratings worden achteraf weer aan je echte aandelen gekoppeld.")
-        en1, en2 = st.columns(2)
+        en1, en2, en3 = st.columns(3)
         enable_tax = en1.checkbox("Maandelijks belastingadvies actief",
                                   value=db.get_setting("ai_enable_tax", "1") != "0")
-        enable_daily = en2.checkbox("Dagelijks portefeuilleadvies actief",
+        enable_daily = en2.checkbox("① Dagelijks portefeuilleadvies actief",
                                     value=db.get_setting("ai_enable_daily", "1") != "0")
+        enable_market = en3.checkbox("② Dagelijkse marktopportuniteiten actief",
+                                     value=db.get_setting("ai_enable_market", "1") != "0",
+                                     help="Luik 2: elke werkdag 6 koopideeën uit de wereldwijde "
+                                          "markt (2 defensief, 2 matig speculatief, 2 sterk "
+                                          "speculatief).")
+        enable_ws = st.checkbox("🌐 Live websearch voor de marktopportuniteiten",
+                                value=db.get_setting("ai_market_websearch", "1") != "0",
+                                help="Laat de AI zelf actuele koersen, resultaten en "
+                                     "berichtgeving opzoeken via de websearch-tool van OpenAI. "
+                                     "Zonder dit put ze enkel uit haar trainingskennis en kent ze "
+                                     "het nieuws van vandaag niet. Kost iets meer per oproep; valt "
+                                     "automatisch terug op gewoon advies als je model de tool niet "
+                                     "ondersteunt.")
 
         if st.button("💾 Opslaan", key="save_api"):
             db.set_setting("openai_api_key", new_key.strip())
@@ -2974,6 +3245,8 @@ def page_settings():
             db.set_setting("ai_privacy_mode", privacy)
             db.set_setting("ai_enable_tax", "1" if enable_tax else "0")
             db.set_setting("ai_enable_daily", "1" if enable_daily else "0")
+            db.set_setting("ai_enable_market", "1" if enable_market else "0")
+            db.set_setting("ai_market_websearch", "1" if enable_ws else "0")
             st.success("✅ Instellingen opgeslagen!")
         if current:
             st.success("✅ API-sleutel is geconfigureerd.")
