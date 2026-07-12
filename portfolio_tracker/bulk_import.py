@@ -334,7 +334,8 @@ def apply_import(parsed: dict) -> dict:
         info = a_info.get(r["ticker"], {})
         atype = info.get("asset_type", "stock")
         country = (info.get("country") or "BE").upper()
-        wht_rate = tax.get_wht_rate(country)
+        # Tarief van het jaar van het dividend (bronbelastingen wijzigen over de jaren)
+        wht_rate = tax.get_wht_rate(country, tax.year_of(r["date"]))
         kind = r.get("kind", "dividend")
         # Interesten/securities lending: geen buitenlandse bronbelasting-driehoek, wel RV
         _wht = wht_rate if (kind == "dividend" and country != "BE") else 0.0

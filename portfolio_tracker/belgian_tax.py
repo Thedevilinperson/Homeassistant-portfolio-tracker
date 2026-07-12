@@ -14,8 +14,11 @@ Regels (De Wever-hervorming, 10% CGT):
 from __future__ import annotations
 
 from datetime import datetime
+import logging
 import database as db
 import market_data
+
+logger = logging.getLogger(__name__)
 
 
 # ── Fotomoment (referentiewaarde 31/12/2025) ──────────────────────────────────
@@ -126,9 +129,71 @@ COUNTRY_NAMES = {
 }
 
 
-def get_wht_rates() -> dict[str, float]:
-    """Tarieven buitenlandse bronbelasting (% per landcode), met overrides uit settings."""
+def _year_rate_table() -> dict[int, dict[str, float]]:
+    """De opgeslagen tarieventabel per jaar: {jaar: {landcode: percentage}}.
+
+    Opslag: setting 'foreign_wht_rates_by_year' (JSON). Enkel jaren die je
+    effectief hebt ingesteld staan erin; de rest volgt uit doorschuiving (zie
+    get_wht_rates)."""
+    import json as _json
+    out: dict[int, dict[str, float]] = {}
+    try:
+        stored = db.get_setting("foreign_wht_rates_by_year", "")
+        if stored:
+            for yr, rates in _json.loads(stored).items():
+                try:
+                    y = int(yr)
+                except (TypeError, ValueError):
+                    continue
+                out[y] = {str(k).upper(): float(v) for k, v in (rates or {}).items()}
+    except Exception as exc:
+        logger.warning(f"_year_rate_table: kon de jaartabel niet lezen ({exc})")
+    return out
+
+
+def save_year_rates(year: int, rates: dict[str, float]):
+    """Bewaar de tarieven voor één specifiek jaar."""
+    import json as _json
+    tbl = _year_rate_table()
+    tbl[int(year)] = {str(k).upper(): float(v) for k, v in rates.items()}
+    db.set_setting("foreign_wht_rates_by_year",
+                   _json.dumps({str(y): r for y, r in sorted(tbl.items())}))
+
+
+def delete_year_rates(year: int):
+    """Wis de tarieven van één jaar; dat jaar volgt dan weer het vorige jaar."""
+    import json as _json
+    tbl = _year_rate_table()
+    tbl.pop(int(year), None)
+    db.set_setting("foreign_wht_rates_by_year",
+                   _json.dumps({str(y): r for y, r in sorted(tbl.items())}))
+
+
+def configured_years() -> list[int]:
+    """Jaren waarvoor expliciet tarieven zijn ingesteld (oplopend)."""
+    return sorted(_year_rate_table().keys())
+
+
+def get_wht_rates(year: int | None = None) -> dict[str, float]:
+    """Tarieven buitenlandse bronbelasting (% per landcode) voor een BEPAALD JAAR.
+
+    Bronbelastingtarieven wijzigen over de jaren (verdragen, nationale hervormingen),
+    en een dividend moet belast worden tegen het tarief dat gold OP DAT MOMENT — niet
+    tegen het tarief van vandaag. Daarom:
+
+      1. Basis = de ingebouwde standaardtarieven.
+      2. Daarop de oude, jaarloze instelling ('foreign_wht_rates'), voor compatibiliteit
+         met wat je vóór deze versie had ingesteld.
+      3. Daarop het meest recente INGESTELDE jaar dat <= 'year' ligt. Tarieven schuiven
+         dus door: stel je 2024 in, dan geldt dat ook voor 2025 en 2026 tot je voor een
+         van die jaren iets anders instelt. Zo hoef je enkel de WIJZIGINGEN te registreren.
+
+    year=None -> het huidige jaar (het tarief dat vandaag geldt).
+    Voor een jaar VÓÓR het vroegst ingestelde jaar gelden stap 1+2 (de standaardtarieven),
+    want er is dan geen historische tabel om op terug te vallen.
+    """
     rates = dict(DEFAULT_WHT_RATES)
+    # (2) legacy, jaarloze override
     try:
         import json as _json
         stored = db.get_setting("foreign_wht_rates", "")
@@ -137,14 +202,29 @@ def get_wht_rates() -> dict[str, float]:
                 rates[str(k).upper()] = float(v)
     except Exception:
         pass
+    # (3) jaartabel met doorschuiving
+    y = int(year) if year else datetime.now().year
+    tbl = _year_rate_table()
+    applicable = [yy for yy in tbl if yy <= y]
+    if applicable:
+        rates.update(tbl[max(applicable)])
     return rates
 
 
-def get_wht_rate(country: str | None) -> float:
-    """Tarief (fractie, bv. 0.15) voor een landcode; 0.0 indien onbekend/BE."""
+def get_wht_rate(country: str | None, year: int | None = None) -> float:
+    """Tarief (fractie, bv. 0.15) voor een landcode IN EEN BEPAALD JAAR;
+    0.0 indien onbekend of België. year=None -> het tarief van vandaag."""
     if not country:
         return 0.0
-    return get_wht_rates().get(country.upper(), 0.0) / 100.0
+    return get_wht_rates(year).get(country.upper(), 0.0) / 100.0
+
+
+def year_of(date_str: str | None) -> int | None:
+    """Jaartal uit een 'YYYY-MM-DD'-datum; None als dat niet lukt."""
+    try:
+        return int(str(date_str)[:4])
+    except (TypeError, ValueError):
+        return None
 
 
 # ── Dividendfiscaliteit (Belgische personenbelasting) ─────────────────────────

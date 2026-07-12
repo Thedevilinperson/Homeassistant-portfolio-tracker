@@ -461,18 +461,25 @@ def _cell_eq(a, b) -> bool:
     return str(a) == str(b)
 
 
-def _recompute_dividend_chain(divs, rv_rate: float) -> int:
-    """(Her)bouw de dividendketen op vanaf ① bruto met de actuele instellingen:
-    buitenlandse bronbelasting uit het land van het activum, Belgische RV uit de
-    instellingen.
+def _recompute_dividend_chain(divs, rv_rate: float, include_manual: bool = False,
+                              dry_run: bool = False) -> list[dict]:
+    """(Her)bouw de dividendketen op vanaf ① bruto: buitenlandse bronbelasting uit het
+    land van het activum EN het tarief van het jaar van het dividend, Belgische RV uit
+    de instellingen.
 
-    Zelfherstellend en idempotent: lijnen waarvan de opgeslagen keten al klopt met
-    het (huidige) land worden overgeslagen; lijnen die niet meer overeenkomen — bv.
-    nadat je het land van een activum hebt gecorrigeerd na een bulk-import — worden
-    opnieuw berekend vanaf het brutobedrag. Meermaals klikken kan dus veilig.
-    Interest en securities lending blijven ongemoeid."""
+    Zelfherstellend en idempotent: lijnen waarvan de opgeslagen keten al klopt worden
+    overgeslagen; lijnen die niet meer overeenkomen — bv. nadat je het land van een
+    activum hebt gecorrigeerd — worden opnieuw berekend vanaf het brutobedrag.
+    Interest en securities lending blijven ongemoeid.
+
+    include_manual=False (standaard): lijnen die JIJ handmatig hebt gecorrigeerd
+    (manual_override) blijven ongemoeid. Een herberekening mag je eigen correcties niet
+    stilzwijgend overschrijven — dat is precies waarvoor je ze hebt ingevoerd.
+    dry_run=True: niets wegschrijven, enkel teruggeven wát er zou wijzigen.
+
+    Geeft een lijst wijzigingen terug: per lijn de oude en nieuwe ②/🇧🇪RV/④/netto-EUR."""
     a_by = {a["ticker"]: a for a in db.get_assets()}
-    fixed = 0
+    changes: list[dict] = []
 
     def _close(x, y, tol=0.02):
         xv, yv = (x or 0.0), (y or 0.0)
@@ -481,6 +488,8 @@ def _recompute_dividend_chain(divs, rv_rate: float) -> int:
     for d in divs:
         if (d.get("kind") or "dividend") != "dividend":
             continue
+        if d.get("manual_override") and not include_manual:
+            continue   # handmatig gecorrigeerd -> met rust laten
         # Anker = ① bruto vóór bronbelasting; val terug op ③ of de opgeslagen bruto.
         A = d.get("gross_before_wht")
         if A is None:
@@ -492,7 +501,11 @@ def _recompute_dividend_chain(divs, rv_rate: float) -> int:
         cur  = d.get("currency") or "EUR"
         ndat = d["date"][:10]
         ctry = (a_by.get(d["ticker"], {}).get("country") or "BE").upper()
-        wht  = tax_mod.get_wht_rate(ctry) if ctry != "BE" else 0.0
+        # Tarief van het JAAR VAN HET DIVIDEND, niet van vandaag: bronbelastingen
+        # wijzigen over de jaren en een dividend uit 2024 moet met het tarief van 2024
+        # herberekend worden.
+        dyear = tax_mod.year_of(ndat)
+        wht  = tax_mod.get_wht_rate(ctry, dyear) if ctry != "BE" else 0.0
         # Volledige keten opnieuw opbouwen vanaf ① (B/C/D leeg → uit de tarieven)
         res  = tax_mod.resolve_dividend_chain(A, None, None, None,
                                               rv_rate=rv_rate, wht_rate=wht)
@@ -521,6 +534,27 @@ def _recompute_dividend_chain(divs, rv_rate: float) -> int:
                 _close(gross_eur, d.get("gross_eur"))):
             continue
 
+        changes.append({
+            "id":        d["id"],
+            "datum":     ndat,
+            "ticker":    d["ticker"],
+            "land":      ctry,
+            "jaar":      dyear,
+            "wht_pct":   round(wht * 100, 3),
+            "handmatig": bool(d.get("manual_override")),
+            "oud_wht":   d.get("foreign_wht_amt"),
+            "nieuw_wht": rB,
+            "oud_rv":    d.get("belgian_rv_amt"),
+            "nieuw_rv":  rRV,
+            "oud_netto": d.get("net_received"),
+            "nieuw_netto": rD,
+            "oud_netto_eur":   d.get("net_eur"),
+            "nieuw_netto_eur": net_eur,
+            "munt":      cur,
+        })
+        if dry_run:
+            continue
+
         prim = rA if rA is not None else (rC if rC is not None else rD)
         fx_prim = compute_eur(prim, cur, ndat)[0] or 1.0
         db.update_dividend(
@@ -532,9 +566,10 @@ def _recompute_dividend_chain(divs, rv_rate: float) -> int:
             foreign_wht_amt=rB, foreign_wht_cur=cur if rB is not None else None,
             gross_after_wht=rC, gross_after_wht_cur=cur if rC is not None else None,
             belgian_rv_amt=rRV, net_received=rD, net_received_cur=cur if rD is not None else None,
-            cash_basis=cbk, cash_eur=cash_eur)
-        fixed += 1
-    return fixed
+            cash_basis=cbk, cash_eur=cash_eur,
+            # Herberekende lijn is per definitie niet langer een handmatige correctie.
+            manual_override=0)
+    return changes
 
 
 def _date_or_none(s: str):
@@ -2398,7 +2433,7 @@ def page_dividends():
 
             else:  # Gedetailleerd
                 a_country = (amap.get(d_ticker, {}).get("country") or "BE").upper()
-                wht_pct_default = tax_mod.get_wht_rates().get(a_country, 0.0)
+                wht_pct_default = tax_mod.get_wht_rates(tax_mod.year_of(str(d_date))).get(a_country, 0.0)
                 is_foreign = a_country != "BE"
                 cname = tax_mod.COUNTRY_NAMES.get(a_country, a_country)
                 st.caption(f"Vul in wat je weet — lege velden worden automatisch berekend en ingevuld. "
@@ -2617,6 +2652,7 @@ def page_dividends():
                 "Munt":     d.get("net_received_cur") or d.get("gross_before_wht_cur") or d["currency"],
                 "Cash":     CASH_LBL.get(d.get("cash_basis") or "net", "④ Netto"),
                 "Netto €":  round(_neur(d), 2),
+                "🔒 Handmatig": bool(d.get("manual_override")),
                 "Notities": d.get("notes") or "",
             })
         cc = st.column_config
@@ -2647,6 +2683,11 @@ def page_dividends():
                 "Cash":          cc.SelectboxColumn(options=list(CASH_LBL.values()),
                                                     help="Welk veld naar het cash-grootboek gaat."),
                 "Netto €":       cc.NumberColumn(disabled=True, format="%.2f"),
+                "🔒 Handmatig":  cc.CheckboxColumn(
+                    help="Deze lijn is door jou handmatig gecorrigeerd. De knop 'keten "
+                         "herberekenen' laat ze dan met rust. Wordt automatisch aangevinkt zodra "
+                         "je een bedrag (①-④) aanpast; vink af om de lijn weer automatisch te "
+                         "laten herberekenen."),
                 "Notities":      cc.TextColumn(),
             })
         st.caption("✏️ Bewerk rechtstreeks in de tabel. Laat ② en ④ leeg om ze automatisch te laten "
@@ -2662,7 +2703,7 @@ def page_dividends():
                     orig = rows[i]
                     if all(r[k] == orig[k] or (pd.isna(r[k]) and orig[k] is None)
                            for k in ("Datum", "Soort", "Rekening", "① Bruto", "② Bronbel.", "③ Na bronbel.",
-                                     "④ Netto", "Munt", "Cash", "Notities")):
+                                     "④ Netto", "Munt", "Cash", "Notities", "🔒 Handmatig")):
                         continue
                     nd = _date_or_none(str(r["Datum"]))
                     if nd is None:
@@ -2679,7 +2720,8 @@ def page_dividends():
                     kind   = KIND_KEY.get(str(r["Soort"]), "dividend")
                     # Tarieven toepassen: bronbelasting uit het land, RV uit de instellingen
                     ctry = (a_by_tk.get(d["ticker"], {}).get("country") or "BE").upper()
-                    _wht = tax_mod.get_wht_rate(ctry) if (kind == "dividend" and ctry != "BE") else 0.0
+                    _wht = (tax_mod.get_wht_rate(ctry, tax_mod.year_of(d["date"]))
+                            if (kind == "dividend" and ctry != "BE") else 0.0)
                     res = tax_mod.resolve_dividend_chain(nA, nB, nC, nD, rv_rate=_rvrate, wht_rate=_wht)
                     rA, rB, rC, rD, rRV = res["a"], res["b"], res["c"], res["d"], res["rv"]
                     def _te(v):
@@ -2714,7 +2756,14 @@ def page_dividends():
                         gross_after_wht=rC, gross_after_wht_cur=ncur if rC is not None else None,
                         belgian_rv_amt=rRV, net_received=rD,
                         net_received_cur=ncur if rD is not None else None,
-                        cash_basis=cbk, cash_eur=cash_eur_v, kind=kind)
+                        cash_basis=cbk, cash_eur=cash_eur_v, kind=kind,
+                        # Bedragen zelf aangepast? Dan is dit een HANDMATIGE CORRECTIE en
+                        # laat de knop 'keten herberekenen' deze lijn voortaan met rust.
+                        # (Enkel de datum/rekening/notities wijzigen telt niet als correctie.)
+                        manual_override=1 if any(
+                            not _cell_eq(r[k], orig[k])
+                            for k in ("① Bruto", "② Bronbel.", "③ Na bronbel.", "④ Netto")
+                        ) else (1 if bool(r["🔒 Handmatig"]) else 0))
                     n_upd += 1
             except Exception as exc:
                 problems.append(f"Onverwachte fout: {exc}")
@@ -2727,22 +2776,67 @@ def page_dividends():
             elif not problems:
                 st.info("Geen wijzigingen gevonden.")
 
-        # Herbereken RV + netto voor lijnen zonder ingehouden RV (bv. na een bulk-import
-        # waarbij enkel het bruto was ingevuld)
+        # ── Keten herberekenen: eerst tonen wát er zou wijzigen, dan pas uitvoeren ──
         st.divider()
-        st.caption("Herbouwt de keten vanaf ① bruto met de bronbelasting uit het **land** van het "
-                   "activum en de RV uit de instellingen, inclusief de EUR-bedragen en de "
-                   "**cash-boeking**. Corrigeerde je het land na een import? Klik dan opnieuw — "
-                   "lijnen die al kloppen blijven ongemoeid, foute lijnen (ook een verouderde "
-                   "cash-boeking) worden hersteld en het cash-grootboek volgt.")
-        if st.button("🔄 RV en netto herberekenen (keten vanaf ① bruto)", key="div_recompute"):
-            fixed = _recompute_dividend_chain(divs, _rvrate)
-            clear_cache()
-            if fixed:
-                st.success(f"✅ {fixed} lijn(en) herberekend.")
-            else:
-                st.info("Alle lijnen klopten al — niets gewijzigd.")
-            st.rerun()
+        st.markdown("#### 🔄 Keten herberekenen")
+        st.caption("Herbouwt de keten vanaf ① bruto met de bronbelasting van het **land** van het "
+                   "activum **en van het jaar van het dividend**, plus de RV uit de instellingen "
+                   "(inclusief EUR-bedragen en cash-boeking). Lijnen die al kloppen blijven "
+                   "ongemoeid. **Handmatig gecorrigeerde lijnen (🔒) worden standaard niet "
+                   "aangeraakt** — je ziet hieronder eerst wat er precies zou wijzigen.")
+
+        _n_manual = sum(1 for d in divs
+                        if d.get("manual_override") and (d.get("kind") or "dividend") == "dividend")
+        RC_SAFE = "🔒 Handmatig gecorrigeerde lijnen overslaan (aanbevolen)"
+        RC_ALL  = "⚠️ Ook handmatig gecorrigeerde lijnen overschrijven"
+        rc_scope = st.radio("Bereik", [RC_SAFE, RC_ALL], key="div_rc_scope",
+                            index=0, label_visibility="collapsed",
+                            help="Bij 'overschrijven' worden ook je eigen correcties vervangen door "
+                                 "de theoretisch berekende waarden. Dat kan zinvol zijn na een "
+                                 "tariefcorrectie, maar je verliest dan de handmatige waarden.")
+        _incl = rc_scope == RC_ALL
+        if _n_manual:
+            st.caption(f"🔒 **{_n_manual}** lijn(en) staan als handmatig gecorrigeerd gemarkeerd."
+                       + ("  Die worden nu **wél** overschreven." if _incl
+                          else "  Die blijven ongemoeid."))
+
+        _preview = _recompute_dividend_chain(divs, _rvrate, include_manual=_incl, dry_run=True)
+        if not _preview:
+            st.success("✅ Alle lijnen kloppen al met de tarieven — er valt niets te herberekenen.")
+        else:
+            _dnet = sum((c["nieuw_netto_eur"] or 0) - (c["oud_netto_eur"] or 0) for c in _preview)
+            _nman = sum(1 for c in _preview if c["handmatig"])
+            st.warning(f"**{len(_preview)} lijn(en)** zouden wijzigen"
+                       + (f", waarvan **{_nman} handmatig gecorrigeerd**" if _nman else "")
+                       + f". Impact op het totale netto: **{eur(_dnet)}**.")
+            st.dataframe(pd.DataFrame([{
+                "": "🔒" if c["handmatig"] else "",
+                "ID":        c["id"],
+                "Datum":     c["datum"],
+                "Activum":   asset_label(c["ticker"], names_map),
+                "Land/jaar": f"{c['land']} {c['jaar']} ({c['wht_pct']:g}%)",
+                "② Bronbel. nu":  c["oud_wht"],
+                "② wordt":        c["nieuw_wht"],
+                "④ Netto nu":     c["oud_netto"],
+                "④ wordt":        c["nieuw_netto"],
+                "Δ netto €":      (c["nieuw_netto_eur"] or 0) - (c["oud_netto_eur"] or 0),
+            } for c in _preview]), width="stretch", hide_index=True, column_config={
+                "ID":            st.column_config.NumberColumn(format="%d", width="small"),
+                "② Bronbel. nu": st.column_config.NumberColumn(format="%.2f"),
+                "② wordt":       st.column_config.NumberColumn(format="%.2f"),
+                "④ Netto nu":    st.column_config.NumberColumn(format="%.2f"),
+                "④ wordt":       st.column_config.NumberColumn(format="%.2f"),
+                "Δ netto €":     st.column_config.NumberColumn(format="€ %+.2f"),
+            })
+            _conf_lbl = ("Ja, overschrijf ook mijn handmatige correcties" if (_incl and _nman)
+                         else "Ja, voer deze herberekening uit")
+            if st.checkbox(_conf_lbl, key="div_rc_confirm"):
+                if st.button("🔄 Herberekening uitvoeren", type="primary", key="div_recompute"):
+                    done = _recompute_dividend_chain(divs, _rvrate, include_manual=_incl)
+                    clear_cache()
+                    st.session_state["div_rc_confirm"] = False
+                    st.success(f"✅ {len(done)} lijn(en) herberekend.")
+                    st.rerun()
 
         # Verwijderen (meerdere tegelijk, met bevestiging)
         st.divider()
@@ -3484,34 +3578,86 @@ def page_settings():
             st.success("✅ TOB-instellingen opgeslagen!")
 
         st.divider()
-        st.subheader("🌍 Buitenlandse bronbelasting op dividenden")
-        st.caption("Tarief per land van herkomst (het land stel je in per activum op de 🏢 Activa-pagina). "
-                   "Bij het invoeren van een dividend wordt ② bronbelasting = ① bruto × dit tarief "
-                   "automatisch voorgesteld; je kunt het bedrag daar nog altijd aanpassen. "
-                   "Standaardtarieven zijn indicatief — verdragstarieven kunnen afwijken.")
-        rates_now = tax_mod.get_wht_rates()
+        st.subheader("🌍 Buitenlandse bronbelasting op dividenden — per jaar")
+        st.caption("Tarief per land van herkomst (het land stel je in per activum op de 🏢 Activa-pagina), "
+                   "**per jaar**. Bronbelastingen wijzigen over de jaren, en een dividend hoort belast te "
+                   "worden tegen het tarief dat gold **op dat moment** — niet tegen het tarief van vandaag. "
+                   "Tarieven **schuiven door**: stel je 2024 in, dan geldt dat ook voor 2025, 2026, ... tot "
+                   "je voor een van die jaren iets anders instelt. Je registreert dus enkel de "
+                   "**wijzigingen**. Standaardtarieven zijn indicatief — verdragstarieven kunnen afwijken.")
+
+        # Dekking: voor elk jaar met dividenden moet er een tarief gekend zijn
+        _dyears = sorted({tax_mod.year_of(d["date"]) for d in db.get_dividends()
+                          if (d.get("kind") or "dividend") == "dividend"
+                          and tax_mod.year_of(d["date"])})
+        _tyears = sorted({tax_mod.year_of(t["date"]) for t in db.get_transactions()
+                          if tax_mod.year_of(t["date"])})
+        _years_needed = sorted(set(_dyears) | set(_tyears) | {datetime.now().year})
+        _cfg = tax_mod.configured_years()
+        if _cfg:
+            _uncovered = [y for y in _years_needed if y < min(_cfg)]
+            if _uncovered:
+                st.warning(f"⚠️ Voor {', '.join(map(str, _uncovered))} is er geen jaartabel: die "
+                           f"jaren vallen terug op de standaardtarieven. Het vroegst ingestelde jaar "
+                           f"is {min(_cfg)}. Stel het oudste jaar in dat je nodig hebt — alle latere "
+                           "jaren erven dat automatisch.")
+            else:
+                st.success(f"✅ Alle jaren met transacties of dividenden ({_years_needed[0]}–"
+                           f"{_years_needed[-1]}) zijn gedekt. Ingestelde jaren: "
+                           f"{', '.join(map(str, _cfg))}.")
+        else:
+            st.info("Nog geen jaartabel ingesteld — alles gebruikt voorlopig de standaardtarieven. "
+                    "Sla hieronder een jaar op om de historiek vast te leggen.")
+
+        _yopts = sorted(set(_years_needed) | set(_cfg) | {datetime.now().year + 1})
+        wy = st.selectbox("Jaar", _yopts, index=_yopts.index(datetime.now().year),
+                          key="wht_year",
+                          format_func=lambda y: (f"{y} · eigen tarieven ingesteld" if y in _cfg
+                                                 else f"{y} · erft van "
+                                                      f"{max([c for c in _cfg if c <= y], default='de standaard')}"))
+        rates_now = tax_mod.get_wht_rates(wy)
         wrows = [{"Land": c, "Naam": tax_mod.COUNTRY_NAMES.get(c, c), "Tarief (%)": rates_now[c]}
                  for c in sorted(rates_now.keys())]
         wcg = st.column_config
         wedit = st.data_editor(
-            pd.DataFrame(wrows), width="stretch", hide_index=True, key="wht_editor",
+            pd.DataFrame(wrows), width="stretch", hide_index=True, key=f"wht_editor_{wy}",
             num_rows="dynamic",
             column_config={
                 "Land":       wcg.TextColumn(help="Landcode (2 letters, bv. US)", max_chars=2),
                 "Naam":       wcg.TextColumn(disabled=True),
                 "Tarief (%)": wcg.NumberColumn(min_value=0.0, max_value=100.0, format="%.3f"),
             })
-        if st.button("💾 Tarieven opslaan", key="save_wht"):
+        wb1, wb2, _ = st.columns([2, 2, 3])
+        if wb1.button(f"💾 Tarieven {wy} opslaan", key="save_wht", type="primary"):
             try:
                 new_rates = {}
                 for _, r in wedit.iterrows():
                     code = str(r["Land"] or "").strip().upper()
                     if len(code) == 2 and code.isalpha() and not pd.isna(r["Tarief (%)"]):
                         new_rates[code] = float(r["Tarief (%)"])
-                db.set_setting("foreign_wht_rates", json.dumps(new_rates))
-                st.success(f"✅ {len(new_rates)} tarieven opgeslagen!")
+                tax_mod.save_year_rates(wy, new_rates)
+                clear_cache()
+                st.success(f"✅ {len(new_rates)} tarieven opgeslagen voor **{wy}** (en voor alle "
+                           "latere jaren zonder eigen tabel). Bestaande dividenden worden hierdoor "
+                           "niet herberekend — gebruik daarvoor de knop op de 💰 Dividenden-pagina.")
             except Exception as exc:
                 st.error(f"Kon de tarieven niet opslaan: {exc}")
+        if wy in _cfg and wb2.button(f"🗑️ Jaartabel {wy} wissen", key="del_wht_year"):
+            tax_mod.delete_year_rates(wy)
+            clear_cache()
+            st.success(f"Jaartabel {wy} gewist — dat jaar erft nu weer van het vorige jaar.")
+            st.rerun()
+        with st.expander("📅 Overzicht van de ingestelde jaren"):
+            if not _cfg:
+                st.caption("Nog geen enkel jaar ingesteld.")
+            else:
+                _codes = sorted({c for y in _cfg for c in tax_mod._year_rate_table()[y]})
+                _ov = [{"Land": c, "Naam": tax_mod.COUNTRY_NAMES.get(c, c),
+                        **{str(y): tax_mod.get_wht_rates(y).get(c) for y in _cfg}}
+                       for c in _codes]
+                st.dataframe(pd.DataFrame(_ov), width="stretch", hide_index=True)
+                st.caption("Elk jaar toont het tarief dat er effectief geldt (dus inclusief wat het "
+                           "van een vorig jaar erft).")
 
     if _ssec == "🗃️ Data":
         st.subheader("Databeheer")

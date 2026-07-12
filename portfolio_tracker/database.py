@@ -294,6 +294,13 @@ def _migrate(conn):
     # nergens publiek genoteerd zijn (bv. een niet-beursgenoteerde warrant) is elke
     # onlinepoging bij voorbaat zinloos; deze vlag voorkomt 5 mislukte netwerkcalls en
     # even zoveel logregels bij élke koersverversing.
+    # Handmatig gecorrigeerd: deze dividendlijn is door jou aangepast in de tabel.
+    # De knop 'keten herberekenen' laat zulke lijnen standaard met rust — anders zou
+    # een herberekening je eigen correcties (bv. een afwijkend verdragstarief of een
+    # bedrag exact zoals de broker het afrekende) stilzwijgend overschrijven.
+    if not _column_exists(cur, "dividends", "manual_override"):
+        cur.execute("ALTER TABLE dividends ADD COLUMN manual_override INTEGER DEFAULT 0")
+
     if not _column_exists(cur, "assets", "manual_only"):
         cur.execute("ALTER TABLE assets ADD COLUMN manual_only INTEGER DEFAULT 0")
 
@@ -1159,6 +1166,7 @@ _DIV_EDITABLE = {
     "gross_before_wht", "gross_before_wht_cur", "foreign_wht_amt", "foreign_wht_cur",
     "gross_after_wht", "gross_after_wht_cur", "belgian_rv_amt",
     "net_received", "net_received_cur", "cash_basis", "cash_eur", "kind",
+    "manual_override",
 }
 
 

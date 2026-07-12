@@ -2,6 +2,41 @@
 
 Alle noemenswaardige wijzigingen aan de Portfolio Tracker add-on.
 
+## 0.33.0
+Handmatige dividendcorrecties worden niet meer overschreven, en de buitenlandse
+bronbelasting werkt voortaan per jaar.
+- Herberekenen overschrijft je handmatige correcties niet langer. De knop "keten
+herberekenen" bouwde elke lijn blind opnieuw op vanaf het brutobedrag - ook lijnen waarin jij
+net een bedrag had gecorrigeerd (bv. omdat je broker een afwijkend verdragstarief toepaste).
+Vanaf nu:
+  - Dividendlijnen krijgen een vlag "handmatig gecorrigeerd" (nieuwe kolom 🔒 Handmatig in de
+tabel). Die wordt automatisch gezet zodra je zelf een bedrag (①-④) aanpast; je kunt ze ook
+zelf aan- of afvinken.
+  - De herberekening SLAAT die lijnen standaard over.
+  - Je krijgt eerst een VOORBEELD te zien: welke lijnen zouden wijzigen, van welke waarde naar
+welke, met het tarief en het jaar dat wordt toegepast, en de totale impact op je netto in
+euro. Pas na een expliciet vinkje + klik wordt er iets weggeschreven.
+  - Wil je toch alles herbouwen (bv. na een tariefcorrectie), dan kies je "ook handmatig
+gecorrigeerde lijnen overschrijven" - met een aangepaste bevestigingstekst, zodat de impact
+duidelijk is vóór je klikt.
+- Buitenlandse bronbelasting per jaar. Bronbelastingtarieven wijzigen over de jaren
+(verdragen, nationale hervormingen), en een dividend hoort belast te worden tegen het tarief
+dat gold OP DAT MOMENT - niet tegen het tarief van vandaag. De tarieven zijn nu per jaar
+instelbaar (⚙️ Instellingen → Belasting), met doorschuiving: stel je 2024 in, dan geldt dat
+ook voor 2025, 2026, ... tot je voor een van die jaren iets anders instelt. Je registreert dus
+enkel de WIJZIGINGEN, niet elk jaar opnieuw dezelfde tabel.
+  - Elk dividend gebruikt automatisch het tarief van zijn eigen jaar: bij het invoeren, bij het
+inline bewerken, bij de bulk-import én bij het herberekenen van de keten.
+  - Dekkingscontrole: de instellingenpagina toont welke jaren met transacties of dividenden nog
+geen jaartabel hebben (die vallen terug op de standaardtarieven) en welke er wél zijn.
+  - Een overzichtstabel toont per land wat er in elk ingesteld jaar effectief geldt, inclusief
+wat een jaar van een vorig jaar erft.
+  - Een jaartabel wissen kan; dat jaar erft dan weer van het jaar ervoor.
+  - Wat je vóór deze versie had ingesteld (de jaarloze tarieventabel) blijft gewoon werken als
+basislaag - er gaat niets verloren.
+Let op: nieuwe tarieven opslaan herberekent bestaande dividenden NIET automatisch. Dat is
+bewust - je beslist zelf, met het voorbeeld erbij, via de knop op de 💰 Dividenden-pagina.
+
 ## 0.32.0
 Twee designaanpassingen, en de echte oorzaak van de warrant-fout gevonden.
 - Euronext gebruikte een fout endpoint (de 404 in je log). De detailed-quote-call ging naar
