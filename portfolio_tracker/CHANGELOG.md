@@ -2,8 +2,47 @@
 
 Alle noemenswaardige wijzigingen aan de Portfolio Tracker add-on.
 
+## 0.30.0
+Nieuwe koersbron + fors snellere app.
+- Euronext Live als vijfde koersbron (lost NL0015002RI2 op). De ING Markets-warrant
+noteert enkel op Euronext Amsterdam en is onbekend bij alle vier de Duitse platformen
+(onvista, Tradegate, Lang & Schwarz, Boerse Frankfurt) en bij Yahoo. Euronext Live heeft
+sleutelloze JSON-endpoints (dezelfde die live.euronext.com zelf gebruikt): een
+zoek-endpoint dat de handelsplaats (MIC) per ISIN oplevert (terugval: land-MIC, bv.
+NL -> XAMS, BE -> XBRU), chartdata (eerst intraday, dan de volledige daghistoriek voor
+illiquide producten zonder trade vandaag) en als laatste redmiddel het
+detailed-quote-fragment (bied/laat-/referentiekoers). De bron staat direct na onvista in
+de keten: snel, en ze dekt precies het gat van de Duitse platformen - producten die
+enkel op Euronext noteren, dus ook illiquide fondsen op Euronext Brussel. Test na de
+update via Activa -> ISIN-check of wacht een koersrondje van de scheduler af; de log
+toont dan geen "Geen koers gevonden voor: NL0015002RI2" meer. Endpoints zijn onofficieel
+(kunnen ooit wijzigen) en volledig defensief afgehandeld: elk afwijkend antwoord wordt
+gelogd en de volgende bron neemt het gewoon over.
+- App laadt vrijwel meteen: koersen komen nu uit de database i.p.v. live tijdens het
+renderen. De scheduler schrijft elke 5 minuten al verse koersen naar price_history
+(apart proces), maar de app haalde bij elk verstrijken van de cache ALLES opnieuw live
+en een voor een op - bij elke ticker eerst Yahoo (traag info-object) en voor effecten
+zonder Yahoo-notering ook nog de volledige bronnenketen met timeouts. Dat blokkeerde de
+volledige paginarender, soms tientallen seconden. get_overview leest nu eerst de
+recentste opgeslagen koers (nieuwe gebatchte query get_latest_prices: 1 query i.p.v. 1
+per ticker) en accepteert die tot 20 minuten oud; enkel ontbrekende/verouderde tickers
+worden nog live opgehaald. In de praktijk: geen enkele netwerkcall meer tijdens het
+laden zolang de scheduler draait.
+- Live ophalen is voortaan parallel. Als er toch live gehaald moet worden (scheduler,
+ontbrekende koersen, of via de knop "Ververs prijzen") gebeurt dat nu met maximaal 8
+gelijktijdige workers i.p.v. serieel: de totale duur wordt ongeveer die van het traagste
+effect i.p.v. de som van allemaal. Boerse-Frankfurt-calls zijn daarbij geserialiseerd
+met een lock (gedeelde sessie + salt-status zijn niet thread-safe); de 403-retry roept
+intern de locked-variant aan om een deadlock te vermijden.
+- "Ververs prijzen" forceert nu echt een live rondje. De knop leegde enkel de
+Streamlit-cache; met de nieuwe DB-first-logica zou hij anders gewoon de opgeslagen
+scheduler-koersen herlezen. Hij zet nu eenmalig live=True (met spinner) en leegt ook de
+in-memory koerscache van market_data.
+- init_db draait nog maar een keer per proces. Streamlit voert app.py bij elke
+interactie volledig opnieuw uit; alle CREATE TABLE's en migratiechecks (PRAGMA
+table_info per tabel) liepen dus bij elke klik mee. Nu via cache_resource eenmalig.
+
 ## 0.29.2
-0.29.2
 - Analyse van de aangeleverde log: het antwoord op "welke ticker faalt consequent" is zo goed als
 zeker NL0015002RI2 (de ING-warrant). Ze faalt op alle vier externe bronnen (onvista, Börse
 Frankfurt, Tradegate, Lang & Schwarz) én kan niet terugvallen op 'ticker rechtstreeks op Yahoo',

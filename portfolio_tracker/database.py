@@ -1170,6 +1170,26 @@ def get_latest_price(ticker: str) -> dict | None:
     return dict(row) if row else None
 
 
+def get_latest_prices(tickers: list[str]) -> dict[str, dict]:
+    """Recentste opgeslagen koers voor meerdere tickers in EEN query
+    (i.p.v. get_latest_price per ticker). Sleutels zijn UPPERCASE tickers;
+    waarden dicts met price, currency en timestamp. Tickers zonder opgeslagen
+    koers ontbreken in het resultaat."""
+    if not tickers:
+        return {}
+    keys = [t.upper() for t in tickers]
+    placeholders = ",".join("?" * len(keys))
+    conn = get_connection()
+    rows = conn.execute(
+        f"""SELECT ticker, price, currency, MAX(timestamp) AS timestamp
+            FROM price_history WHERE ticker IN ({placeholders})
+            GROUP BY ticker""",
+        keys,
+    ).fetchall()
+    conn.close()
+    return {r["ticker"]: dict(r) for r in rows}
+
+
 def get_price_history(ticker: str, days: int = 30) -> list[dict]:
     conn = get_connection()
     rows = conn.execute(

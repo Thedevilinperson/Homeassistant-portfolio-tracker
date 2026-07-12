@@ -56,7 +56,17 @@ div[data-testid="stDataFrame"] { border-radius: 8px; }
 """, unsafe_allow_html=True)
 
 # ── Database initialiseren ────────────────────────────────────────────────────
-db.init_db()
+# Streamlit voert dit script bij ELKE interactie opnieuw uit; init_db (alle
+# CREATE TABLE's + migratiechecks met PRAGMA table_info per tabel) hoeft maar
+# een keer per proces te draaien. cache_resource onthoudt dat over reruns en
+# sessies heen zolang het proces leeft.
+@st.cache_resource(show_spinner=False)
+def _init_db_once() -> bool:
+    db.init_db()
+    return True
+
+
+_init_db_once()
 
 # ── Hulpfuncties ──────────────────────────────────────────────────────────────
 
@@ -106,12 +116,19 @@ def delta_color(val: float | None) -> str:
 
 
 @st.cache_data(ttl=60, show_spinner=False)
-def get_overview(year: int, account=None) -> dict:
+def get_overview(year: int, account=None, live: bool = False) -> dict:
     """Gecachte portfolioverzicht (60 s TTL). account=None -> alle rekeningen;
-    mag ook een tuple van rekeningnamen zijn (multiselect)."""
+    mag ook een tuple van rekeningnamen zijn (multiselect).
+
+    Koersen komen standaard uit price_history (die de scheduler elke 5 minuten
+    in de achtergrond bijwerkt): geen netwerkcalls tijdens het renderen, dus de
+    pagina laadt vrijwel meteen. Enkel voor tickers zonder opgeslagen koers van
+    de laatste 20 minuten wordt nog live (parallel) opgehaald. live=True (via de
+    knop 'Ververs prijzen') forceert wel een volledig live rondje."""
     assets = db.get_assets()
     tickers = [a["ticker"] for a in assets]
-    prices = md.get_prices_for_tickers(tickers)
+    prices = md.get_prices_for_tickers(tickers,
+                                       max_stale_minutes=None if live else 20)
     overview = tax_mod.calculate_tax_overview(year=year, current_prices=prices,
                                               account=account)
     return overview, assets, prices
@@ -823,12 +840,20 @@ def page_portfolio():
     if col_btn.button("🔄 Ververs prijzen"):
         clear_cache()
         md._CACHE.clear()
+        # Eenmalig live ophalen forceren: get_overview leest anders gewoon de
+        # opgeslagen scheduler-koersen terug (DB-first sinds 0.30.0).
+        st.session_state["force_live_prices"] = True
         st.rerun()
     with col_acct:
         acct = account_filter_widget("port_acct")
 
     year = datetime.now().year
-    overview, assets, prices = get_overview(year, acct)
+    live = bool(st.session_state.pop("force_live_prices", False))
+    if live:
+        with st.spinner("Actuele koersen live ophalen..."):
+            overview, assets, prices = get_overview(year, acct, live=True)
+    else:
+        overview, assets, prices = get_overview(year, acct)
     pv = overview["position_values"]
 
     if not pv:

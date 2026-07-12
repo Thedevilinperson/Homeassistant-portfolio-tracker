@@ -426,13 +426,27 @@ def _bf_headers(url: str) -> dict:
     }
 
 
+import threading
+_BF_LOCK = threading.Lock()  # gedeelde BF-sessie + salt-/blok-status zijn niet
+                             # thread-safe; koersen worden sinds 0.30.0 parallel
+                             # opgehaald, dus BF-calls verlopen een voor een
+
+
 def _bf_request(function: str, params: dict, _retry: bool = True):
     """GET naar https://api.boerse-frankfurt.de/v1/data/<function>?<params> via de
     gedeelde sessie met de vereiste headers. Bij een 403 wordt eenmalig de salt vers
     opgehaald en opnieuw geprobeerd (de salt roteert af en toe). Blijft het 403, dan
     pauzeert de provider met exponentiële backoff (30s, 60s, 120s, ... max 10 min)
     zodat een tijdelijke weigering de interactieve app niet lang blokkeert; een
-    geslaagde call reset de backoff. Logt status én een stukje van het antwoord."""
+    geslaagde call reset de backoff. Logt status én een stukje van het antwoord.
+    Deze functie is geserialiseerd met een lock (zie _BF_LOCK)."""
+    import time
+    import urllib.parse
+    with _BF_LOCK:
+        return _bf_request_locked(function, params, _retry)
+
+
+def _bf_request_locked(function: str, params: dict, _retry: bool = True):
     import time
     import urllib.parse
     if time.time() < _BF_BLOCK["until"]:
@@ -446,7 +460,7 @@ def _bf_request(function: str, params: dict, _retry: bool = True):
             logger.info(f"_bf_request({function}): 403 — salt/cookies verversen en opnieuw proberen")
             _BF_BLOCK["last_force"] = time.time()
             _bf_salt(force=True)
-            return _bf_request(function, params, _retry=False)
+            return _bf_request_locked(function, params, _retry=False)
         if resp.status_code == 403:
             _BF_BLOCK["fails"] = min(_BF_BLOCK["fails"] + 1, 6)
             pause = min(600, 30 * (2 ** (_BF_BLOCK["fails"] - 1)))  # 30,60,120,240,480,600
@@ -733,6 +747,143 @@ def _onvista_close_on_date(isin: str, on_date: str) -> float | None:
     return None
 
 
+# ── Euronext Live ────────────────────────────────────────────────────────────
+# live.euronext.com heeft sleutelloze JSON-endpoints (dezelfde die de site zelf
+# gebruikt, en die ook door meerdere open-sourceprojecten worden aangesproken).
+# Dit is DE bron voor effecten die enkel op Euronext noteren en die de Duitse
+# platformen (onvista/Tradegate/L&S/Boerse Frankfurt) niet kennen - zoals de
+# ING Markets-warrants (bv. NL0015002RI2) op Euronext Amsterdam, maar evengoed
+# illiquide fondsen op Euronext Brussel.
+
+_EURONEXT_MIC_CACHE: dict[str, str] = {}   # isin -> gevonden MIC (bv. XAMS)
+
+# Terugval-MIC per ISIN-landcode als de zoekopdracht geen MIC oplevert.
+_EURONEXT_COUNTRY_MIC = {"NL": "XAMS", "BE": "XBRU", "FR": "XPAR",
+                         "PT": "XLIS", "IE": "XMSM", "NO": "XOSL"}
+
+
+def _euronext_headers() -> dict:
+    return {"User-Agent": _BF_BROWSER_HEADERS["User-Agent"],
+            "Accept": "application/json, text/plain, */*",
+            "X-Requested-With": "XMLHttpRequest",
+            "Referer": "https://live.euronext.com/"}
+
+
+def _euronext_mic_for_isin(isin: str) -> str | None:
+    """Zoek via het zoek-endpoint van Euronext Live de handelsplaats (MIC) voor
+    een ISIN. Gecachet per proces. Geeft None als het instrument onbekend is en
+    er ook geen land-terugval bestaat."""
+    if isin in _EURONEXT_MIC_CACHE:
+        return _EURONEXT_MIC_CACHE[isin] or None
+    import requests
+    mic = None
+    try:
+        resp = requests.get("https://live.euronext.com/en/instrumentSearch/searchJSON",
+                            params={"q": isin}, headers=_euronext_headers(), timeout=8)
+        if resp.ok:
+            try:
+                items = resp.json()
+            except ValueError:
+                items = []
+            if isinstance(items, dict):
+                items = items.get("results") or items.get("data") or []
+            for it in items or []:
+                if not isinstance(it, dict):
+                    continue
+                it_isin = (it.get("isin") or it.get("ISIN") or "").upper()
+                it_mic = (it.get("mic") or it.get("MIC") or it.get("micCode") or "").upper()
+                if it_isin == isin and it_mic:
+                    mic = it_mic
+                    break
+        else:
+            logger.info(f"_euronext_mic_for_isin({isin}): zoek-HTTP {resp.status_code}")
+    except Exception as e:
+        logger.warning(f"_euronext_mic_for_isin({isin}): {e}")
+    if not mic:
+        mic = _EURONEXT_COUNTRY_MIC.get(isin[:2])
+        if mic:
+            logger.info(f"_euronext_mic_for_isin({isin}): geen zoekresultaat, "
+                        f"terugval op land-MIC {mic}")
+    _EURONEXT_MIC_CACHE[isin] = mic or ""
+    return mic
+
+
+def _euronext_chart_last(isin: str, mic: str, period: str) -> float | None:
+    """Recentste koerspunt uit de chartdata van Euronext Live ('intraday' voor
+    vandaag, 'max' voor de volledige daghistoriek). Geeft None bij lege data."""
+    import requests
+    try:
+        resp = requests.get(f"https://live.euronext.com/intraday_chart/getChartData/"
+                            f"{isin}-{mic}/{period}",
+                            headers=_euronext_headers(), timeout=8)
+        if not resp.ok:
+            logger.info(f"_euronext_chart_last({isin},{mic},{period}): HTTP {resp.status_code}")
+            return None
+        try:
+            pts = resp.json()
+        except ValueError:
+            logger.info(f"_euronext_chart_last({isin},{mic},{period}): geen JSON")
+            return None
+        if isinstance(pts, dict):
+            pts = pts.get("data") or []
+        if isinstance(pts, list) and pts:
+            last = pts[-1]
+            if isinstance(last, dict):
+                return _to_float(last.get("price") or last.get("close") or last.get("last"))
+            if isinstance(last, (list, tuple)) and len(last) > 1:
+                return _to_float(last[1])
+    except Exception as e:
+        logger.warning(f"_euronext_chart_last({isin},{mic},{period}): {e}")
+    return None
+
+
+def _euronext_detailed_quote(isin: str, mic: str) -> tuple[float | None, str | None]:
+    """Laatste redmiddel binnen Euronext: het getDetailedQuoteAjax-endpoint geeft
+    een HTML-fragment terug met de laatste koers en de munt; die worden er met een
+    tolerante regex uitgehaald (illiquide producten zonder chartpunten hebben hier
+    vaak wel een bied/laat- of referentiekoers)."""
+    import re
+    import requests
+    try:
+        resp = requests.post(f"https://live.euronext.com/en/ajax/getDetailedQuoteAjax/"
+                             f"{isin}-{mic}/full",
+                             data={"theme_name": "euronext_live"},
+                             headers=_euronext_headers(), timeout=8)
+        if not resp.ok or not resp.text:
+            logger.info(f"_euronext_detailed_quote({isin},{mic}): HTTP {resp.status_code}")
+            return None, None
+        html = resp.text
+        m = re.search(r'id="header-instrument-price"[^>]*>\s*([\d.,\u202f\s]+)<', html)
+        price = _to_float(m.group(1)) if m else None
+        mc = re.search(r'header-instrument-currency[^>]*>\s*([A-Z]{3})', html)
+        cur = mc.group(1) if mc else "EUR"
+        if price:
+            return price, cur
+        logger.info(f"_euronext_detailed_quote({isin},{mic}): geen koers in HTML-fragment")
+    except Exception as e:
+        logger.warning(f"_euronext_detailed_quote({isin},{mic}): {e}")
+    return None, None
+
+
+def _price_euronext(isin: str) -> tuple[float | None, str | None]:
+    """(prijs, munt) via Euronext Live. Werkwijze: MIC opzoeken via het
+    zoek-endpoint (terugval: land-MIC, bv. NL -> XAMS), daarna het recentste
+    chartpunt (eerst intraday, dan volledige historiek voor illiquide producten
+    zonder trade vandaag), en als laatste het detailed-quote-HTML-fragment.
+    Euronext noteert vrijwel alles in EUR; de detailed quote geeft de munt mee."""
+    if not _isin_valid(isin):
+        return None, None
+    mic = _euronext_mic_for_isin(isin)
+    if not mic:
+        logger.info(f"_price_euronext({isin}): geen MIC gevonden")
+        return None, None
+    for period in ("intraday", "max"):
+        price = _euronext_chart_last(isin, mic, period)
+        if price:
+            return price, "EUR"
+    return _euronext_detailed_quote(isin, mic)
+
+
 # Externe ISIN-bronnen, in volgorde geprobeerd na Yahoo. Uitbreidbaar met extra
 # bronnen door een functie (isin)->(prijs,munt) toe te voegen aan deze lijst.
 # onvista eerst: open API zonder salt/TLS-verdediging die ook derivaten dekt.
@@ -741,7 +892,11 @@ def _onvista_close_on_date(isin: str, on_date: str) -> float | None:
 # salt-/cookie-/retry-afhandeling merkbaar meer tijd dan de andere drie bronnen.
 # Zo kosten activa die toch al bij geen enkele bron gevonden worden (bv. heel
 # illiquide warrants) niet nodeloos de traagste, minst betrouwbare poging eerst.
-_ISIN_PROVIDERS = [_price_onvista, _price_tradegate, _price_lang_schwarz, _price_boerse_frankfurt]
+# Euronext staat direct na onvista: snel (2 kleine calls), sleutelloos, en het
+# dekt precies het gat van de Duitse platformen - producten die enkel op
+# Euronext noteren (ING Markets-warrants, illiquide Brusselse fondsen, ...).
+_ISIN_PROVIDERS = [_price_onvista, _price_euronext, _price_tradegate,
+                   _price_lang_schwarz, _price_boerse_frankfurt]
 
 
 def probe_isin_meta(isin: str) -> dict:
@@ -800,7 +955,8 @@ def probe_isin(isin: str) -> tuple[float | None, str | None, str | None]:
         if p is not None:
             return p, c, f"Yahoo ({sym})"
     names = {"_price_tradegate": "Tradegate", "_price_boerse_frankfurt": "Börse Frankfurt",
-             "_price_lang_schwarz": "Lang & Schwarz", "_price_onvista": "onvista"}
+             "_price_lang_schwarz": "Lang & Schwarz", "_price_onvista": "onvista",
+             "_price_euronext": "Euronext"}
     for provider in _ISIN_PROVIDERS:
         p, c = provider(isin)
         if p is not None:
@@ -930,11 +1086,56 @@ def get_current_price(ticker: str) -> tuple[float | None, str | None]:
     return None, None
 
 
-def get_prices_for_tickers(tickers: list[str]) -> dict[str, dict]:
-    result = {}
-    for ticker in tickers:
-        price, currency = get_current_price(ticker)
-        result[ticker] = {"price": price, "currency": currency}
+def get_prices_for_tickers(tickers: list[str], max_stale_minutes: int | None = None) -> dict[str, dict]:
+    """Koersen voor een lijst tickers.
+
+    max_stale_minutes=None (standaard, gedrag van de scheduler): alles live
+    ophalen, maar nu PARALLEL i.p.v. een voor een - de totale duur wordt zo
+    ongeveer die van het traagste effect i.p.v. de som van allemaal.
+
+    max_stale_minutes=<n> (gebruikt door de app): lees eerst de recentste
+    opgeslagen koers uit price_history (die de scheduler elke 5 minuten al
+    bijwerkt in een apart proces). Is die jonger dan n minuten, dan is er GEEN
+    enkele netwerkcall nodig en laadt de pagina vrijwel meteen. Enkel tickers
+    zonder (verse) opgeslagen koers worden nog live (parallel) opgehaald."""
+    result: dict[str, dict] = {}
+    remaining = list(tickers)
+
+    if max_stale_minutes is not None and remaining:
+        try:
+            import database as _db
+            from datetime import datetime as _dt
+            stored = _db.get_latest_prices(remaining)
+            now = _dt.now()
+            fresh_remaining = []
+            for t in remaining:
+                row = stored.get(t.upper())
+                age_ok = False
+                if row:
+                    try:
+                        ts = _dt.strptime(row["timestamp"][:19], "%Y-%m-%d %H:%M:%S")
+                        age_ok = (now - ts).total_seconds() < max_stale_minutes * 60
+                    except (ValueError, TypeError):
+                        age_ok = False
+                if row and age_ok:
+                    cur = row.get("currency") or "EUR"
+                    result[t] = {"price": row["price"], "currency": cur}
+                    # Ook in de in-memory cache: losse get_current_price-aanroepen
+                    # elders in de app (detailweergaves e.d.) zijn dan even snel.
+                    _store(t, float(row["price"]), cur)
+                else:
+                    fresh_remaining.append(t)
+            remaining = fresh_remaining
+        except Exception as e:
+            logger.warning(f"get_prices_for_tickers: opgeslagen koersen lezen faalde ({e}) "
+                           "- terugval op live ophalen")
+
+    if remaining:
+        from concurrent.futures import ThreadPoolExecutor
+        workers = min(8, len(remaining))
+        with ThreadPoolExecutor(max_workers=workers) as ex:
+            for ticker, (price, currency) in zip(remaining, ex.map(get_current_price, remaining)):
+                result[ticker] = {"price": price, "currency": currency}
     return result
 
 
