@@ -2,6 +2,44 @@
 
 Alle noemenswaardige wijzigingen aan de Portfolio Tracker add-on.
 
+## 0.33.2
+Euronext: instrument gevonden, koers nu ook. Plus strengere validatie en een label-diagnose in
+de log.
+
+**Wat je log leerde.** Het endpoint klopt nu: Euronext antwoordt met HTTP 200 op
+NL0015002RI2-XAMS, dus Euronext Amsterdam KENT de warrant wel degelijk. Er bleef één probleem:
+"bestaat (HTTP 200) maar geeft geen koers terug". Oorzaak: de koers werd uit het HTML-fragment
+gehaald met positionele regexes per label ("Last traded price</td><td>..."). Euronext varieert
+de opmaak van de labelcel (soms <td>, soms <th>, soms met <strong> errond), en dan matcht zo'n
+regex niet - stilzwijgend, zonder fout.
+
+**Generieke tabelparser.** Het fragment is een tabel (label | waarde | tijdstip) en wordt nu als
+tabel geparsed naar een label->waarde-map, ongeacht de opmaak. Daarna wordt gezocht op label,
+in volgorde van bruikbaarheid: laatste koers -> waarderingskoers -> vorige slotkoers ->
+bied/laat. Voor een illiquide warrant zonder trade vandaag levert dat dus alsnog een koers op.
+
+**Getalnotatie.** De Engelse Euronext-pagina schrijft 1,234.56 (komma = duizendtal), maar cellen
+kunnen ook 12,34 bevatten. De vorige parser maakte van "1,234.56" onherroepelijk None. Nu:
+staan er zowel een komma als een punt in, dan is de laatste het decimaalteken; staat er enkel
+een komma met exact drie cijfers erna, dan is het een duizendtalscheiding.
+
+**HTTP 200 is geen bewijs meer.** Bij het aftasten van de handelsplaatsen telde elke 200 als
+"gevonden", maar Euronext geeft ook 200 terug op een leeg fragment - waardoor de eerste
+kandidaat (XAMS voor NL) altijd "won", ook voor een onbekend instrument. Nu telt enkel een echt
+geparste tabel (minstens 3 velden) als bewijs.
+
+**Label-diagnose.** Vindt Euronext het instrument maar zit er geen koers in de tabel, dan logt de
+app voortaan WELKE velden Euronext teruggaf. Zo is meteen zichtbaar of een koersveld anders
+heet (dan voegen we het label toe) of dat alle koersvelden gewoon leeg staan (dan is er echt
+geen notering). Dezelfde velden verschijnen ook in de Bronnen-diagnose in de app.
+
+Overige meldingen in je log zijn verwacht gedrag, geen fouten: onvista/Tradegate/Lang & Schwarz
+kennen dit product niet (het noteert enkel op Euronext Amsterdam), en Borse Frankfurt blijft
+403 geven door zijn bot-detectie - die bron staat daarom laatst in de keten en wordt na een 403
+tijdelijk gepauzeerd.
+
+Herbouwen (niet enkel herstarten) via de knop "Herbouwen" in Home Assistant.
+
 ## 0.33.1
 Bugfix: het dagelijkse portefeuilleadvies (luik 1) faalde met "Unterminated string starting
 at ...".

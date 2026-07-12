@@ -815,45 +815,122 @@ def _euronext_search_mic(isin: str) -> str | None:
     return None
 
 
+def _euronext_num(txt: str) -> float | None:
+    """Getal uit een cel van Euronext Live. We vragen de ENGELSE pagina op, dus daar geldt
+    '1,234.56' (komma = duizendtal). Maar de cel kan ook '12,34' bevatten als Euronext
+    lokaliseert. Regel: staan er zowel een komma als een punt in, dan is de LAATSTE het
+    decimaalteken. Staat er enkel een komma en volgen er exact drie cijfers na, dan is het
+    een duizendtalscheiding (1,234); anders is het het decimaalteken (12,34)."""
+    import re
+    if not txt:
+        return None
+    t = re.sub(r"[^0-9,.\-]", "", txt.replace("\u202f", "").replace("\u00a0", ""))
+    if not re.search(r"\d", t):
+        return None
+    if "," in t and "." in t:
+        dec = "," if t.rindex(",") > t.rindex(".") else "."
+        t = t.replace("." if dec == "," else ",", "").replace(dec, ".")
+    elif "," in t:
+        frac = t.split(",")[-1]
+        t = t.replace(",", "" if (len(frac) == 3 and t.count(",") >= 1) else ".")
+    try:
+        return float(t)
+    except ValueError:
+        return None
+
+
+def _euronext_table(html: str) -> dict[str, str]:
+    """Het detailed-quote-fragment van Euronext is een HTML-TABEL (label | waarde | tijdstip).
+    We parsen ze generiek naar {label_in_kleine_letters: waarde} in plaats van met vaste
+    regexes per label: de opmaak van de labelcel varieert (soms <td>, soms <th>, soms met
+    <strong> errond), en dat deed de vorige, positionele regex stilzwijgend falen — de reden
+    dat 'bestaat (HTTP 200) maar geeft geen koers terug' in je log verscheen."""
+    import html as _html
+    import re
+    out: dict[str, str] = {}
+
+    def _clean(cell: str) -> str:
+        txt = re.sub(r"<[^>]+>", " ", cell)
+        return re.sub(r"\s+", " ", _html.unescape(txt)).strip()
+
+    for row in re.findall(r"<tr[^>]*>(.*?)</tr>", html or "", re.S | re.I):
+        cells = re.findall(r"<t[dh][^>]*>(.*?)</t[dh]>", row, re.S | re.I)
+        if len(cells) < 2:
+            continue
+        key, val = _clean(cells[0]).lower(), _clean(cells[1])
+        if key and key not in out:
+            out[key] = val
+    return out
+
+
+# Labels waarin een bruikbare koers kan staan, in volgorde van voorkeur. Voor een illiquide
+# product (warrant zonder trade vandaag) is de laatste koers vaak leeg en moeten we terugvallen
+# op de waarderings-/slotkoers of op bied/laat.
+_EURONEXT_PRICE_LABELS = [
+    "last traded price", "last price", "laatste koers", "dernier cours",
+    "valuation price", "valuation close", "closing price", "previous close",
+    "vorige slotkoers", "clôture précédente", "bid", "ask", "bied", "laat",
+]
+
+
+def _euronext_price_from_table(tbl: dict[str, str]) -> tuple[float | None, str | None, str | None]:
+    """(prijs, munt, gebruikt_label) uit de geparste tabel. Zoekt eerst op exact label,
+    daarna op deellabel (Euronext varieert: 'Last traded price' vs 'Last traded price *')."""
+    cur = None
+    for k in ("currency", "valuta", "devise"):
+        if tbl.get(k):
+            import re
+            m = re.search(r"[A-Z]{3}", tbl[k])
+            if m:
+                cur = m.group(0)
+                break
+    for lbl in _EURONEXT_PRICE_LABELS:
+        raw = tbl.get(lbl)
+        if raw is None:
+            match = next((v for k, v in tbl.items() if lbl in k), None)
+            raw = match
+        if raw is None:
+            continue
+        price = _euronext_num(raw)
+        if price:
+            if not cur:
+                if "€" in raw or "EUR" in raw.upper():
+                    cur = "EUR"
+                elif "$" in raw:
+                    cur = "USD"
+            return price, cur or "EUR", lbl
+    return None, cur, None
+
+
 def _euronext_quote(isin: str, mic: str) -> tuple[float | None, str | None, int]:
     """(prijs, munt, http-status) via het detailed-quote-fragment van Euronext Live.
+    Endpoint: /en/intraday_chart/getDetailedQuoteAjax/<ISIN>-<MIC>/full (GET).
 
-    Het juiste endpoint is /en/intraday_chart/getDetailedQuoteAjax/<ISIN>-<MIC>/full
-    (GET). Het geeft een HTML-tabel terug met rijen als 'Last traded price',
-    'Previous close', 'Bid'/'Ask'. We nemen de eerste bruikbare in die volgorde, zodat
-    ook een illiquide product zonder trade vandaag een waarde oplevert.
+    Een onbekend instrument geeft 404 OF een 200 zonder tabel; daarom telt hier enkel een
+    ECHTE tabel als bewijs dat het instrument bestaat (zie _euronext_quote_table)."""
+    price, cur, status, _tbl = _euronext_quote_table(isin, mic)
+    return price, cur, status
 
-    Belangrijk: een onbekend instrument geeft hier 404 (of een pagina zonder tabel).
-    De status wordt teruggegeven zodat de aanroeper weet of het de MIC was die fout
-    zat, dan wel het instrument zelf onbekend is."""
-    import re
+
+def _euronext_quote_table(isin: str, mic: str):
+    """Zoals _euronext_quote, maar geeft ook de geparste tabel terug — nodig om (a) te weten
+    of het instrument echt bestaat en (b) te loggen WELKE labels Euronext teruggeeft wanneer
+    er geen koers uit te halen valt."""
     import requests
     url = ("https://live.euronext.com/en/intraday_chart/getDetailedQuoteAjax/"
            f"{isin}-{mic}/full")
     try:
         resp = requests.get(url, headers=_euronext_headers(), timeout=8)
         if not resp.ok:
-            return None, None, resp.status_code
-        html = resp.text or ""
-        # Munt staat meestal als los veld ('Currency ... EUR') in de tabel
-        cm = re.search(r"(?:Currency|Valuta)\s*</[^>]+>\s*<td[^>]*>\s*([A-Z]{3})", html)
-        currency = cm.group(1) if cm else "EUR"
-        labels = ["Last traded price", "Laatste koers", "Valuation price", "Previous close",
-                  "Vorige slotkoers", "Bid", "Ask", "Laat", "Bied"]
-        for lbl in labels:
-            m = re.search(rf"{re.escape(lbl)}\s*</[^>]+>\s*<td[^>]*>(.*?)</td>",
-                          html, re.S | re.I)
-            if not m:
-                continue
-            txt = re.sub(r"<[^>]+>", " ", m.group(1))
-            num = re.search(r"-?\d[\d\s.,\u202f]*", txt)
-            price = _to_float(num.group(0)) if num else None
-            if price:
-                return price, currency, resp.status_code
-        return None, currency, resp.status_code
+            return None, None, resp.status_code, {}
+        tbl = _euronext_table(resp.text or "")
+        price, cur, lbl = _euronext_price_from_table(tbl)
+        if price:
+            logger.info(f"_euronext_quote({isin},{mic}): koers {price} {cur} via label '{lbl}'")
+        return price, cur, resp.status_code, tbl
     except Exception as e:
         logger.warning(f"_euronext_quote({isin},{mic}): {e}")
-        return None, None, 0
+        return None, None, 0, {}
 
 
 def _euronext_chart_last(isin: str, mic: str, period: str) -> float | None:
@@ -897,17 +974,27 @@ def _euronext_resolve(isin: str) -> str | None:
         _EURONEXT_MIC_CACHE[isin] = mic
         logger.info(f"_euronext_resolve({isin}): handelsplaats {mic} (via de zoeker)")
         return mic
+    # Aftasten. HTTP 200 alleen is GEEN bewijs: Euronext geeft ook 200 op een leeg fragment.
+    # Enkel een echt geparste tabel (>= 3 rijen) telt als "dit instrument bestaat hier".
+    best = None
     for cand in _euronext_mic_candidates(isin):
-        price, _cur, status = _euronext_quote(isin, cand)
-        if status == 200:
+        price, _cur, status, tbl = _euronext_quote_table(isin, cand)
+        if status == 200 and len(tbl) >= 3:
             _EURONEXT_MIC_CACHE[isin] = cand
-            logger.info(f"_euronext_resolve({isin}): handelsplaats {cand} (afgetast, HTTP 200"
-                        + (f", koers {price}" if price else ", nog geen koers in het fragment")
+            logger.info(f"_euronext_resolve({isin}): handelsplaats {cand} (afgetast, "
+                        f"{len(tbl)} tabelrijen"
+                        + (f", koers {price}" if price else ", nog geen koers")
                         + ")")
             return cand
+        if status == 200 and best is None:
+            best = cand
     _EURONEXT_MIC_CACHE[isin] = ""
-    logger.info(f"_euronext_resolve({isin}): Euronext kent dit instrument niet "
-                f"(geen enkele van {', '.join(_euronext_mic_candidates(isin))} gaf HTTP 200)")
+    if best:
+        logger.info(f"_euronext_resolve({isin}): {best} gaf wel HTTP 200 maar een LEEG fragment "
+                    "(geen instrumenttabel) — Euronext kent dit instrument dus niet.")
+    else:
+        logger.info(f"_euronext_resolve({isin}): Euronext kent dit instrument niet "
+                    f"(geen van {', '.join(_euronext_mic_candidates(isin))} gaf een tabel)")
     return None
 
 
@@ -921,15 +1008,23 @@ def _price_euronext(isin: str) -> tuple[float | None, str | None]:
     mic = _euronext_resolve(isin)
     if not mic:
         return None, None
-    price, currency, status = _euronext_quote(isin, mic)
+    price, currency, status, tbl = _euronext_quote_table(isin, mic)
     if price:
         return price, currency or "EUR"
     for period in ("intraday", "max"):
         p = _euronext_chart_last(isin, mic, period)
         if p:
+            logger.info(f"_price_euronext({isin}): koers {p} via de chartdata ({period})")
             return p, currency or "EUR"
-    logger.info(f"_price_euronext({isin}): {isin}-{mic} bestaat (HTTP {status}) maar geeft "
-                "geen koers terug — geen recente notering?")
+    # Geen koers gevonden: log WELKE labels Euronext wél teruggaf. Zo is meteen zichtbaar of
+    # het label anders heet (dan kan het aan _EURONEXT_PRICE_LABELS worden toegevoegd) of dat
+    # alle koersvelden gewoon leeg staan (dan is er echt geen notering).
+    if tbl:
+        preview = "; ".join(f"{k}={v!r}" for k, v in list(tbl.items())[:14])
+        logger.info(f"_price_euronext({isin}): {isin}-{mic} bestaat (HTTP {status}) maar geen "
+                    f"koers uit de tabel. Labels van Euronext: {preview}")
+    else:
+        logger.info(f"_price_euronext({isin}): {isin}-{mic} gaf HTTP {status} zonder tabel.")
     return None, None
 
 
@@ -1040,11 +1135,15 @@ def diagnose_isin(isin: str) -> list[dict]:
     # 2) Euronext — met de handelsplaats erbij, want die is het kernprobleem bij warrants
     mic = _euronext_resolve(isin)
     if mic:
-        p, c, status = _euronext_quote(isin, mic)
+        p, c, status, tbl = _euronext_quote_table(isin, mic)
+        if p is None:
+            keys = ", ".join(list(tbl)[:10]) or "(geen tabel)"
+            detail = (f"Instrument gekend op {mic} (HTTP {status}, {len(tbl)} velden), maar geen "
+                      f"koersveld met een waarde. Velden: {keys}")
+        else:
+            detail = f"Instrument gekend op {mic} (HTTP {status}); koers gevonden."
         out.append({"bron": f"Euronext ({mic})", "ok": p is not None, "koers": p, "munt": c,
-                    "detail": (f"Instrument gekend op {mic} (HTTP {status}); "
-                               + ("koers gevonden." if p is not None
-                                  else "maar het quote-fragment bevat geen koers."))})
+                    "detail": detail})
     else:
         cands = ", ".join(_euronext_mic_candidates(isin))
         out.append({"bron": "Euronext", "ok": False, "koers": None, "munt": None,
