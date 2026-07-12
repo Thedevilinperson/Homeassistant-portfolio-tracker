@@ -2,6 +2,40 @@
 
 Alle noemenswaardige wijzigingen aan de Portfolio Tracker add-on.
 
+## 0.32.0
+Twee designaanpassingen, en de echte oorzaak van de warrant-fout gevonden.
+- Euronext gebruikte een fout endpoint (de 404 in je log). De detailed-quote-call ging naar
+/en/ajax/getDetailedQuoteAjax/... — dat pad bestaat niet. Het juiste endpoint is
+/en/intraday_chart/getDetailedQuoteAjax/<ISIN>-<MIC>/full via GET. Meteen ook de MIC-detectie
+herwerkt: de zoeker van Euronext kent gestructureerde producten vaak niet (vandaar "geen
+zoekresultaat"), dus de handelsplaatsen worden nu ECHT AFGETAST tegen het quote-endpoint
+(NL: XAMS, TNLA, ALXA, MTAA, daarna XBRU/XPAR; analoog voor BE/FR/PT/...). De eerste die HTTP
+200 geeft, wint en wordt gecachet. Ook een negatief resultaat wordt gecachet, zodat er niet
+elke 5 minuten opnieuw zes beurzen worden afgetast. De koers wordt uit het HTML-fragment
+gehaald in de volgorde laatste koers -> waarderingskoers -> vorige slot -> bied/laat, zodat
+ook een illiquide product zonder trade vandaag een waarde oplevert.
+- Nieuw: Bronnen-diagnose (Activa -> Bronnen diagnose). Vraagt élke koersbron apart wat ze
+van een ISIN weet en toont per bron het antwoord (gekend / onbekend / HTTP-status / koers).
+Zo zie je zwart op wit waar het misloopt in plaats van enkel "alle bronnen faalden". Dit is
+nodig omdat de ontwikkelomgeving geen live netwerktoegang heeft tot deze bronnen: de diagnose
+verplaatst die verificatie naar jouw omgeving.
+- Nieuw: 'Enkel handm.' per activum. Vinkje in het activaoverzicht dat ALLE onlinebronnen
+overslaat en enkel de handmatige koers gebruikt. Voor een effect dat nergens publiek genoteerd
+is, is elke onlinepoging bij voorbaat zinloos: deze vlag scheelt vijf mislukte netwerkcalls en
+evenveel foutregels in de log bij élke koersverversing (om de 5 minuten).
+- Keuze personenbelasting enkel nog zichtbaar waar ze van toepassing is. De zienswijzekeuze
+voor performance shares verscheen op het dashboard zodra er ergens in de portefeuille
+personenbelasting betaald was — ook als je filterde op een rekening zonder zulke producten.
+Nieuwe helper has_income_tax(rekeningen) kijkt enkel naar de GESELECTEERDE rekening(en); bij
+"alle rekeningen" telt de hele portefeuille mee, zoals voorheen.
+- Taartdiagram: keuze tussen huidige waarde en geïnvesteerd kapitaal. Een schakelaar boven de
+taart. "Huidige waarde" toont het gewicht van elke positie vandaag (dus mee bepaald door
+koersbewegingen); "Geïnvesteerd kapitaal" toont de kostbasis, dus hoe je je geld effectief hebt
+verdeeld. Samen laten ze zien welke posities zwaarder of lichter zijn gaan wegen. Voor
+performance shares volgt de kostbasis dezelfde zienswijze als de KPI "Totaal geïnvesteerd", zodat
+taart en cijfers elkaar niet tegenspreken. Posities met waarde 0 worden weggelaten (die
+vertekenen de taart).
+
 ## 0.31.0
 - Het dagelijkse AI-advies bestaat nu uit twee duidelijk gescheiden luiken, en het dashboard
 toont een dagresultaat per positie.

@@ -290,6 +290,12 @@ def _migrate(conn):
         cur.execute("ALTER TABLE assets ADD COLUMN manual_price REAL")
     if not _column_exists(cur, "assets", "manual_price_cur"):
         cur.execute("ALTER TABLE assets ADD COLUMN manual_price_cur TEXT")
+    # Enkel-handmatig: sla alle onlinebronnen over voor dit activum. Voor effecten die
+    # nergens publiek genoteerd zijn (bv. een niet-beursgenoteerde warrant) is elke
+    # onlinepoging bij voorbaat zinloos; deze vlag voorkomt 5 mislukte netwerkcalls en
+    # even zoveel logregels bij élke koersverversing.
+    if not _column_exists(cur, "assets", "manual_only"):
+        cur.execute("ALTER TABLE assets ADD COLUMN manual_only INTEGER DEFAULT 0")
 
     # Yahoo-symbool laatst gevonden VIA de ISIN (cache/weergave). De ISIN blijft de
     # brondata voor koersopzoeking; dit is enkel een gemakskolom zodat je ziet welk
@@ -426,6 +432,24 @@ def get_manual_price(ticker) -> dict | None:
         return {"price": float(row["manual_price"]),
                 "currency": row["manual_price_cur"] or row["currency"] or "EUR"}
     return None
+
+
+def set_manual_only(ticker, enabled: bool):
+    """Zet/wis 'enkel handmatige koers' voor een activum: alle onlinebronnen worden dan
+    overgeslagen."""
+    conn = get_connection()
+    conn.execute("UPDATE assets SET manual_only=? WHERE ticker=?",
+                 (1 if enabled else 0, ticker.upper()))
+    conn.commit()
+    conn.close()
+
+
+def is_manual_only(ticker) -> bool:
+    conn = get_connection()
+    row = conn.execute("SELECT manual_only FROM assets WHERE ticker=?",
+                       (ticker.upper(),)).fetchone()
+    conn.close()
+    return bool(row and row["manual_only"])
 
 
 def get_accounts() -> list[str]:

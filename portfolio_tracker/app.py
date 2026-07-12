@@ -348,12 +348,31 @@ def perf_held_summary(accounts=None) -> dict:
         pass
 
     held_vest = held_tax = total_tax = 0.0
+    per_ticker: dict[str, dict] = {}
     for tk, gq in grant_qty.items():
         total_tax += grant_tax.get(tk, 0.0)
         ratio = min(1.0, (held_qty.get(tk, 0.0) / gq)) if gq else 0.0
-        held_vest += grant_vest.get(tk, 0.0) * ratio
-        held_tax  += grant_tax.get(tk, 0.0) * ratio
-    return {"held_vesting": held_vest, "held_tax": held_tax, "total_tax": total_tax}
+        v = grant_vest.get(tk, 0.0) * ratio
+        x = grant_tax.get(tk, 0.0) * ratio
+        held_vest += v
+        held_tax  += x
+        per_ticker[tk] = {"vesting": v, "tax": x}
+    return {"held_vesting": held_vest, "held_tax": held_tax, "total_tax": total_tax,
+            "per_ticker": per_ticker}
+
+
+def has_income_tax(accounts=None) -> bool:
+    """Staat er in DEZE selectie (rekeningen) minstens één performance share waarop
+    personenbelasting betaald is? accounts=None (alle rekeningen) kijkt naar alles.
+    Bepaalt of de zienswijzekeuze rond personenbelasting überhaupt getoond wordt —
+    voor een rekening zonder zulke producten is die keuze zinloos."""
+    accset = set(accounts) if accounts else None
+    for t in db.get_transactions():
+        if (t.get("income_tax_eur") or 0) <= 0:
+            continue
+        if accset is None or (t.get("account") or db.DEFAULT_ACCOUNT) in accset:
+            return True
+    return False
 
 
 def render_realized_history(realized_list, names=None, empty_msg="Nog geen gerealiseerde meer-/minwaarden."):
@@ -643,8 +662,10 @@ def page_dashboard():
         period = st.radio("Periode", ["YTD (dit jaar)", "Sinds start (all-time)"],
                           horizontal=True, key="dash_period", label_visibility="collapsed")
     all_time = period.startswith("Sinds")
-    # Zienswijze performance shares (3 modi) — gedeeld met de portefeuillepagina via een setting
-    has_inctax = any((t.get("income_tax_eur") or 0) > 0 for t in db.get_transactions())
+    # Zienswijze performance shares (3 modi) — enkel zinvol, en dus enkel zichtbaar,
+    # wanneer de GESELECTEERDE rekening(en) effectief producten met personenbelasting
+    # bevatten. Bij 'alle rekeningen' (acct leeg) telt de hele portefeuille mee.
+    has_inctax = has_income_tax(acct)
     pmode = perf_mode()
     if has_inctax:
         cur_i = PERF_MODES.index(pmode)
@@ -805,23 +826,62 @@ def page_dashboard():
     with col_l:
         if not pv:
             st.caption("Geen open posities om grafisch te tonen voor deze selectie.")
-        # Taarttaart samenstelling
-        labels = list(pv.keys())
-        values = [pv[t]["current_value"] or 0 for t in labels]
+        # Taartdiagram: verdeling op huidige waarde óf op geïnvesteerd kapitaal
+        PIE_VALUE, PIE_COST = "💰 Huidige waarde", "📥 Geïnvesteerd kapitaal"
+        pie_basis = st.radio("Verdeling volgens", [PIE_VALUE, PIE_COST], horizontal=True,
+                             key="dash_pie_basis", label_visibility="collapsed",
+                             help="Huidige waarde = wat de posities vandaag waard zijn (dus mee "
+                                  "bepaald door koersbewegingen). Geïnvesteerd kapitaal = de "
+                                  "kostbasis, dus hoe je je geld effectief hebt verdeeld.")
+        on_cost = pie_basis == PIE_COST
+
         names_map = {a["ticker"]: a.get("name", a["ticker"]) for a in assets}
+        labels = list(pv.keys())
+        _pt = _ph.get("per_ticker", {}) if has_inctax else {}
+
+        def _invested(t: str) -> float:
+            """Geïnvesteerd kapitaal (EUR) voor één positie, in dezelfde zienswijze als de
+            KPI 'Totaal geïnvesteerd' — anders zouden taart en cijfers elkaar tegenspreken."""
+            base = pv[t].get("total_cost") or 0.0
+            p = _pt.get(t)
+            if p:
+                if pmode == "invested":      # kostbasis: vestingwaarde -> betaalde belasting
+                    base = base - p["vesting"] + p["tax"]
+                elif pmode == "cost":        # kostbasis -> 0 (aandelen 'gratis')
+                    base = base - p["vesting"]
+            return max(0.0, base)
+
+        raw = {t: (_invested(t) if on_cost else (pv[t]["current_value"] or 0)) for t in labels}
+        labels = [t for t in labels if raw[t] > 0]   # posities met 0 vertekenen de taart niet
+        values = [raw[t] for t in labels]
         names = [names_map.get(t, t) for t in labels]
 
-        fig_pie = go.Figure(go.Pie(
-            labels=names, values=values,
-            hole=0.45, textinfo="label+percent",
-            hovertemplate="<b>%{label}</b><br>€%{value:,.2f}<extra></extra>",
-        ))
-        fig_pie.update_layout(
-            title="Samenstelling portefeuille",
-            height=300, margin=dict(t=40, b=0, l=0, r=0),
-            paper_bgcolor="rgba(0,0,0,0)", showlegend=False,
-        )
-        st.plotly_chart(fig_pie, width='stretch')
+        if not labels:
+            st.caption("Geen bedragen om te tonen voor deze weergave.")
+        else:
+            _title = ("Samenstelling portefeuille — geïnvesteerd kapitaal" if on_cost
+                      else "Samenstelling portefeuille — huidige waarde")
+            fig_pie = go.Figure(go.Pie(
+                labels=names, values=values,
+                hole=0.45, textinfo="label+percent",
+                hovertemplate="<b>%{label}</b><br>€%{value:,.2f}<extra></extra>",
+            ))
+            fig_pie.update_layout(
+                title=_title,
+                height=300, margin=dict(t=40, b=0, l=0, r=0),
+                paper_bgcolor="rgba(0,0,0,0)", showlegend=False,
+            )
+            st.plotly_chart(fig_pie, width='stretch')
+            _tot = sum(values)
+            if on_cost:
+                st.caption(f"Totaal geïnvesteerd (deze selectie): **{eur(_tot)}** — de verdeling "
+                           "van je inleg, los van koersbewegingen. Vergelijk met de huidige waarde "
+                           "om te zien welke posities zwaarder of lichter zijn gaan wegen."
+                           + ("  Performance shares volgen de gekozen zienswijze hierboven."
+                              if _pt else ""))
+            else:
+                st.caption(f"Totale huidige waarde (deze selectie): **{eur(_tot)}** — het gewicht "
+                           "van elke positie vandaag, inclusief koerswinst en -verlies.")
 
         # Staafdiagram: netto resultaat per activum (W/V + dividenden − kosten)
         names = asset_name_map()
@@ -1505,6 +1565,7 @@ def page_assets():
                 "Koersdoel":  round(a["price_target"], 4) if a.get("price_target") is not None else None,
                 "Fotomoment": round(a["snapshot_price"], 4) if a.get("snapshot_price") is not None else None,
                 "Handmatige koers": round(mp, 4) if mp is not None else None,
+                "Enkel handm.": bool(a.get("manual_only")),
                 "Laatste koers": round(mp, 4) if mp is not None else (round(lp["price"], 4) if lp else None),
             })
         cc = st.column_config
@@ -1542,13 +1603,53 @@ def page_assets():
                                                    "(Yahoo, onvista, Börse Frankfurt, Tradegate, Lang & Schwarz) een koers "
                                                    "vindt. Zet de ISIN correct in — dan werken de meeste warrants "
                                                    "automatisch. Leeg = volledig automatisch."),
+                "Enkel handm.": cc.CheckboxColumn(
+                    help="Sla ALLE onlinebronnen over voor dit effect en gebruik enkel de "
+                         "handmatige koers. Aanzetten voor effecten die nergens publiek "
+                         "genoteerd zijn: dat scheelt vijf mislukte netwerkcalls en evenveel "
+                         "foutregels in de log bij elke koersverversing (om de 5 minuten)."),
                 "Laatste koers": cc.NumberColumn(disabled=True, format="%.4f"),
             })
         st.caption("✏️ Bewerk rechtstreeks in de tabel en klik op 'Wijzigingen opslaan'. TOB-tarief, "
                    "buitenlandse bronbelasting en de EUR-fotomomentwaarde volgen automatisch. "
                    "Staat een effect niet op Yahoo (bv. een warrant)? Vul de **ISIN** in — koersen "
-                   "worden dan via de ISIN opgehaald (Yahoo, onvista, Börse Frankfurt, Tradegate, L&S). Een "
-                   "'Handmatige koers' is enkel het laatste redmiddel.")
+                   "worden dan via de ISIN opgehaald (Yahoo, onvista, Euronext, Tradegate, L&S, "
+                   "Börse Frankfurt). Vindt geen enkele bron het effect, zet dan een "
+                   "**handmatige koers** én vink **Enkel handm.** aan — dat stopt ook de "
+                   "foutmeldingen in de log.")
+
+        with st.expander("🔬 Bronnen diagnose — waarom vindt de app geen koers?"):
+            st.caption("Vraagt élke koersbron apart wat ze van deze ISIN weet en toont het "
+                       "antwoord. Zo zie je of een effect ergens gekend is, in plaats van enkel "
+                       "'alle bronnen faalden'.")
+            _isins = [(a["ticker"], a.get("isin") or "") for a in assets if (a.get("isin") or "")]
+            if not _isins:
+                st.info("Geen enkel activum heeft een ISIN ingevuld.")
+            else:
+                _dsel = st.selectbox("Activum", _isins,
+                                     format_func=lambda p: f"{asset_label(p[0], a_names)} — {p[1]}",
+                                     key="diag_sel")
+                if st.button("🔬 Diagnose uitvoeren", key="diag_run"):
+                    with st.spinner("Alle koersbronnen bevragen..."):
+                        res = md.diagnose_isin(_dsel[1])
+                    st.dataframe(pd.DataFrame([{
+                        "": "✅" if r["ok"] else "❌",
+                        "Bron": r["bron"],
+                        "Koers": r["koers"],
+                        "Munt": r["munt"] or "",
+                        "Antwoord": r["detail"],
+                    } for r in res]), width="stretch", hide_index=True, column_config={
+                        "Koers": st.column_config.NumberColumn(format="%.4f"),
+                    })
+                    if not any(r["ok"] for r in res):
+                        st.warning(
+                            "**Geen enkele bron kent dit effect** — ook Euronext niet, en dat is "
+                            "de beurs waar Nederlandse en Belgische gestructureerde producten "
+                            "noteren. Dat wijst er sterk op dat dit instrument **niet publiek "
+                            "beursgenoteerd** is (bv. een warrant uit een werkgeversplan, die wel "
+                            "een ISIN heeft maar niet verhandeld wordt op een beurs). Er is dan "
+                            "geen koers om op te halen: vul een **handmatige koers** in en vink "
+                            "**Enkel handm.** aan.")
 
         if st.button("💾 Wijzigingen opslaan", type="primary", key="asset_save_inline"):
             n_upd, problems = 0, []
@@ -1558,7 +1659,7 @@ def page_assets():
                     orig = rows[i]
                     if all(_cell_eq(r[k], orig[k]) for k in
                            ("Naam", "Type", "ETF-type", "BE", "Munt", "Land", "Beurs", "ISIN",
-                            "Koersdoel", "Fotomoment", "Handmatige koers")):
+                            "Koersdoel", "Fotomoment", "Handmatige koers", "Enkel handm.")):
                         continue
                     atype = TYPE_KEY.get(str(r["Type"]), a["asset_type"])
                     asub  = SUB_KEY.get(str(r["ETF-type"]), a.get("etf_subtype") or "distributing") or "distributing"
@@ -1585,6 +1686,7 @@ def page_assets():
                         db.set_manual_price(a["ticker"], None, None)
                     else:
                         db.set_manual_price(a["ticker"], float(mpv), ncur)
+                    db.set_manual_only(a["ticker"], bool(r["Enkel handm."]))
                     n_upd += 1
             except Exception as exc:
                 problems.append(f"Onverwachte fout: {exc}")

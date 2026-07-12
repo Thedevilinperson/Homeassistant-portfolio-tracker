@@ -755,81 +755,128 @@ def _onvista_close_on_date(isin: str, on_date: str) -> float | None:
 # ING Markets-warrants (bv. NL0015002RI2) op Euronext Amsterdam, maar evengoed
 # illiquide fondsen op Euronext Brussel.
 
-_EURONEXT_MIC_CACHE: dict[str, str] = {}   # isin -> gevonden MIC (bv. XAMS)
+_EURONEXT_MIC_CACHE: dict[str, str] = {}   # isin -> werkende MIC (bv. XAMS)
 
-# Terugval-MIC per ISIN-landcode als de zoekopdracht geen MIC oplevert.
-_EURONEXT_COUNTRY_MIC = {"NL": "XAMS", "BE": "XBRU", "FR": "XPAR",
-                         "PT": "XLIS", "IE": "XMSM", "NO": "XOSL"}
+# Kandidaat-handelsplaatsen per ISIN-landcode. Wordt afgetast als het zoek-endpoint
+# niets teruggeeft (dat gebeurt o.a. voor gestructureerde producten/warrants, die niet
+# in de gewone instrumentenzoeker zitten). Volgorde = meest waarschijnlijk eerst.
+_EURONEXT_MIC_CANDIDATES = {
+    "NL": ["XAMS", "TNLA", "ALXA", "MTAA"],
+    "BE": ["XBRU", "ALXB", "MLXB", "TNLB"],
+    "FR": ["XPAR", "ALXP", "XMLI"],
+    "PT": ["XLIS", "ALXL"],
+    "IE": ["XMSM", "XESM"],
+    "NO": ["XOSL", "MERK"],
+    "IT": ["MTAA", "ETLX"],
+    "DE": ["XAMS", "XPAR"],   # DE-ISIN's van emittenten die op Euronext noteren
+    "LU": ["XAMS", "XPAR"],
+}
+_EURONEXT_DEFAULT_MICS = ["XAMS", "XBRU", "XPAR"]
+
+
+def _euronext_mic_candidates(isin: str) -> list[str]:
+    seen, out = set(), []
+    for m in _EURONEXT_MIC_CANDIDATES.get(isin[:2], []) + _EURONEXT_DEFAULT_MICS:
+        if m not in seen:
+            seen.add(m)
+            out.append(m)
+    return out
 
 
 def _euronext_headers() -> dict:
     return {"User-Agent": _BF_BROWSER_HEADERS["User-Agent"],
-            "Accept": "application/json, text/plain, */*",
+            "Accept": "*/*",
             "X-Requested-With": "XMLHttpRequest",
             "Referer": "https://live.euronext.com/"}
 
 
-def _euronext_mic_for_isin(isin: str) -> str | None:
-    """Zoek via het zoek-endpoint van Euronext Live de handelsplaats (MIC) voor
-    een ISIN. Gecachet per proces. Geeft None als het instrument onbekend is en
-    er ook geen land-terugval bestaat."""
-    if isin in _EURONEXT_MIC_CACHE:
-        return _EURONEXT_MIC_CACHE[isin] or None
+def _euronext_search_mic(isin: str) -> str | None:
+    """Handelsplaats (MIC) via het zoek-endpoint van Euronext Live.
+
+    Het antwoord verschilt per instrumenttype (soms JSON, soms HTML-fragment, en de
+    sleutelnamen wisselen). Daarom zoeken we niet naar vaste sleutels maar naar het
+    'DNA' dat Euronext overal gebruikt: de tekst ISIN-MIC (bv. NL0011794037-XAMS).
+    Dat werkt ongeacht de vorm van het antwoord. Niets gevonden -> None."""
+    import re
     import requests
-    mic = None
     try:
         resp = requests.get("https://live.euronext.com/en/instrumentSearch/searchJSON",
                             params={"q": isin}, headers=_euronext_headers(), timeout=8)
-        if resp.ok:
-            try:
-                items = resp.json()
-            except ValueError:
-                items = []
-            if isinstance(items, dict):
-                items = items.get("results") or items.get("data") or []
-            for it in items or []:
-                if not isinstance(it, dict):
-                    continue
-                it_isin = (it.get("isin") or it.get("ISIN") or "").upper()
-                it_mic = (it.get("mic") or it.get("MIC") or it.get("micCode") or "").upper()
-                if it_isin == isin and it_mic:
-                    mic = it_mic
-                    break
-        else:
-            logger.info(f"_euronext_mic_for_isin({isin}): zoek-HTTP {resp.status_code}")
+        if not resp.ok:
+            logger.info(f"_euronext_search_mic({isin}): HTTP {resp.status_code}")
+            return None
+        m = re.search(rf"{re.escape(isin)}-([A-Z0-9]{{4}})", resp.text or "")
+        if m:
+            return m.group(1)
+        logger.info(f"_euronext_search_mic({isin}): niet gevonden in de zoeker "
+                    f"(antwoord {len(resp.text or '')} tekens) — handelsplaatsen worden afgetast")
     except Exception as e:
-        logger.warning(f"_euronext_mic_for_isin({isin}): {e}")
-    if not mic:
-        mic = _EURONEXT_COUNTRY_MIC.get(isin[:2])
-        if mic:
-            logger.info(f"_euronext_mic_for_isin({isin}): geen zoekresultaat, "
-                        f"terugval op land-MIC {mic}")
-    _EURONEXT_MIC_CACHE[isin] = mic or ""
-    return mic
+        logger.warning(f"_euronext_search_mic({isin}): {e}")
+    return None
+
+
+def _euronext_quote(isin: str, mic: str) -> tuple[float | None, str | None, int]:
+    """(prijs, munt, http-status) via het detailed-quote-fragment van Euronext Live.
+
+    Het juiste endpoint is /en/intraday_chart/getDetailedQuoteAjax/<ISIN>-<MIC>/full
+    (GET). Het geeft een HTML-tabel terug met rijen als 'Last traded price',
+    'Previous close', 'Bid'/'Ask'. We nemen de eerste bruikbare in die volgorde, zodat
+    ook een illiquide product zonder trade vandaag een waarde oplevert.
+
+    Belangrijk: een onbekend instrument geeft hier 404 (of een pagina zonder tabel).
+    De status wordt teruggegeven zodat de aanroeper weet of het de MIC was die fout
+    zat, dan wel het instrument zelf onbekend is."""
+    import re
+    import requests
+    url = ("https://live.euronext.com/en/intraday_chart/getDetailedQuoteAjax/"
+           f"{isin}-{mic}/full")
+    try:
+        resp = requests.get(url, headers=_euronext_headers(), timeout=8)
+        if not resp.ok:
+            return None, None, resp.status_code
+        html = resp.text or ""
+        # Munt staat meestal als los veld ('Currency ... EUR') in de tabel
+        cm = re.search(r"(?:Currency|Valuta)\s*</[^>]+>\s*<td[^>]*>\s*([A-Z]{3})", html)
+        currency = cm.group(1) if cm else "EUR"
+        labels = ["Last traded price", "Laatste koers", "Valuation price", "Previous close",
+                  "Vorige slotkoers", "Bid", "Ask", "Laat", "Bied"]
+        for lbl in labels:
+            m = re.search(rf"{re.escape(lbl)}\s*</[^>]+>\s*<td[^>]*>(.*?)</td>",
+                          html, re.S | re.I)
+            if not m:
+                continue
+            txt = re.sub(r"<[^>]+>", " ", m.group(1))
+            num = re.search(r"-?\d[\d\s.,\u202f]*", txt)
+            price = _to_float(num.group(0)) if num else None
+            if price:
+                return price, currency, resp.status_code
+        return None, currency, resp.status_code
+    except Exception as e:
+        logger.warning(f"_euronext_quote({isin},{mic}): {e}")
+        return None, None, 0
 
 
 def _euronext_chart_last(isin: str, mic: str, period: str) -> float | None:
-    """Recentste koerspunt uit de chartdata van Euronext Live ('intraday' voor
-    vandaag, 'max' voor de volledige daghistoriek). Geeft None bij lege data."""
+    """Recentste koerspunt uit de chartdata van Euronext Live ('intraday' voor vandaag,
+    'max' voor de volledige daghistoriek). Geeft None bij lege data."""
     import requests
     try:
         resp = requests.get(f"https://live.euronext.com/intraday_chart/getChartData/"
                             f"{isin}-{mic}/{period}",
                             headers=_euronext_headers(), timeout=8)
         if not resp.ok:
-            logger.info(f"_euronext_chart_last({isin},{mic},{period}): HTTP {resp.status_code}")
             return None
         try:
             pts = resp.json()
         except ValueError:
-            logger.info(f"_euronext_chart_last({isin},{mic},{period}): geen JSON")
             return None
         if isinstance(pts, dict):
             pts = pts.get("data") or []
         if isinstance(pts, list) and pts:
             last = pts[-1]
             if isinstance(last, dict):
-                return _to_float(last.get("price") or last.get("close") or last.get("last"))
+                return _to_float(last.get("price") or last.get("close") or last.get("last")
+                                 or last.get("value"))
             if isinstance(last, (list, tuple)) and len(last) > 1:
                 return _to_float(last[1])
     except Exception as e:
@@ -837,51 +884,53 @@ def _euronext_chart_last(isin: str, mic: str, period: str) -> float | None:
     return None
 
 
-def _euronext_detailed_quote(isin: str, mic: str) -> tuple[float | None, str | None]:
-    """Laatste redmiddel binnen Euronext: het getDetailedQuoteAjax-endpoint geeft
-    een HTML-fragment terug met de laatste koers en de munt; die worden er met een
-    tolerante regex uitgehaald (illiquide producten zonder chartpunten hebben hier
-    vaak wel een bied/laat- of referentiekoers)."""
-    import re
-    import requests
-    try:
-        resp = requests.post(f"https://live.euronext.com/en/ajax/getDetailedQuoteAjax/"
-                             f"{isin}-{mic}/full",
-                             data={"theme_name": "euronext_live"},
-                             headers=_euronext_headers(), timeout=8)
-        if not resp.ok or not resp.text:
-            logger.info(f"_euronext_detailed_quote({isin},{mic}): HTTP {resp.status_code}")
-            return None, None
-        html = resp.text
-        m = re.search(r'id="header-instrument-price"[^>]*>\s*([\d.,\u202f\s]+)<', html)
-        price = _to_float(m.group(1)) if m else None
-        mc = re.search(r'header-instrument-currency[^>]*>\s*([A-Z]{3})', html)
-        cur = mc.group(1) if mc else "EUR"
-        if price:
-            return price, cur
-        logger.info(f"_euronext_detailed_quote({isin},{mic}): geen koers in HTML-fragment")
-    except Exception as e:
-        logger.warning(f"_euronext_detailed_quote({isin},{mic}): {e}")
-    return None, None
+def _euronext_resolve(isin: str) -> str | None:
+    """De werkende handelsplaats (MIC) voor een ISIN, of None als Euronext het
+    instrument niet kent. Eerst de zoeker; levert die niets op (typisch voor warrants
+    en andere gestructureerde producten), dan worden de kandidaat-MIC's van het land
+    ECHT AFGETAST tegen het quote-endpoint. Het resultaat wordt gecachet — ook een
+    negatief resultaat, zodat we niet elke 5 minuten opnieuw 4 beurzen aftasten."""
+    if isin in _EURONEXT_MIC_CACHE:
+        return _EURONEXT_MIC_CACHE[isin] or None
+    mic = _euronext_search_mic(isin)
+    if mic:
+        _EURONEXT_MIC_CACHE[isin] = mic
+        logger.info(f"_euronext_resolve({isin}): handelsplaats {mic} (via de zoeker)")
+        return mic
+    for cand in _euronext_mic_candidates(isin):
+        price, _cur, status = _euronext_quote(isin, cand)
+        if status == 200:
+            _EURONEXT_MIC_CACHE[isin] = cand
+            logger.info(f"_euronext_resolve({isin}): handelsplaats {cand} (afgetast, HTTP 200"
+                        + (f", koers {price}" if price else ", nog geen koers in het fragment")
+                        + ")")
+            return cand
+    _EURONEXT_MIC_CACHE[isin] = ""
+    logger.info(f"_euronext_resolve({isin}): Euronext kent dit instrument niet "
+                f"(geen enkele van {', '.join(_euronext_mic_candidates(isin))} gaf HTTP 200)")
+    return None
 
 
 def _price_euronext(isin: str) -> tuple[float | None, str | None]:
-    """(prijs, munt) via Euronext Live. Werkwijze: MIC opzoeken via het
-    zoek-endpoint (terugval: land-MIC, bv. NL -> XAMS), daarna het recentste
-    chartpunt (eerst intraday, dan volledige historiek voor illiquide producten
-    zonder trade vandaag), en als laatste het detailed-quote-HTML-fragment.
-    Euronext noteert vrijwel alles in EUR; de detailed quote geeft de munt mee."""
+    """(prijs, munt) via Euronext Live — de bron voor effecten die enkel op Euronext
+    noteren en die de Duitse platformen niet kennen. Werkwijze: handelsplaats bepalen
+    (zoeker of aftasten), dan de detailed quote (dekt ook illiquide producten zonder
+    trade vandaag via de bied-/laat-/vorige koers), en als terugval de chartdata."""
     if not _isin_valid(isin):
         return None, None
-    mic = _euronext_mic_for_isin(isin)
+    mic = _euronext_resolve(isin)
     if not mic:
-        logger.info(f"_price_euronext({isin}): geen MIC gevonden")
         return None, None
+    price, currency, status = _euronext_quote(isin, mic)
+    if price:
+        return price, currency or "EUR"
     for period in ("intraday", "max"):
-        price = _euronext_chart_last(isin, mic, period)
-        if price:
-            return price, "EUR"
-    return _euronext_detailed_quote(isin, mic)
+        p = _euronext_chart_last(isin, mic, period)
+        if p:
+            return p, currency or "EUR"
+    logger.info(f"_price_euronext({isin}): {isin}-{mic} bestaat (HTTP {status}) maar geeft "
+                "geen koers terug — geen recente notering?")
+    return None, None
 
 
 # Externe ISIN-bronnen, in volgorde geprobeerd na Yahoo. Uitbreidbaar met extra
@@ -964,6 +1013,59 @@ def probe_isin(isin: str) -> tuple[float | None, str | None, str | None]:
     return None, None, None
 
 
+def diagnose_isin(isin: str) -> list[dict]:
+    """Diagnose per koersbron voor één ISIN: wat antwoordt elke bron precies?
+
+    Geeft een lijst van {bron, ok, koers, munt, detail} terug. Bedoeld voor de knop
+    'Bronnen diagnose' in het activaoverzicht: zo zie je zwart op wit of een effect
+    ergens gekend is, in plaats van enkel 'alle bronnen faalden'. Vindt GEEN ENKELE
+    bron het instrument (ook Euronext niet), dan is het vrijwel zeker niet publiek
+    genoteerd en is een handmatige koers het juiste antwoord — geen codeprobleem."""
+    out: list[dict] = []
+    if not _isin_valid(isin):
+        return [{"bron": "—", "ok": False, "koers": None, "munt": None,
+                 "detail": "Geen geldige ISIN (12 tekens, begint met 2 letters)."}]
+
+    # 1) Yahoo via de ISIN
+    sym = _yahoo_symbol_for_isin(isin)
+    if sym:
+        p, c = _price_from_yahoo_symbol(sym)
+        out.append({"bron": f"Yahoo ({sym})", "ok": p is not None, "koers": p, "munt": c,
+                    "detail": ("Symbool gevonden en koers opgehaald." if p is not None
+                               else "Symbool gevonden, maar Yahoo geeft geen koers.")})
+    else:
+        out.append({"bron": "Yahoo", "ok": False, "koers": None, "munt": None,
+                    "detail": "Yahoo kent deze ISIN niet (geen verhandelbaar symbool)."})
+
+    # 2) Euronext — met de handelsplaats erbij, want die is het kernprobleem bij warrants
+    mic = _euronext_resolve(isin)
+    if mic:
+        p, c, status = _euronext_quote(isin, mic)
+        out.append({"bron": f"Euronext ({mic})", "ok": p is not None, "koers": p, "munt": c,
+                    "detail": (f"Instrument gekend op {mic} (HTTP {status}); "
+                               + ("koers gevonden." if p is not None
+                                  else "maar het quote-fragment bevat geen koers."))})
+    else:
+        cands = ", ".join(_euronext_mic_candidates(isin))
+        out.append({"bron": "Euronext", "ok": False, "koers": None, "munt": None,
+                    "detail": f"Onbekend instrument: geen enkele handelsplaats ({cands}) "
+                              "geeft een geldig antwoord."})
+
+    # 3) De overige externe bronnen
+    names = {"_price_onvista": "onvista", "_price_tradegate": "Tradegate",
+             "_price_lang_schwarz": "Lang & Schwarz",
+             "_price_boerse_frankfurt": "Börse Frankfurt"}
+    for provider in _ISIN_PROVIDERS:
+        if provider.__name__ == "_price_euronext":
+            continue  # hierboven al, uitgebreider
+        p, c = provider(isin)
+        out.append({"bron": names.get(provider.__name__, provider.__name__),
+                    "ok": p is not None, "koers": p, "munt": c,
+                    "detail": ("Koers gevonden." if p is not None
+                               else "Instrument niet gekend of geen koers (zie de log voor detail).")})
+    return out
+
+
 def _asset_isin(ticker: str) -> str:
     try:
         import database as _db
@@ -1021,6 +1123,22 @@ def get_current_price(ticker: str) -> tuple[float | None, str | None]:
     cached_price, cached_cur = _cached(ticker)
     if cached_price is not None:
         return cached_price, cached_cur
+
+    # Enkel-handmatig: dit effect is nergens publiek genoteerd (bv. een niet-beursgenoteerde
+    # warrant). Sla álle onlinebronnen over — anders kost elke koersverversing vijf mislukte
+    # netwerkcalls en evenveel foutregels in de log, voor een koers die er toch niet is.
+    try:
+        import database as _db
+        if _db.is_manual_only(ticker):
+            mp = _db.get_manual_price(ticker)
+            if mp:
+                _store(ticker, mp["price"], mp["currency"])
+                return mp["price"], mp["currency"]
+            logger.info(f"get_current_price({ticker}): staat op 'enkel handmatig', maar er is "
+                        "geen handmatige koers ingesteld.")
+            return None, None
+    except Exception as exc:
+        logger.warning(f"get_current_price({ticker}): manual_only-check faalde ({exc})")
 
     recently_failed = (time.time() - _FAIL_CACHE.get(ticker, 0)) < FAIL_CACHE_TTL
 
