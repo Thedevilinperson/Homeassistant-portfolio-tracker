@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 from datetime import datetime
 
 from openai import OpenAI, OpenAIError
@@ -296,10 +297,17 @@ ADVISOR_PERSONA = (
 )
 
 
-def _chat(client: OpenAI, model: str, system_msg: str, user_msg: str,
-          max_tokens: int = MAX_TOKENS, temperature: float = 0.4,
-          track_as: str = "chat") -> str:
-    response = client.chat.completions.create(
+def _chat_raw(client: OpenAI, model: str, system_msg: str, user_msg: str,
+              max_tokens: int = MAX_TOKENS, temperature: float = 0.4,
+              track_as: str = "chat", json_mode: bool = False) -> tuple[str, str | None]:
+    """(tekst, finish_reason). finish_reason == 'length' betekent dat het model tegen de
+    tokenlimiet is gelopen en zijn antwoord MIDDENIN heeft afgebroken — bij een
+    JSON-antwoord levert dat onvermijdelijk een parseerfout op ('Unterminated string...').
+    Die situatie moet dus herkend worden, niet als raadselachtige fout doorgegeven.
+
+    json_mode=True dwingt geldige JSON af via response_format; modellen die dat niet
+    ondersteunen vallen automatisch terug op een gewone call."""
+    kwargs = dict(
         model=model,
         messages=[
             {"role": "system", "content": system_msg},
@@ -308,16 +316,41 @@ def _chat(client: OpenAI, model: str, system_msg: str, user_msg: str,
         max_tokens=max_tokens,
         temperature=temperature,
     )
+    if json_mode:
+        kwargs["response_format"] = {"type": "json_object"}
+    try:
+        response = client.chat.completions.create(**kwargs)
+    except Exception as exc:
+        if not json_mode:
+            raise
+        logger.info(f"_chat_raw({track_as}): JSON-modus niet ondersteund ({exc}) — "
+                    "opnieuw zonder response_format")
+        kwargs.pop("response_format", None)
+        response = client.chat.completions.create(**kwargs)
+
     # Tokengebruik + kost registreren (best effort — nooit de call laten falen)
     try:
         usage = getattr(response, "usage", None)
         pt = getattr(usage, "prompt_tokens", 0) or 0
         ct = getattr(usage, "completion_tokens", 0) or 0
-        cost = estimate_cost_usd(model, pt, ct)
-        db.record_ai_usage(track_as, model, pt, ct, cost)
+        db.record_ai_usage(track_as, model, pt, ct, estimate_cost_usd(model, pt, ct))
     except Exception as exc:
         logger.warning(f"AI-gebruik registreren mislukt: {exc}")
-    return response.choices[0].message.content or ""
+
+    choice = response.choices[0]
+    finish = getattr(choice, "finish_reason", None)
+    if finish == "length":
+        logger.warning(f"_chat_raw({track_as}): antwoord AFGEKAPT op de tokenlimiet "
+                       f"({max_tokens} tokens). Het antwoord wordt zo goed mogelijk hersteld; "
+                       "verhoog de limiet als dit blijft gebeuren.")
+    return (choice.message.content or ""), finish
+
+
+def _chat(client: OpenAI, model: str, system_msg: str, user_msg: str,
+          max_tokens: int = MAX_TOKENS, temperature: float = 0.4,
+          track_as: str = "chat", json_mode: bool = False) -> str:
+    return _chat_raw(client, model, system_msg, user_msg, max_tokens=max_tokens,
+                     temperature=temperature, track_as=track_as, json_mode=json_mode)[0]
 
 
 def market_websearch_enabled() -> bool:
@@ -362,11 +395,47 @@ def _chat_websearch(client: OpenAI, model: str, system_msg: str, user_msg: str,
             logger.warning(f"_chat_websearch: websearch niet beschikbaar ({exc}) — "
                            "terugval op gewone chat (enkel trainingskennis)")
     return _chat(client, model, system_msg, user_msg, max_tokens=max_tokens,
-                 temperature=0.5, track_as=track_as), False
+                 temperature=0.5, track_as=track_as, json_mode=True), False
 
 
-def _parse_json(text: str):
-    """Robuust JSON parsen, ook als het model markdown-fences toevoegt."""
+def _repair_truncated_json(t: str) -> str:
+    """Sluit een AFGEKAPTE JSON-tekst zodat er nog iets bruikbaars uit te halen valt.
+
+    Wanneer het model tegen de tokenlimiet loopt, breekt het middenin een string af
+    ('Unterminated string starting at ...') en is het volledige antwoord onbruikbaar —
+    ook het deel dat wél compleet was. Deze functie sluit de openstaande string, gooit
+    een hangende komma/dubbele punt weg en sluit de nog open haakjes. Het laatste,
+    onvolledige element blijft dan meestal over als een half object; dat wordt verderop
+    door de gewone veldvalidatie weggefilterd. Zo redden we de al complete adviezen."""
+    s = (t or "").rstrip()
+    in_str, esc, stack = False, False, []
+    for ch in s:
+        if in_str:
+            if esc:
+                esc = False
+            elif ch == "\\":
+                esc = True
+            elif ch == '"':
+                in_str = False
+        else:
+            if ch == '"':
+                in_str = True
+            elif ch in "{[":
+                stack.append(ch)
+            elif ch in "}]":
+                if stack:
+                    stack.pop()
+    if in_str:
+        s += '"'
+    s = re.sub(r"[,:]\s*$", "", s.rstrip())   # hangende komma of dubbele punt
+    for ch in reversed(stack):
+        s += "}" if ch == "{" else "]"
+    return s
+
+
+def _parse_json(text: str, repair: bool = True):
+    """Robuust JSON parsen, ook als het model markdown-fences toevoegt of als het
+    antwoord op de tokenlimiet is afgekapt (repair=True)."""
     t = (text or "").strip()
     if t.startswith("```"):
         t = t.strip("`")
@@ -380,7 +449,22 @@ def _parse_json(text: str):
                 return json.loads(t[i:j+1])
             except Exception:
                 continue
-    return json.loads(t)  # laatste poging (werpt bij mislukking)
+    try:
+        return json.loads(t)
+    except Exception:
+        if not repair:
+            raise
+    # Herstelpoging op het afgekapte antwoord
+    i = t.find("{")
+    if i == -1:
+        i = t.find("[")
+    if i == -1:
+        raise ValueError("Antwoord bevat geen JSON.")
+    fixed = _repair_truncated_json(t[i:])
+    data = json.loads(fixed)   # lukt dit niet, dan is het antwoord echt onbruikbaar
+    logger.warning("_parse_json: afgekapt antwoord hersteld — mogelijk ontbreken de "
+                   "laatste adviezen.")
+    return data
 
 
 def _profiel_blok(ctx: dict) -> str:
@@ -692,9 +776,21 @@ Antwoord UITSLUITEND met geldige JSON (geen markdown errond), in exact dit forma
 }}
 Geef voor ELKE positie een rating.
 """
+    # Tokenlimiet MEE laten schalen met de portefeuille. Het antwoord bevat het
+    # tekstadvies plus EEN RATING PER POSITIE; met tientallen posities liep de vaste
+    # limiet van 2200 tokens vol en brak het model middenin de JSON af ("Unterminated
+    # string ..."). Ruwweg: vaste tekst + ~170 tokens per positie, met marge.
+    n_pos = len(ctx["posities"])
+    budget = max(2200, min(12000, 1400 + 170 * n_pos))
+
     try:
-        raw = _chat(client, model, ADVISOR_PERSONA, user, max_tokens=2200,
-                    temperature=0.3, track_as="daily_advice")
+        raw, finish = _chat_raw(client, model, ADVISOR_PERSONA, user, max_tokens=budget,
+                                temperature=0.3, track_as="daily_advice", json_mode=True)
+        truncated = finish == "length"
+        if truncated:
+            logger.warning(f"generate_daily_portfolio_advice: antwoord afgekapt bij "
+                           f"{n_pos} posities (limiet {budget} tokens) — het bruikbare deel "
+                           "wordt hersteld en opgeslagen.")
         data = _parse_json(raw)
         if not isinstance(data, dict):
             return {"error": "AI-antwoord niet bruikbaar."}
@@ -732,9 +828,16 @@ Geef voor ELKE positie een rating.
                               currency=r.get("currency", "EUR"),
                               rationale=r.get("rationale", ""), model=model)
             stored += 1
+        missing = len(valid_tickers) - stored
+        if truncated or missing > 0:
+            text += (f"\n\n_⚠️ Het AI-antwoord was afgekapt: er zijn ratings voor "
+                     f"{stored} van de {len(valid_tickers)} posities opgeslagen"
+                     + (f" ({missing} ontbreken)." if missing > 0 else ".")
+                     + " Probeer opnieuw, of gebruik een model met een ruimere uitvoerlimiet._")
         db.save_ai_evaluation("daily_advice", text, timing="daily",
                               tickers=",".join(valid_tickers))
-        return {"batch_id": batch_id, "stored": stored, "advies_tekst": text}
+        return {"batch_id": batch_id, "stored": stored, "advies_tekst": text,
+                "expected": len(valid_tickers), "truncated": bool(truncated or missing > 0)}
     except OpenAIError as exc:
         logger.error(f"generate_daily_portfolio_advice: {exc}")
         return {"error": f"OpenAI-fout: {exc}"}
@@ -854,7 +957,7 @@ Exact 6 ideeën, exact 2 per bucket.
 """
     try:
         raw, used_web = _chat_websearch(client, model, MARKET_PERSONA, user,
-                                        max_tokens=3500, track_as="market_ideas")
+                                        max_tokens=5000, track_as="market_ideas")
         data = _parse_json(raw)
         if not isinstance(data, dict):
             return {"error": "AI-antwoord niet bruikbaar."}

@@ -1243,7 +1243,11 @@ def page_portfolio():
                     if res.get("error"):
                         st.error(res["error"])
                     else:
-                        st.success(f"✅ Advies gegenereerd ({res['stored']} ratings).")
+                        if res.get("truncated"):
+                            st.warning(f"⚠️ Antwoord afgekapt: {res['stored']} van de "
+                                       f"{res.get('expected', '?')} posities kregen een rating.")
+                        else:
+                            st.success(f"✅ Advies gegenereerd ({res['stored']} ratings).")
                         st.rerun()
 
         # Tekstadvies uit het laatste dagelijkse advies
@@ -3342,6 +3346,11 @@ def page_ai_advisor():
                 res = ai_advisor.generate_daily_portfolio_advice()
             if res.get("error"):
                 st.error(res["error"])
+            elif res.get("truncated"):
+                st.warning(f"⚠️ Advies gegenereerd, maar het AI-antwoord was afgekapt: "
+                           f"{res['stored']} van de {res.get('expected', '?')} posities kregen "
+                           "een rating. Het bruikbare deel is bewaard. Probeer opnieuw, of kies "
+                           "een model met een ruimere uitvoerlimiet (⚙️ Instellingen → AI).")
             else:
                 st.success(f"✅ Advies gegenereerd ({res['stored']} ratings). "
                            "De portefeuille-tabellen zijn bijgewerkt.")

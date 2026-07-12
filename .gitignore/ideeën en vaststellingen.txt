@@ -7,15 +7,10 @@ UI
 
 
 Structurelere aanpassingen
+wachten tot warrants zijn opgelost - koersen van posities die in de gehele portfolio op 0 staan, moeten niet meer opgehaald worden
 
 
 Bugs
-- het cash grootboek lijkt de som van de transacties niet goed te maken. Zie CSV in bijlage waar ik de geregistreerde transacties voor het BUX account heb ingezet. Daar kom ik aan 634,59 euro aan aankopen, terwijl in het cash grootboek er 997,83 euro staat. Voor de verkopen staat er in in de CSV 1590,86 euro, terwijl dit in het cash grootboek 1581,47 is.
-- worden transacties in het verleden omgerekend naar de toe geldende wisselkoers van een vreemde munteenheid?
-- Interesten en securities lending moeten nu gelinkt worden aan een activum. Dat is nooit het geval voor interesten en niet noodzakelijk het geval voor securities lending. Kan je dit aanpassen?
-- De ISIN is een betere basiswaarde om de activa op op te zoeken. Zeker met yahoo finance is er te veel ambiguïteit met extensies en verschillende landen. De ISIN is altijd uniek voor een financieel product. Kan je de app hierop aanpassen? De app kan dan in een aparte kolom de bijhorende ticker opzeoeken, maar moet altijd de ISIN gebruiken om de juiste koers te bepalen
-
-
 
 Aanpak/designvragen
 

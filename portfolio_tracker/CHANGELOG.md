@@ -2,44 +2,77 @@
 
 Alle noemenswaardige wijzigingen aan de Portfolio Tracker add-on.
 
+## 0.33.1
+Bugfix: het dagelijkse portefeuilleadvies (luik 1) faalde met "Unterminated string starting
+at ...".
+
+**Oorzaak.** Het antwoord bevat het tekstadvies PLUS een rating per positie, maar de
+tokenlimiet stond vast op 2200. Met een portefeuille van enkele tientallen posities paste dat
+niet: het model brak middenin de JSON af, waarna het volledige antwoord onbruikbaar was - ook
+de ratings die al compleet waren. In de log zag je enkel de cryptische JSON-fout, niet de
+werkelijke reden (afkapping).
+
+**Drie ingrepen:**
+- De tokenlimiet schaalt nu mee met het aantal posities (ongeveer 1400 + 170 per positie, met
+  een plafond). Bij 37 posities is dat ~7700 tokens in plaats van 2200.
+- Afkapping wordt herkend (finish_reason 'length') en als zodanig gelogd, in plaats van als
+  een raadselachtige parseerfout door te komen.
+- Een afgekapt antwoord wordt hersteld: de openstaande string en haakjes worden gesloten, zodat
+  de al complete adviezen alsnog bewaard worden. Het onvolledige laatste item valt weg via de
+  gewone veldvalidatie. Je krijgt dan een duidelijke melding ("x van de y posities kregen een
+  rating") in plaats van niets.
+
+Daarnaast wordt geldige JSON nu afgedwongen via response_format; modellen die dat niet
+ondersteunen vallen automatisch terug op een gewone call. De tokenlimiet voor de
+marktopportuniteiten (luik 2) ging van 3500 naar 5000, want zes onderbouwde ideeën liepen tegen
+dezelfde grens aan.
+
+Herbouwen (niet enkel herstarten) via de knop "Herbouwen" in Home Assistant.
+
 ## 0.33.0
 Handmatige dividendcorrecties worden niet meer overschreven, en de buitenlandse
 bronbelasting werkt voortaan per jaar.
-- Herberekenen overschrijft je handmatige correcties niet langer. De knop "keten
+
+**Herberekenen overschrijft je handmatige correcties niet langer.** De knop "keten
 herberekenen" bouwde elke lijn blind opnieuw op vanaf het brutobedrag - ook lijnen waarin jij
 net een bedrag had gecorrigeerd (bv. omdat je broker een afwijkend verdragstarief toepaste).
 Vanaf nu:
   - Dividendlijnen krijgen een vlag "handmatig gecorrigeerd" (nieuwe kolom 🔒 Handmatig in de
-tabel). Die wordt automatisch gezet zodra je zelf een bedrag (①-④) aanpast; je kunt ze ook
-zelf aan- of afvinken.
+    tabel). Die wordt automatisch gezet zodra je zelf een bedrag (①-④) aanpast; je kunt ze ook
+    zelf aan- of afvinken.
   - De herberekening SLAAT die lijnen standaard over.
   - Je krijgt eerst een VOORBEELD te zien: welke lijnen zouden wijzigen, van welke waarde naar
-welke, met het tarief en het jaar dat wordt toegepast, en de totale impact op je netto in
-euro. Pas na een expliciet vinkje + klik wordt er iets weggeschreven.
+    welke, met het tarief en het jaar dat wordt toegepast, en de totale impact op je netto in
+    euro. Pas na een expliciet vinkje + klik wordt er iets weggeschreven.
   - Wil je toch alles herbouwen (bv. na een tariefcorrectie), dan kies je "ook handmatig
-gecorrigeerde lijnen overschrijven" - met een aangepaste bevestigingstekst, zodat de impact
-duidelijk is vóór je klikt.
-- Buitenlandse bronbelasting per jaar. Bronbelastingtarieven wijzigen over de jaren
+    gecorrigeerde lijnen overschrijven" - met een aangepaste bevestigingstekst, zodat de impact
+    duidelijk is vóór je klikt.
+
+**Buitenlandse bronbelasting per jaar.** Bronbelastingtarieven wijzigen over de jaren
 (verdragen, nationale hervormingen), en een dividend hoort belast te worden tegen het tarief
 dat gold OP DAT MOMENT - niet tegen het tarief van vandaag. De tarieven zijn nu per jaar
 instelbaar (⚙️ Instellingen → Belasting), met doorschuiving: stel je 2024 in, dan geldt dat
 ook voor 2025, 2026, ... tot je voor een van die jaren iets anders instelt. Je registreert dus
 enkel de WIJZIGINGEN, niet elk jaar opnieuw dezelfde tabel.
   - Elk dividend gebruikt automatisch het tarief van zijn eigen jaar: bij het invoeren, bij het
-inline bewerken, bij de bulk-import én bij het herberekenen van de keten.
+    inline bewerken, bij de bulk-import én bij het herberekenen van de keten.
   - Dekkingscontrole: de instellingenpagina toont welke jaren met transacties of dividenden nog
-geen jaartabel hebben (die vallen terug op de standaardtarieven) en welke er wél zijn.
+    geen jaartabel hebben (die vallen terug op de standaardtarieven) en welke er wél zijn.
   - Een overzichtstabel toont per land wat er in elk ingesteld jaar effectief geldt, inclusief
-wat een jaar van een vorig jaar erft.
+    wat een jaar van een vorig jaar erft.
   - Een jaartabel wissen kan; dat jaar erft dan weer van het jaar ervoor.
   - Wat je vóór deze versie had ingesteld (de jaarloze tarieventabel) blijft gewoon werken als
-basislaag - er gaat niets verloren.
+    basislaag - er gaat niets verloren.
+
 Let op: nieuwe tarieven opslaan herberekent bestaande dividenden NIET automatisch. Dat is
 bewust - je beslist zelf, met het voorbeeld erbij, via de knop op de 💰 Dividenden-pagina.
 
+Herbouwen (niet enkel herstarten) via de knop "Herbouwen" in Home Assistant.
+
 ## 0.32.0
 Twee designaanpassingen, en de echte oorzaak van de warrant-fout gevonden.
-- Euronext gebruikte een fout endpoint (de 404 in je log). De detailed-quote-call ging naar
+
+**Euronext gebruikte een fout endpoint (de 404 in je log).** De detailed-quote-call ging naar
 /en/ajax/getDetailedQuoteAjax/... — dat pad bestaat niet. Het juiste endpoint is
 /en/intraday_chart/getDetailedQuoteAjax/<ISIN>-<MIC>/full via GET. Meteen ook de MIC-detectie
 herwerkt: de zoeker van Euronext kent gestructureerde producten vaak niet (vandaar "geen
@@ -49,21 +82,25 @@ zoekresultaat"), dus de handelsplaatsen worden nu ECHT AFGETAST tegen het quote-
 elke 5 minuten opnieuw zes beurzen worden afgetast. De koers wordt uit het HTML-fragment
 gehaald in de volgorde laatste koers -> waarderingskoers -> vorige slot -> bied/laat, zodat
 ook een illiquide product zonder trade vandaag een waarde oplevert.
-- Nieuw: Bronnen-diagnose (Activa -> Bronnen diagnose). Vraagt élke koersbron apart wat ze
+
+**Nieuw: Bronnen-diagnose (Activa -> Bronnen diagnose).** Vraagt élke koersbron apart wat ze
 van een ISIN weet en toont per bron het antwoord (gekend / onbekend / HTTP-status / koers).
 Zo zie je zwart op wit waar het misloopt in plaats van enkel "alle bronnen faalden". Dit is
 nodig omdat de ontwikkelomgeving geen live netwerktoegang heeft tot deze bronnen: de diagnose
 verplaatst die verificatie naar jouw omgeving.
-- Nieuw: 'Enkel handm.' per activum. Vinkje in het activaoverzicht dat ALLE onlinebronnen
+
+**Nieuw: 'Enkel handm.' per activum.** Vinkje in het activaoverzicht dat ALLE onlinebronnen
 overslaat en enkel de handmatige koers gebruikt. Voor een effect dat nergens publiek genoteerd
 is, is elke onlinepoging bij voorbaat zinloos: deze vlag scheelt vijf mislukte netwerkcalls en
 evenveel foutregels in de log bij élke koersverversing (om de 5 minuten).
-- Keuze personenbelasting enkel nog zichtbaar waar ze van toepassing is. De zienswijzekeuze
+
+**Keuze personenbelasting enkel nog zichtbaar waar ze van toepassing is.** De zienswijzekeuze
 voor performance shares verscheen op het dashboard zodra er ergens in de portefeuille
 personenbelasting betaald was — ook als je filterde op een rekening zonder zulke producten.
 Nieuwe helper has_income_tax(rekeningen) kijkt enkel naar de GESELECTEERDE rekening(en); bij
 "alle rekeningen" telt de hele portefeuille mee, zoals voorheen.
-- Taartdiagram: keuze tussen huidige waarde en geïnvesteerd kapitaal. Een schakelaar boven de
+
+**Taartdiagram: keuze tussen huidige waarde en geïnvesteerd kapitaal.** Een schakelaar boven de
 taart. "Huidige waarde" toont het gewicht van elke positie vandaag (dus mee bepaald door
 koersbewegingen); "Geïnvesteerd kapitaal" toont de kostbasis, dus hoe je je geld effectief hebt
 verdeeld. Samen laten ze zien welke posities zwaarder of lichter zijn gaan wegen. Voor
@@ -71,31 +108,37 @@ performance shares volgt de kostbasis dezelfde zienswijze als de KPI "Totaal ge�
 taart en cijfers elkaar niet tegenspreken. Posities met waarde 0 worden weggelaten (die
 vertekenen de taart).
 
+Herbouwen (niet enkel herstarten) via de knop "Herbouwen" in Home Assistant.
+
 ## 0.31.0
-- Het dagelijkse AI-advies bestaat nu uit twee duidelijk gescheiden luiken, en het dashboard
+Het dagelijkse AI-advies bestaat nu uit twee duidelijk gescheiden luiken, en het dashboard
 toont een dagresultaat per positie.
-  - Luik 1 - Portefeuilleadvies (dagelijks, 18:00). Ongewijzigd van opzet, maar strikt
+
+**Luik 1 - Portefeuilleadvies (dagelijks, 18:00).** Ongewijzigd van opzet, maar strikt
 afgebakend: het gaat nu UITSLUITEND over de aandelen die je al bezit, met (sterk) kopen /
 behouden / (sterk) verkopen per positie. De kop "Koopopportuniteiten" is uit dit advies
 verwijderd - die verhuist volledig naar luik 2. Zo blijven beide adviezen los van elkaar
 leesbaar en opvolgbaar.
-  - Luik 2 - Marktopportuniteiten (dagelijks, 07:45, nieuw). Elke werkdag vóór de opening
+
+**Luik 2 - Marktopportuniteiten (dagelijks, 07:45, nieuw).** Elke werkdag vóór de opening
 speurt de AI de WERELDWIJDE markt af naar nieuwe koopideeën buiten je portefeuille, op basis
 van bedrijfsprestaties en cijfers, vooruitzichten, macro-economische inzichten, geopolitiek
 en financiële berichtgeving. Per dag exact 6 voorstellen:
-    - 2x defensief (focus op groei en eventueel dividendrendement)
-    - 2x matig speculatief
-    - 2x sterk speculatief
-    - Elk idee komt met onderbouwing, katalysatoren, de belangrijkste risico's, een koersdoel op
+  - 2x defensief (focus op groei en eventueel dividendrendement)
+  - 2x matig speculatief
+  - 2x sterk speculatief
+Elk idee komt met onderbouwing, katalysatoren, de belangrijkste risico's, een koersdoel op
 12 maanden en een rating. Alles staat in drie visueel gescheiden blokken op de AI-pagina.
-- Live websearch voor luik 2. Zonder live zoekopdracht kan een taalmodel enkel uit zijn
+
+**Live websearch voor luik 2.** Zonder live zoekopdracht kan een taalmodel enkel uit zijn
 trainingskennis putten - "recente financiële berichtgeving" is dan per definitie verouderd.
 Luik 2 gebruikt daarom de websearch-tool van OpenAI (Responses-API), zodat het model zelf
 actuele koersen, resultaten en nieuws opzoekt. Ondersteunt je model de tool niet of faalt de
 call, dan valt de app stil terug op een gewoon advies op basis van trainingskennis - dat
 wordt dan expliciet gelogd én in de app gemeld, zodat je nooit denkt dat iets "live" is
 terwijl het dat niet is. Aan/uit via Instellingen -> AI.
-- Opvolging over 7 dagen, 1 maand en 3 maanden. Elk voorgesteld aandeel wordt bijgehouden
+
+**Opvolging over 7 dagen, 1 maand en 3 maanden.** Elk voorgesteld aandeel wordt bijgehouden
 in een nieuwe tabel market_ideas. Per periode toont de app per aandeel het GEMIDDELDE ADVIES:
 de ratings van die periode worden omgezet naar een score (sterk kopen +2, kopen +1, behouden
 0, verkopen -1, sterk verkopen -2), gemiddeld, en weer naar een label vertaald. Daarnaast:
@@ -103,7 +146,8 @@ hoe vaak het aandeel werd voorgesteld, in welke risicoklasse(n), de startkoers, 
 en het rendement sinds het eerste advies. Een nieuwe schedulerjob (dagelijks 22:30, na de
 Amerikaanse slotbel) volgt de koers van elk voorgesteld aandeel op, zodat dat rendement uit
 de database komt en de pagina zonder netwerkcalls laadt.
-- Dashboard: dagelijkse P/L per positie (nieuw). Een blok "Dagresultaat vandaag" toont per
+
+**Dashboard: dagelijkse P/L per positie (nieuw).** Een blok "Dagresultaat vandaag" toont per
 open positie de vorige slotkoers, de koers nu, het dagverschil in % en de dag-P/L in euro,
 plus een totaal, het aantal stijgers/dalers en de beste/zwakste naam van de dag. Referentie
 is de laatste koers die vóór vandaag is vastgelegd (de planner schrijft elke 5 minuten weg,
@@ -111,13 +155,17 @@ dus in de praktijk de slotkoers van de vorige beursdag). De omrekening naar euro
 de wisselkoers die al in de positie zit - geen extra FX-call. Let op: dit vult zich pas
 vanaf de eerste volledige dag dat de planner draait; posities zonder oudere koers worden
 netjes overgeslagen en onderaan de tabel benoemd.
-- Instellingen. Nieuw: aan/uit voor luik 2 en voor de live websearch. De AI-kostenpagina
+
+**Instellingen.** Nieuw: aan/uit voor luik 2 en voor de live websearch. De AI-kostenpagina
 splitst de nieuwe functie apart uit ("② Marktopportuniteiten"), zodat je ziet wat websearch
 kost.
 
+Herbouwen (niet enkel herstarten) via de knop "Herbouwen" in Home Assistant.
+
 ## 0.30.0
 Nieuwe koersbron + fors snellere app.
-- Euronext Live als vijfde koersbron (lost NL0015002RI2 op). De ING Markets-warrant
+
+**Euronext Live als vijfde koersbron (lost NL0015002RI2 op).** De ING Markets-warrant
 noteert enkel op Euronext Amsterdam en is onbekend bij alle vier de Duitse platformen
 (onvista, Tradegate, Lang & Schwarz, Boerse Frankfurt) en bij Yahoo. Euronext Live heeft
 sleutelloze JSON-endpoints (dezelfde die live.euronext.com zelf gebruikt): een
@@ -131,8 +179,9 @@ update via Activa -> ISIN-check of wacht een koersrondje van de scheduler af; de
 toont dan geen "Geen koers gevonden voor: NL0015002RI2" meer. Endpoints zijn onofficieel
 (kunnen ooit wijzigen) en volledig defensief afgehandeld: elk afwijkend antwoord wordt
 gelogd en de volgende bron neemt het gewoon over.
-- App laadt vrijwel meteen: koersen komen nu uit de database i.p.v. live tijdens het
-renderen. De scheduler schrijft elke 5 minuten al verse koersen naar price_history
+
+**App laadt vrijwel meteen: koersen komen nu uit de database i.p.v. live tijdens het
+renderen.** De scheduler schrijft elke 5 minuten al verse koersen naar price_history
 (apart proces), maar de app haalde bij elk verstrijken van de cache ALLES opnieuw live
 en een voor een op - bij elke ticker eerst Yahoo (traag info-object) en voor effecten
 zonder Yahoo-notering ook nog de volledige bronnenketen met timeouts. Dat blokkeerde de
@@ -141,21 +190,27 @@ recentste opgeslagen koers (nieuwe gebatchte query get_latest_prices: 1 query i.
 per ticker) en accepteert die tot 20 minuten oud; enkel ontbrekende/verouderde tickers
 worden nog live opgehaald. In de praktijk: geen enkele netwerkcall meer tijdens het
 laden zolang de scheduler draait.
-- Live ophalen is voortaan parallel. Als er toch live gehaald moet worden (scheduler,
+
+**Live ophalen is voortaan parallel.** Als er toch live gehaald moet worden (scheduler,
 ontbrekende koersen, of via de knop "Ververs prijzen") gebeurt dat nu met maximaal 8
 gelijktijdige workers i.p.v. serieel: de totale duur wordt ongeveer die van het traagste
 effect i.p.v. de som van allemaal. Boerse-Frankfurt-calls zijn daarbij geserialiseerd
 met een lock (gedeelde sessie + salt-status zijn niet thread-safe); de 403-retry roept
 intern de locked-variant aan om een deadlock te vermijden.
-- "Ververs prijzen" forceert nu echt een live rondje. De knop leegde enkel de
+
+**"Ververs prijzen" forceert nu echt een live rondje.** De knop leegde enkel de
 Streamlit-cache; met de nieuwe DB-first-logica zou hij anders gewoon de opgeslagen
 scheduler-koersen herlezen. Hij zet nu eenmalig live=True (met spinner) en leegt ook de
 in-memory koerscache van market_data.
-- init_db draait nog maar een keer per proces. Streamlit voert app.py bij elke
+
+**init_db draait nog maar een keer per proces.** Streamlit voert app.py bij elke
 interactie volledig opnieuw uit; alle CREATE TABLE's en migratiechecks (PRAGMA
 table_info per tabel) liepen dus bij elke klik mee. Nu via cache_resource eenmalig.
 
+Herbouwen (niet enkel herstarten) via de knop "Herbouwen" in Home Assistant.
+
 ## 0.29.2
+0.29.2
 - Analyse van de aangeleverde log: het antwoord op "welke ticker faalt consequent" is zo goed als
 zeker NL0015002RI2 (de ING-warrant). Ze faalt op alle vier externe bronnen (onvista, Börse
 Frankfurt, Tradegate, Lang & Schwarz) én kan niet terugvallen op 'ticker rechtstreeks op Yahoo',
