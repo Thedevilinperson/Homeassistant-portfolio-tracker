@@ -32,13 +32,33 @@ MAX_TOKENS = 1800
 # Dit zijn schattingen voor kostenraming; de echte factuur staat op je
 # OpenAI-dashboard. Pas indien nodig aan bij prijswijzigingen.
 DEFAULT_MODEL_PRICING = {
-    "gpt-4.1":      (2.00, 8.00),
-    "gpt-4.1-mini": (0.40, 1.60),
-    "gpt-4.1-nano": (0.10, 0.40),
+    # GPT-5.6 (nieuwste familie)
+    "gpt-5.6-sol":   (5.00, 30.00),
+    "gpt-5.6-terra": (2.50, 15.00),
+    "gpt-5.6-luna":  (1.00,  6.00),
+    # GPT-5.5
+    "gpt-5.5":       (5.00, 30.00),
+    "gpt-5.5-pro":  (30.00, 180.00),
+    # GPT-5.4
+    "gpt-5.4":       (2.50, 15.00),
+    "gpt-5.4-mini":  (0.75,  4.50),
+    "gpt-5.4-nano":  (0.20,  1.25),
+    "gpt-5.4-pro":  (30.00, 180.00),
+    # Vorige generatie (blijven werken; goedkoopste opties)
+    "gpt-4.1":      (2.00,  8.00),
+    "gpt-4.1-mini": (0.40,  1.60),
+    "gpt-4.1-nano": (0.10,  0.40),
     "gpt-4o":       (2.50, 10.00),
-    "gpt-4o-mini":  (0.15, 0.60),
+    "gpt-4o-mini":  (0.15,  0.60),
 }
-_DEFAULT_PRICE = (0.40, 1.60)  # fallback ~ gpt-4.1-mini
+_DEFAULT_PRICE = (0.40, 1.60)  # terugval ~ gpt-4.1-mini
+
+# Websearch-tool (luik 2). OpenAI rekent per 1000 tool-oproepen; de opgehaalde
+# zoekinhoud wordt bovendien als input-tokens aangerekend (behalve bij de
+# 'preview'-variant op niet-redenerende modellen, waar de zoekinhoud gratis is maar
+# de oproep duurder). Dit is dus een RAMING, geen factuur.
+WEBSEARCH_COST_PER_CALL = 0.025   # USD, preview-tool op een niet-redenerend model
+WEBSEARCH_EXTRA_INPUT_TOKENS = 8000   # zoekinhoud die als input meetelt
 
 
 def get_model_pricing() -> dict:
@@ -119,12 +139,64 @@ def refresh_model_prices() -> dict:
     return {"error": None, "updated": updated, "unchanged": unchanged}
 
 AVAILABLE_MODELS = {
-    "gpt-4.1-mini":  "GPT-4.1 Mini — aanbevolen (snel, kostenefficiënt, sterk)",
-    "gpt-4.1":       "GPT-4.1 — hoogste kwaliteit, hogere kost",
-    "gpt-4.1-nano":  "GPT-4.1 Nano — snelst en goedkoopst, minder diepgang",
-    "gpt-4o-mini":   "GPT-4o Mini — alternatief (oudere generatie)",
-    "gpt-4o":        "GPT-4o — alternatief flagship (oudere generatie)",
+    "gpt-5.6-terra": "GPT-5.6 Terra — aanbevolen: sterk en betaalbaar",
+    "gpt-5.6-sol":   "GPT-5.6 Sol — hoogste kwaliteit van de nieuwste familie",
+    "gpt-5.6-luna":  "GPT-5.6 Luna — goedkoop instapmodel van de nieuwste familie",
+    "gpt-5.5":       "GPT-5.5 — vorige vlaggenschip",
+    "gpt-5.5-pro":   "GPT-5.5 Pro — diepste redenering, fors duurder",
+    "gpt-5.4":       "GPT-5.4 — beproefd werkpaard",
+    "gpt-5.4-mini":  "GPT-5.4 Mini — goedkoper, iets minder diepgang",
+    "gpt-5.4-nano":  "GPT-5.4 Nano — snelst en zeer goedkoop",
+    "gpt-5.4-pro":   "GPT-5.4 Pro — diepe redenering, fors duurder",
+    "gpt-4.1-mini":  "GPT-4.1 Mini — oudere generatie, zeer goedkoop",
+    "gpt-4.1":       "GPT-4.1 — oudere generatie",
+    "gpt-4.1-nano":  "GPT-4.1 Nano — goedkoopste van allemaal",
+    "gpt-4o-mini":   "GPT-4o Mini — oudere generatie",
+    "gpt-4o":        "GPT-4o — oudere generatie",
 }
+
+# Richtwaarden voor het tokengebruik per AI-functie, gebruikt om de kost per oproep te
+# ramen zolang er nog geen echte meting is. Zodra de functie een keer gedraaid heeft,
+# wordt het GEMETEN gemiddelde uit ai_usage gebruikt (zie estimate_call_cost).
+TYPICAL_CALL_TOKENS = {
+    "daily_advice":   (2500, 4000),   # portefeuille-JSON in, tekst + rating per positie uit
+    "market_ideas":   (1500, 3500),   # compacte prompt in, 6 onderbouwde ideeën uit
+    "tax_optimization": (2500, 1500),
+    "price_target":   (500, 300),
+}
+
+
+def estimate_call_cost(function: str, model: str, websearch: bool = False) -> dict:
+    """Geraamde kost van ÉÉN oproep van een AI-functie met een bepaald model (USD).
+
+    Gebruikt bij voorkeur het GEMETEN gemiddelde tokengebruik van die functie (uit de
+    ai_usage-tabel); is er nog geen historiek, dan een richtwaarde. Bij luik 2 met
+    websearch komt daar de kost van de zoekoproep bij, plus de opgehaalde zoekinhoud
+    die als input-tokens wordt aangerekend.
+
+    Dit blijft een RAMING: het echte verbruik hangt af van de grootte van je
+    portefeuille en van hoe uitgebreid het model antwoordt. De echte factuur staat op
+    je OpenAI-dashboard."""
+    pin, pout = get_model_pricing().get(model, _DEFAULT_PRICE)
+    tin, tout = TYPICAL_CALL_TOKENS.get(function, (1500, 1500))
+    measured = False
+    try:
+        avg = db.get_ai_usage_avg(function)
+        if avg and avg["n"] > 0 and (avg["pt"] or avg["ct"]):
+            tin, tout = int(avg["pt"]), int(avg["ct"])
+            measured = True
+    except Exception as exc:
+        logger.warning(f"estimate_call_cost: gemiddeld verbruik niet gelezen ({exc})")
+
+    tool_cost = 0.0
+    if websearch:
+        tin += WEBSEARCH_EXTRA_INPUT_TOKENS
+        tool_cost = WEBSEARCH_COST_PER_CALL
+
+    token_cost = (tin / 1_000_000) * pin + (tout / 1_000_000) * pout
+    return {"model": model, "in_tokens": tin, "out_tokens": tout,
+            "token_cost": token_cost, "tool_cost": tool_cost,
+            "total": token_cost + tool_cost, "measured": measured}
 
 # Beleggingsprofielen (per rekening instelbaar)
 PROFILE_LABELS = {
@@ -881,7 +953,10 @@ def generate_market_opportunities() -> dict:
     if not ai_function_enabled("market"):
         return {"error": "Het dagelijkse marktadvies (luik 2) staat uit. "
                          "Schakel het in via ⚙️ Instellingen → AI."}
-    client, model = _get_client()
+    # Luik 2 heeft een EIGEN model: marktonderzoek met websearch vraagt vaak meer
+    # redeneervermogen dan het beoordelen van je eigen posities, en je wilt die keuze
+    # (en die kost) los kunnen maken van luik 1. Leeg = hetzelfde model als luik 1.
+    client, model = _get_client("openai_market_model")
     if not client:
         return {"error": "Geen OpenAI API-sleutel geconfigureerd."}
 

@@ -10,6 +10,7 @@ Structurelere aanpassingen
 wachten tot warrants zijn opgelost - koersen van posities die in de gehele portfolio op 0 staan, moeten niet meer opgehaald worden
 
 
+
 Bugs
 
 Aanpak/designvragen

@@ -2,6 +2,44 @@
 
 Alle noemenswaardige wijzigingen aan de Portfolio Tracker add-on.
 
+## 0.34.0
+Eigen model voor luik 2, kostenraming per oproep, actuele modellen, en getallen zonder
+overbodige nullen.
+
+**Apart model voor luik 2 (marktopportuniteiten).** Marktonderzoek met live websearch vraagt
+vaak ander redeneervermogen dan het beoordelen van je eigen posities - en je wilt die kost los
+kunnen sturen. Er is nu een aparte keuze "② Model voor marktopportuniteiten" (instelling
+openai_market_model). Laat je ze leeg, dan valt luik 2 gewoon terug op het model van luik 1.
+
+**Modellen bijgewerkt naar de actuele OpenAI-catalogus**, met de prijzen van de officiële
+prijspagina (opgehaald op 12/07/2026, USD per 1M tokens, standaardtarief, korte context):
+  - GPT-5.6: Sol $5/$30 · Terra $2,50/$15 · Luna $1/$6
+  - GPT-5.5 $5/$30 · GPT-5.5 Pro $30/$180
+  - GPT-5.4 $2,50/$15 · Mini $0,75/$4,50 · Nano $0,20/$1,25 · Pro $30/$180
+  - De vorige generatie (GPT-4.1 / 4o) blijft beschikbaar als goedkope optie.
+Standaardkeuze voor nieuwe installaties is GPT-5.6 Terra (sterk en betaalbaar). De maandelijkse
+prijsverversing blijft werken en overschrijft deze richtprijzen zodra ze wijzigen.
+
+**Kostenraming per oproep, per model.** Nieuwe uitklapper bij ⚙️ Instellingen → AI: voor élk
+model de geraamde kost van één oproep van luik ①, luik ② en het belastingadvies, plus een ruwe
+maandraming (21 werkdagen). Belangrijk: zodra een functie een keer gedraaid heeft, wordt het
+GEMETEN gemiddelde tokengebruik uit je eigen historiek gebruikt in plaats van een richtwaarde -
+de raming wordt dus vanzelf accurater. Voor luik ② is ook de websearch-oproep meegerekend
+($0,025 per oproep) plus de opgehaalde zoekinhoud, die als input-tokens wordt aangerekend. Het
+blijft een raming; de echte factuur staat op je OpenAI-dashboard.
+
+**Getallen zonder overbodige nullen.** Gehele getallen tonen niet langer nullen achter de komma:
+€100 in plaats van €100,00, +5% in plaats van +5,00%, 10 stuks in plaats van 10,0000. Dit geldt
+zowel voor de metrics en bijschriften (eur/pct/num) als voor alle tabellen (kolomformaat %.10g,
+met afronding op 4 decimalen zodat afrondingsruis geen eindeloze decimalen oplevert).
+
+Let op: dit trimt ALLE overbodige nullen, dus ook €100,50 wordt €100,5. Dat is bewust: de
+tabellen doen dat sowieso, en anders zou dezelfde waarde er in een metric anders uitzien dan in
+een tabel. Wil je liever dat bedragen altijd twee decimalen houden (€100 maar €100,50), zeg het
+- dat is één regel in _trim_zeros.
+
+Herbouwen (niet enkel herstarten) via de knop "Herbouwen" in Home Assistant.
+
 ## 0.33.2
 Euronext: instrument gevonden, koers nu ook. Plus strengere validatie en een label-diagnose in
 de log.

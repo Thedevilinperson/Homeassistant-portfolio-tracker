@@ -813,6 +813,20 @@ def record_ai_usage(function, model, prompt_tokens, completion_tokens, cost_usd)
     conn.close()
 
 
+def get_ai_usage_avg(function: str) -> dict | None:
+    """Gemiddeld tokengebruik per oproep voor één AI-functie (uit de echte historiek).
+    Basis voor een realistische kostenraming per model. None als er nog geen oproepen zijn."""
+    conn = get_connection()
+    row = conn.execute(
+        """SELECT COUNT(*) n, AVG(prompt_tokens) pt, AVG(completion_tokens) ct
+           FROM ai_usage WHERE function=?""", (function,)
+    ).fetchone()
+    conn.close()
+    if not row or not row["n"]:
+        return None
+    return {"n": row["n"], "pt": row["pt"] or 0, "ct": row["ct"] or 0}
+
+
 def get_ai_usage_summary() -> dict:
     """Totale en maandelijkse AI-kosten + uitsplitsing per model."""
     conn = get_connection()
