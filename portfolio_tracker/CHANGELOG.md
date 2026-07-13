@@ -2,6 +2,55 @@
 
 Alle noemenswaardige wijzigingen aan de Portfolio Tracker add-on.
 
+## 0.35.0
+Eigen wisselkoers per transactie, filters die een herlaad overleven, en de TOB-fout op vreemde
+munten gevonden én herstelbaar gemaakt.
+
+**De TOB-fout op vreemde munten: gevonden.** Je vermoeden klopte. De TOB-berekening zelf was
+altijd correct (ze rekent op de EUR-tegenwaarde), maar de EUR-tegenwaarde niet. In compute_eur
+stond:  rate = get_historical_exchange_rate(...) or 1.0.  Lukte die lookup niet (netwerkhapering
+bij het opslaan), dan werd de koers stilzwijgend 1,0 en was het "EUR-bedrag" gewoon het bedrag
+in USD - waarna 0,35% op dat USD-bedrag werd berekend. Voorbeeld: 10 x $200 aan koers 0,92 =
+EUR 1.840, TOB EUR 6,44. Met de stille 1,0 werd dat EUR 7,00. Een koers van 1,0 is voor geen
+enkele vreemde munt een verdedigbare terugval; voor bv. JPY zou de fout gigantisch zijn.
+
+Opgelost met een expliciete bronketen: eigen koers -> historische koers -> actuele koers (met
+waarschuwing) -> None. Nooit meer stilzwijgend 1,0. Kan er geen enkele koers gevonden worden,
+dan weigert de app op te slaan en vraagt ze om je eigen koers. Dezelfde correctie in
+bulk_import.py.
+
+**Herberekenen (💰 Transacties -> "TOB en EUR-tegenwaarde controleren/herberekenen").** Toont
+eerst een VOORBEELD: per transactie de oude en nieuwe koers, EUR-tegenwaarde en TOB, plus het
+verschil in totale TOB. Transacties waarvan de opgeslagen TOB exact overeenkomt met het tarief
+toegepast op het bedrag in vreemde munt, worden gemarkeerd met 🚩 - dat is precies de oude fout.
+Pas na een expliciet vinkje wordt er iets weggeschreven. Lijnen met een eigen wisselkoers of een
+handmatige TOB blijven ongemoeid.
+
+**Eigen wisselkoers per transactie.** Nieuw vinkje "Eigen wisselkoers gebruiken (koers van je
+broker)" in het transactieformulier, met de afwijking t.o.v. de marktkoers erbij. De koers wordt
+opgeslagen (kolom fx_manual) en blijft voorgoed bij die transactie: geen enkele herberekening
+overschrijft ze nog. Ook instelbaar in de tabel (kolommen "FX-koers" en "FX eigen"), en een
+koers in een bulk-importbestand wordt automatisch als eigen koers behandeld.
+
+Met een uitdrukkelijke waarschuwing: **tel de auto-FX-kosten niet dubbel.** Zit de wisselmarge
+van je broker al verwerkt IN die koers (auto-FX), voeg ze dan niet ook nog eens toe bij
+"Transactiekosten" - anders trek je ze twee keer af van je rendement. Rekent je broker de
+wisselkost als een aparte lijn aan (en gebruikt hij de zuivere marktkoers), zet ze dan wel bij
+de kosten en gebruik de marktkoers.
+
+**TOB manueel aanpasbaar in de tabel.** De kolom "TOB €" was read-only. Ze is nu bewerkbaar;
+pas je ze aan, dan wordt "TOB eigen" automatisch aangevinkt en laat de herberekening die lijn
+met rust.
+
+**Filters en keuzes overleven een herlaad.** Streamlit gooit zijn session_state weg bij een
+refresh van de pagina, waardoor elke filter terugsprong naar de standaardwaarde. Filters en
+keuzes worden nu in de database bewaard (sleutel ui_state) en bij het opbouwen van de widget
+opnieuw ingesteld: rekeningfilter, sectiekeuzes, de filters op de transactiepagina (activum,
+type, jaar, rekening), de taartbasis, de opvolgperiode van luik 2. Verdwijnt een optie (bv. een
+verwijderde rekening), dan valt de app netjes terug op de standaardwaarde.
+
+Herbouwen (niet enkel herstarten) via de knop "Herbouwen" in Home Assistant.
+
 ## 0.34.1
 Drie fixes: de 400-fout op nieuwe modellen, geen koersen meer voor gesloten posities, en de app
 stopt met proberen na 10 mislukte ophalingen.

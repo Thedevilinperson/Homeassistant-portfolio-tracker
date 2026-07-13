@@ -14,9 +14,12 @@ from datetime import datetime, date
 
 import pandas as pd
 
+import logging
 import database as db
 import market_data as md
 import belgian_tax as tax
+
+logger = logging.getLogger(__name__)
 
 
 # ── Kolomdefinities (voor de template en de instructies) ──────────────────────
@@ -125,11 +128,26 @@ def _norm_type(v) -> str | None:
 
 
 def _compute_eur(amount, currency, date_str):
-    """(fx_rate, eur_bedrag) op datum; valt terug op 1.0 bij EUR/fout."""
+    """(fx_rate, eur_bedrag) op datum.
+
+    Zelfde correctie als in app.py: NOOIT stilzwijgend terugvallen op koers 1,0 — dan
+    zou het 'EUR-bedrag' gewoon het bedrag in vreemde munt zijn en werd de TOB (0,35%)
+    op dat vreemde bedrag berekend. Lukt de historische koers niet, dan gebruiken we de
+    actuele koers als benadering (met een waarschuwing in de log); lukt ook dat niet,
+    dan geven we (None, None) terug zodat de import de rij als probleem meldt in plaats
+    van een fout bedrag weg te schrijven."""
     if not amount or currency == "EUR":
         return 1.0, float(amount or 0.0)
-    rate = md.get_historical_exchange_rate(currency, str(date_str), "EUR") or 1.0
-    return rate, float(amount) * rate
+    rate = md.get_historical_exchange_rate(currency, str(date_str), "EUR")
+    if not rate:
+        rate = md.get_exchange_rate(currency, "EUR")
+        if rate:
+            logger.warning(f"_compute_eur({currency},{date_str}): historische koers niet "
+                           "beschikbaar — benaderd met de actuele koers.")
+    if not rate:
+        logger.error(f"_compute_eur({currency},{date_str}): geen wisselkoers gevonden.")
+        return None, None
+    return float(rate), float(amount) * float(rate)
 
 
 # ── Inlezen + valideren ───────────────────────────────────────────────────────
@@ -285,7 +303,8 @@ def parse_workbook(file) -> dict:
 def apply_import(parsed: dict) -> dict:
     """Voer de geparste, gevalideerde rijen in de database in. Maakt ontbrekende
     activa aan. Geeft een samenvatting met aantallen terug."""
-    summary = {"assets": 0, "transacties": 0, "dividenden": 0, "kosten": 0}
+    summary = {"assets": 0, "transacties": 0, "dividenden": 0, "kosten": 0, "errors": []}
+    errors = summary["errors"]
 
     # 1) Ontbrekende activa aanmaken
     for tk, info in parsed.get("new_assets", {}).items():
@@ -304,12 +323,21 @@ def apply_import(parsed: dict) -> dict:
     # 2) Transacties
     for r in parsed.get("transacties", []):
         info = a_info.get(r["ticker"], {})
+        # Een koers in het bestand = JOUW koers (die van je broker): die blijft bij de
+        # transactie hangen en wordt niet overschreven door een latere herberekening.
         fx = r["fx_rate_in"]
+        fx_manual = 1 if fx is not None else 0
         if fx is None:
             fx, tot_eur = _compute_eur(r["total_amount"], r["currency"], r["date"])
         else:
             tot_eur = r["total_amount"] * fx
+        if fx is None or tot_eur is None:
+            errors.append(f"{r['ticker']} {r['date']}: geen wisselkoers voor {r['currency']} — "
+                          "vul een eigen koers in (kolom fx_rate) of voeg de transactie "
+                          "handmatig toe.")
+            continue
         _, costs_eur = _compute_eur(r["costs"], r["costs_currency"], r["date"])
+        costs_eur = costs_eur or 0.0
         if r["performance_share"]:
             tob = 0.0
         else:
@@ -323,7 +351,8 @@ def apply_import(parsed: dict) -> dict:
                            total_amount_eur=tot_eur, costs_eur=costs_eur,
                            price_target=r["price_target"],
                            is_performance_share=int(r["performance_share"]),
-                           income_tax_eur=r["income_tax_eur"])
+                           income_tax_eur=r["income_tax_eur"],
+                           fx_manual=fx_manual)
         summary["transacties"] += 1
 
     # 3) Dividenden (keten aanvullen met tarieven, EUR via fx)

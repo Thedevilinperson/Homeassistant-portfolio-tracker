@@ -34,6 +34,8 @@ logging.basicConfig(
     handlers=[logging.StreamHandler(sys.stdout)],
 )
 
+logger = logging.getLogger("app")
+
 # ── Pagina-configuratie ───────────────────────────────────────────────────────
 
 st.set_page_config(
@@ -219,11 +221,14 @@ def daily_pl(pv: dict) -> dict:
 
 
 def _section_radio(key: str, labels: list) -> str:
-    """Blijvende sectiekeuze i.p.v. st.tabs. Anders dan st.tabs onthoudt dit de
-    gekozen sectie over reruns heen (bv. na het kiezen van een filter), zodat de
-    weergave niet terugspringt naar het eerste tabblad."""
-    return st.radio("sectie", labels, key=key, horizontal=True,
-                    label_visibility="collapsed")
+    """Blijvende sectiekeuze i.p.v. st.tabs. Anders dan st.tabs onthoudt dit de gekozen
+    sectie over reruns heen (bv. na het kiezen van een filter), zodat de weergave niet
+    terugspringt naar het eerste tabblad — en sinds 0.35 ook over een HERLAAD van de app
+    heen (de keuze wordt in de database bewaard)."""
+    sticky(key, labels[0], labels)
+    out = st.radio("sectie", labels, key=key, horizontal=True, label_visibility="collapsed")
+    sticky_save(key)
+    return out
 
 
 def asset_name_map() -> dict:
@@ -450,20 +455,121 @@ def render_realized_history(realized_list, names=None, empty_msg="Nog geen gerea
     st.caption(f"Totaal gerealiseerde W/V (deze selectie, alle jaren): **{eur(tot)}**")
 
 
-def compute_eur(amount: float, currency: str, date_str: str) -> tuple[float, float]:
-    """(fx_rate, eur_bedrag) op transactiedatum. Valt terug op 1.0 bij EUR/fout."""
+def fx_lookup(currency: str, date_str: str) -> tuple[float | None, str]:
+    """(koers, bron) voor native -> EUR op een datum.
+
+    bron: 'eur' | 'historisch' | 'actueel' (historische koers niet beschikbaar,
+    benaderd met de koers van vandaag) | 'onbekend'.
+
+    Waarom dit bestaat: hier zat de TOB-bug. De oude code deed
+    `get_historical_exchange_rate(...) or 1.0`. Faalde die lookup (netwerkhapering),
+    dan werd de koers stilzwijgend 1,0 en was het 'EUR-bedrag' gewoon het bedrag in
+    USD — waarna de TOB van 0,35% op dat USD-bedrag werd berekend. Een koers van 1,0
+    is voor géén enkele vreemde munt een verdedigbare terugval. Nu wordt er nooit
+    stilzwijgend 1,0 gebruikt: lukt de historische koers niet, dan gebruiken we de
+    actuele koers (en zeggen we dat), en lukt ook dat niet, dan geven we None terug
+    zodat de aanroeper om een eigen koers moet vragen."""
+    if not currency or currency == "EUR":
+        return 1.0, "eur"
+    rate = md.get_historical_exchange_rate(currency, str(date_str), "EUR")
+    if rate:
+        return float(rate), "historisch"
+    rate = md.get_exchange_rate(currency, "EUR")
+    if rate:
+        logger.warning(f"fx_lookup({currency},{date_str}): historische koers niet beschikbaar — "
+                       "benaderd met de actuele koers. Geef bij voorkeur je eigen koers in.")
+        return float(rate), "actueel"
+    logger.warning(f"fx_lookup({currency},{date_str}): geen enkele wisselkoers beschikbaar.")
+    return None, "onbekend"
+
+
+def compute_eur(amount: float, currency: str, date_str: str,
+                fx_override: float | None = None) -> tuple[float | None, float | None]:
+    """(fx_rate, eur_bedrag) op transactiedatum. fx_override (je eigen brokerkoers) heeft
+    altijd voorrang. Geeft (None, None) als er geen enkele koers te vinden is — zie
+    fx_lookup voor waarom er nooit stilzwijgend op 1,0 wordt teruggevallen."""
     if not amount or currency == "EUR":
         return 1.0, float(amount or 0.0)
-    rate = md.get_historical_exchange_rate(currency, str(date_str), "EUR") or 1.0
+    if fx_override:
+        return float(fx_override), float(amount) * float(fx_override)
+    rate, _src = fx_lookup(currency, date_str)
+    if rate is None:
+        return None, None
     return rate, float(amount) * rate
+
+
+# ── Filters en keuzes onthouden over een herlaad heen ────────────────────────
+# Streamlit gooit session_state weg bij een refresh van de pagina. Filters (rekening,
+# jaar, type, ...) en keuzes (zienswijze, taartbasis, ...) worden daarom in de database
+# bewaard onder de sleutel 'ui_state' en bij het opbouwen van de widget opnieuw als
+# beginwaarde gezet. Zo staat de app na een herlaad nog precies zoals je ze had.
+
+@st.cache_data(ttl=5, show_spinner=False)
+def _ui_state() -> dict:
+    try:
+        raw = db.get_setting("ui_state", "")
+        return json.loads(raw) if raw else {}
+    except Exception:
+        return {}
+
+
+def _ui_save(key: str, value):
+    """Bewaar één widgetwaarde; schrijft enkel weg als ze effectief wijzigde."""
+    try:
+        state = dict(_ui_state())
+        if state.get(key) == value:
+            return
+        state[key] = value
+        db.set_setting("ui_state", json.dumps(state))
+        _ui_state.clear()
+    except Exception as exc:
+        logger.warning(f"_ui_save({key}): {exc}")
+
+
+def sticky(key: str, fallback, options=None):
+    """Beginwaarde voor een widget met deze key: de bewaarde keuze, anders 'fallback'.
+
+    Roep dit aan VÓÓR de widget. De widget zelf zet st.session_state[key]; die waarde
+    lezen we na afloop terug met sticky_save(). options (indien gegeven) filtert waarden
+    weg die intussen niet meer bestaan — bv. een rekening die je verwijderd hebt."""
+    if key in st.session_state:
+        return st.session_state[key]
+    val = _ui_state().get(key, fallback)
+    if options is not None:
+        if isinstance(val, list):
+            val = [v for v in val if v in options]
+        elif val not in options:
+            val = fallback
+    st.session_state[key] = val
+    return val
+
+
+def sticky_save(key: str):
+    """Bewaar de huidige waarde van de widget met deze key."""
+    if key in st.session_state:
+        v = st.session_state[key]
+        _ui_save(key, list(v) if isinstance(v, (tuple, set)) else v)
+
+
+def sticky_select(label, options, key, fallback=None, widget="selectbox", **kw):
+    """selectbox / radio / multiselect die zijn keuze onthoudt over een herlaad heen."""
+    fb = fallback if fallback is not None else ([] if widget == "multiselect" else options[0])
+    sticky(key, fb, options)
+    fn = {"selectbox": st.selectbox, "radio": st.radio,
+          "multiselect": st.multiselect}[widget]
+    out = fn(label, options, key=key, **kw)
+    sticky_save(key)
+    return out
 
 
 def account_filter_widget(key: str):
     """Multiselect van rekeningen. Lege selectie = alle rekeningen.
-    Retourneert een tuple (cachebaar) of None."""
+    Retourneert een tuple (cachebaar) of None. De keuze wordt onthouden over een
+    herlaad van de app heen."""
     opts = db.get_accounts()
-    sel = st.multiselect("Rekeningen", opts, default=[], key=key,
-                         placeholder="Alle rekeningen")
+    sticky(key, [], opts)
+    sel = st.multiselect("Rekeningen", opts, key=key, placeholder="Alle rekeningen")
+    sticky_save(key)
     return tuple(sel) if sel else None
 
 
@@ -612,6 +718,59 @@ def _recompute_dividend_chain(divs, rv_rate: float, include_manual: bool = False
             # Herberekende lijn is per definitie niet langer een handmatige correctie.
             manual_override=0)
     return changes
+
+
+def _recompute_tob_preview(txns: list[dict], ainfo: dict) -> tuple[list[dict], int]:
+    """Welke transacties hebben een verkeerde EUR-tegenwaarde en/of TOB?
+
+    Herberekent per transactie de wisselkoers (historisch), de EUR-tegenwaarde en de TOB
+    daarop, en vergelijkt met wat er opgeslagen staat. Lijnen met een EIGEN wisselkoers
+    (fx_manual) of een HANDMATIGE TOB (tob_manual) worden overgeslagen — die heb je
+    bewust zo gezet.
+
+    'verdacht' markeert de oude fout expliciet: de opgeslagen TOB komt (bijna) exact
+    overeen met het tarief toegepast op het bedrag in VREEMDE MUNT i.p.v. op de
+    EUR-tegenwaarde. Dat gebeurde wanneer de koers stilzwijgend 1,0 werd.
+    Geeft (wijzigingen, aantal_verdacht) terug; schrijft niets weg."""
+    changes, suspect = [], 0
+    for t in txns:
+        if t.get("fx_manual") or t.get("tob_manual") or t.get("is_performance_share"):
+            continue
+        cur = t.get("currency") or "EUR"
+        if cur == "EUR":
+            continue   # zonder vreemde munt kan de FX-fout niet optreden
+        new_fx, _src = fx_lookup(cur, t["date"])
+        if not new_fx:
+            continue   # geen koers beschikbaar: niets om mee te herberekenen
+        native = float(t["total_amount"])
+        new_eur = round(native * new_fx, 2)
+        info = ainfo.get(t["ticker"], {})
+        new_tob = tax_mod.calculate_tob(info.get("asset_type", "stock"),
+                                        info.get("etf_subtype", "distributing"), new_eur,
+                                        bool(info.get("belgian_registered", 1)),
+                                        txn_date=t["date"])
+        old_tob = round(float(t.get("tob_tax") or 0), 2)
+        old_eur = round(float(t.get("total_amount_eur") or native), 2)
+        old_fx = round(float(t.get("fx_rate") or 1.0), 6)
+        if abs(new_tob - old_tob) < 0.01 and abs(new_eur - old_eur) < 0.01:
+            continue
+
+        # Verdacht = de TOB is berekend op het NATIVE bedrag (de oude bug)
+        tob_on_native = tax_mod.calculate_tob(info.get("asset_type", "stock"),
+                                              info.get("etf_subtype", "distributing"), native,
+                                              bool(info.get("belgian_registered", 1)),
+                                              txn_date=t["date"])
+        verdacht = abs(old_tob - tob_on_native) < 0.01 and abs(tob_on_native - new_tob) >= 0.01
+        if verdacht:
+            suspect += 1
+        changes.append({
+            "id": t["id"], "datum": t["date"][:10], "ticker": t["ticker"], "munt": cur,
+            "oud_fx": old_fx, "nieuw_fx": round(new_fx, 6),
+            "oud_eur": old_eur, "nieuw_eur": new_eur,
+            "oud_tob": old_tob, "nieuw_tob": new_tob,
+            "verdacht": verdacht,
+        })
+    return changes, suspect
 
 
 def _date_or_none(s: str):
@@ -905,11 +1064,13 @@ def page_dashboard():
             st.caption("Geen open posities om grafisch te tonen voor deze selectie.")
         # Taartdiagram: verdeling op huidige waarde óf op geïnvesteerd kapitaal
         PIE_VALUE, PIE_COST = "💰 Huidige waarde", "📥 Geïnvesteerd kapitaal"
+        sticky("dash_pie_basis", PIE_VALUE, [PIE_VALUE, PIE_COST])
         pie_basis = st.radio("Verdeling volgens", [PIE_VALUE, PIE_COST], horizontal=True,
                              key="dash_pie_basis", label_visibility="collapsed",
                              help="Huidige waarde = wat de posities vandaag waard zijn (dus mee "
                                   "bepaald door koersbewegingen). Geïnvesteerd kapitaal = de "
                                   "kostbasis, dus hoe je je geld effectief hebt verdeeld.")
+        sticky_save("dash_pie_basis")
         on_cost = pie_basis == PIE_COST
 
         names_map = {a["ticker"]: a.get("name", a["ticker"]) for a in assets}
@@ -2095,7 +2256,61 @@ def page_transactions():
                                "Geen TOB, geen cash-uitgave.")
 
         asset_info = assets_map.get(ticker, {})
-        _fx_prev, _eur_prev = compute_eur(total_amount, currency, txn_date)
+
+        # ── Wisselkoers ──────────────────────────────────────────────────────
+        # De TOB is een Belgische heffing op de EUR-tegenwaarde, dus de koers bepaalt
+        # rechtstreeks hoeveel TOB je betaalt. Brokers hanteren vaak hun EIGEN koers
+        # (soms met een auto-FX-marge erin verwerkt); die hoort bij de transactie.
+        fx_manual = 0
+        fx_override = None
+        if currency != "EUR":
+            _mkt_fx, _fx_src = fx_lookup(currency, txn_date)
+            if _fx_src == "historisch":
+                st.caption(f"💱 Marktkoers op {txn_date}: **1 {currency} = "
+                           f"{_mkt_fx:.6g} EUR**")
+            elif _fx_src == "actueel":
+                st.warning(f"💱 De historische koers voor {txn_date} is niet beschikbaar; "
+                           f"de app gebruikt de **actuele** koers (1 {currency} = "
+                           f"{_mkt_fx:.6g} EUR) als benadering. Geef hieronder liever de koers "
+                           "van je broker in — dat is toch de koers die je écht betaald hebt.")
+            else:
+                st.error(f"💱 Geen enkele wisselkoers gevonden voor {currency}. Geef hieronder "
+                         "je eigen koers in, anders kunnen de EUR-tegenwaarde en de TOB niet "
+                         "correct berekend worden.")
+
+            fx_manual = int(st.checkbox(
+                "💱 Eigen wisselkoers gebruiken (koers van je broker)",
+                value=(_mkt_fx is None), key=kk("fx_man"),
+                help="Brokers rekenen vaak met hun eigen wisselkoers. Vul die hier in, dan "
+                     "blijft ze voorgoed aan deze transactie hangen en wordt ze nooit "
+                     "overschreven door een herberekening met de marktkoers."))
+            if fx_manual:
+                fxc1, fxc2 = st.columns([1, 2])
+                with fxc1:
+                    fx_override = st.number_input(
+                        f"1 {currency} = ? EUR", min_value=0.0, format="%.10g",
+                        value=float(_mkt_fx) if _mkt_fx else 0.0,
+                        step=0.0001, key=kk("fx_val"))
+                with fxc2:
+                    if _mkt_fx and fx_override:
+                        _spread = (fx_override - _mkt_fx) / _mkt_fx * 100
+                        st.caption(f"Afwijking t.o.v. de marktkoers: **{pct(_spread)}**"
+                                   + ("  (jouw koers is ongunstiger — typisch een auto-FX-marge)"
+                                      if _spread < 0 else ""))
+                st.warning(
+                    "⚠️ **Tel de auto-FX-kosten niet dubbel.** Zit de wisselkostenmarge van je "
+                    "broker al **verwerkt in deze koers** (auto-FX), voeg ze dan **niet** ook "
+                    "nog eens toe bij *Transactiekosten* hierboven — anders trek je ze twee keer "
+                    "af van je rendement. Rekent je broker de wisselkost als een **aparte lijn** "
+                    "aan (en gebruikt hij de zuivere marktkoers), zet ze dan wél bij de kosten "
+                    "en gebruik hier de marktkoers.")
+                fx_override = fx_override or None
+
+        _fx_prev, _eur_prev = compute_eur(total_amount, currency, txn_date, fx_override)
+        if _fx_prev is None:
+            st.error("Zonder wisselkoers kan deze transactie niet correct opgeslagen worden. "
+                     "Vink 'Eigen wisselkoers gebruiken' aan en vul de koers in.")
+            _fx_prev, _eur_prev = 0.0, 0.0
         if is_perf:
             tob_amount = 0.0
             st.info(f"**Waarde bij toekenning:** {currency} {total_amount:,.4f}"
@@ -2121,9 +2336,14 @@ def page_transactions():
                          "Een gratis aandeel voer je in met '🎁 Toegekend als loon of gratis gekregen'.")
             else:
                 price_unit = price_unit or 0.0
-                fx_rate, tot_eur = compute_eur(total_amount, currency, txn_date)
+                fx_rate, tot_eur = compute_eur(total_amount, currency, txn_date, fx_override)
                 _, costs_eur = compute_eur(costs, costs_currency, txn_date)
                 proceed = True
+                if fx_rate is None or costs_eur is None:
+                    st.error("Geen wisselkoers beschikbaar — vul je eigen koers in "
+                             "('Eigen wisselkoers gebruiken'). Zonder koers zouden de "
+                             "EUR-tegenwaarde en de TOB fout zijn.")
+                    proceed = False
                 if txn_type == "sell":
                     acct_txns = db.get_transactions(ticker=ticker, account=account)
                     # Positie beschikbaar OP de verkoopdatum (een verkoop kan niet vóór
@@ -2153,7 +2373,9 @@ def page_transactions():
                                        total_amount_eur=tot_eur, costs_eur=costs_eur,
                                        price_target=(price_target or None),
                                        is_performance_share=int(is_perf),
-                                       income_tax_eur=income_tax_eur)
+                                       income_tax_eur=income_tax_eur,
+                                       fx_manual=fx_manual,
+                                       tob_manual=int(bool(st.session_state.get(kk("tob_man")))))
                     clear_cache()
                     # Volledige reset: bump formulier-nonce + koersdoel-staging leeg
                     st.session_state["txn_add_nonce"] = txn_n + 1
@@ -2170,11 +2392,18 @@ def page_transactions():
 
 
         c1, c2, c3, c4 = st.columns(4)
-        f_asset = c1.selectbox("Activum", ["Alle"] + asset_tickers,
-                               format_func=lambda t: "Alle" if t == "Alle" else fmt(t))
-        f_type = c2.selectbox("Type", ["Alle", "Aankoop", "Verkoop"])
-        f_year = c3.selectbox("Jaar", ["Alle"] + [str(y) for y in range(datetime.now().year, 2019, -1)])
-        f_acct = c4.selectbox("Rekening", ["Alle"] + db.get_accounts())
+        _o_asset = ["Alle"] + asset_tickers
+        _o_year  = ["Alle"] + [str(y) for y in range(datetime.now().year, 2019, -1)]
+        _o_acct  = ["Alle"] + db.get_accounts()
+        with c1:
+            f_asset = sticky_select("Activum", _o_asset, "txn_f_asset", "Alle",
+                                    format_func=lambda t: "Alle" if t == "Alle" else fmt(t))
+        with c2:
+            f_type = sticky_select("Type", ["Alle", "Aankoop", "Verkoop"], "txn_f_type", "Alle")
+        with c3:
+            f_year = sticky_select("Jaar", _o_year, "txn_f_year", "Alle")
+        with c4:
+            f_acct = sticky_select("Rekening", _o_acct, "txn_f_acct", "Alle")
 
         txns = db.get_transactions(
             ticker=(f_asset if f_asset != "Alle" else None),
@@ -2213,8 +2442,11 @@ def page_transactions():
                 "Koersdoel": t.get("price_target"),
                 "Perf?":    bool(t.get("is_performance_share")),
                 "Personenbel. €": round(t.get("income_tax_eur") or 0, 2),
+                "FX-koers": round(float(t.get("fx_rate") or 1.0), 6),
+                "FX eigen": bool(t.get("fx_manual")),
                 "€ Totaal": round(t.get("total_amount_eur") or t["total_amount"], 2),
                 "TOB €":    round(t.get("tob_tax") or 0, 2),
+                "TOB eigen": bool(t.get("tob_manual")),
                 "Notities": t.get("notes") or "",
             })
         cc = st.column_config
@@ -2237,7 +2469,21 @@ def page_transactions():
                 "Personenbel. €": cc.NumberColumn(min_value=0.0, format="%.10g",
                                                   help="Personenbelasting bij toekenning (enkel bij Perf?)."),
                 "€ Totaal":  cc.NumberColumn(disabled=True, format="%.10g"),
-                "TOB €":     cc.NumberColumn(disabled=True, format="%.10g"),
+                "FX-koers":  cc.NumberColumn(
+                    format="%.10g",
+                    help="1 eenheid van de munt in EUR. Vink 'FX eigen' aan om je EIGEN koers "
+                         "(die van je broker) te bewaren; ze wordt dan nooit overschreven door "
+                         "een herberekening met de marktkoers."),
+                "FX eigen":  cc.CheckboxColumn(
+                    help="Aan = de koers hiernaast is JOUW koers en blijft voorgoed bij deze "
+                         "transactie. Let op: zit de auto-FX-marge van je broker al in die koers "
+                         "verwerkt, tel ze dan niet nóg eens bij 'Kosten €'."),
+                "TOB €":     cc.NumberColumn(
+                    format="%.10g",
+                    help="Beurstaks in EUR. Pas je hem aan, dan wordt 'TOB eigen' automatisch "
+                         "aangevinkt en laat de herberekening deze lijn met rust."),
+                "TOB eigen": cc.CheckboxColumn(
+                    help="Aan = handmatig ingestelde TOB; wordt niet herberekend."),
                 "Notities":  cc.TextColumn(),
             })
         st.caption("✏️ Bewerk rechtstreeks in de tabel (datum, type, aantal, prijs, munt, rekening, "
@@ -2252,7 +2498,8 @@ def page_transactions():
                     orig = rows[i]
                     if all(_cell_eq(r[k], orig[k]) for k in
                            ("Datum", "Type", "Aantal", "Prijs", "Munt", "Rekening",
-                            "Kosten €", "Koersdoel", "Perf?", "Personenbel. €", "Notities")):
+                            "Kosten €", "Koersdoel", "Perf?", "Personenbel. €", "Notities",
+                            "FX-koers", "FX eigen", "TOB €", "TOB eigen")):
                         continue
                     nd = _date_or_none(str(r["Datum"]))
                     if nd is None:
@@ -2267,12 +2514,42 @@ def page_transactions():
                         problems.append(f"#{t['id']}: aantal moet > 0 en prijs ≥ 0 zijn."); continue
                     ncur = str(r["Munt"]) if r["Munt"] in TCUR else (t.get("currency") or "EUR")
                     total = qty * price
-                    fx, tot_eur = compute_eur(total, ncur, nd)
+
+                    # ── Wisselkoers ──────────────────────────────────────────
+                    # Zelf ingevulde koers (of 'FX eigen' aangevinkt) = die van je broker:
+                    # die blijft bij de transactie en wordt nooit door de marktkoers vervangen.
+                    fx_edited = not _cell_eq(r["FX-koers"], orig["FX-koers"])
+                    fx_man = int(bool(r["FX eigen"]) or fx_edited)
+                    fx_val = None
+                    if fx_man:
+                        try:
+                            fx_val = float(r["FX-koers"])
+                        except (TypeError, ValueError):
+                            fx_val = None
+                        if not fx_val or fx_val <= 0:
+                            problems.append(f"#{t['id']}: 'FX eigen' staat aan maar de FX-koers "
+                                            "is leeg of 0.")
+                            continue
+                    fx, tot_eur = compute_eur(total, ncur, nd, fx_val)
+                    if fx is None:
+                        problems.append(f"#{t['id']}: geen wisselkoers voor {ncur} op {nd}. "
+                                        "Vink 'FX eigen' aan en vul de koers van je broker in — "
+                                        "zonder koers zouden het EUR-bedrag en de TOB fout zijn.")
+                        continue
+
                     perf = bool(r["Perf?"])
                     inctax = 0.0 if not perf else float(r["Personenbel. €"] or 0)
                     info = ainfo.get(t["ticker"], {})
+
+                    # ── TOB ──────────────────────────────────────────────────
+                    # Zelf aangepast = handmatig: laten staan. Anders herberekenen op de
+                    # EUR-tegenwaarde (nooit op het bedrag in vreemde munt).
+                    tob_edited = not _cell_eq(r["TOB €"], orig["TOB €"])
+                    tob_man = int(bool(r["TOB eigen"]) or tob_edited)
                     if perf:
-                        tob = 0.0
+                        tob, tob_man = 0.0, 0
+                    elif tob_man:
+                        tob = float(r["TOB €"] or 0)
                     else:
                         tob = tax_mod.calculate_tob(info.get("asset_type", "stock"),
                                                     info.get("etf_subtype", "distributing"), tot_eur,
@@ -2285,7 +2562,8 @@ def page_transactions():
                         notes=(str(r["Notities"]) or None) if not pd.isna(r["Notities"]) else None,
                         account=str(r["Rekening"]), costs=costs_v, costs_currency="EUR",
                         fx_rate=fx, total_amount_eur=tot_eur, costs_eur=costs_v,
-                        price_target=tgt, is_performance_share=int(perf), income_tax_eur=inctax)
+                        price_target=tgt, is_performance_share=int(perf), income_tax_eur=inctax,
+                        fx_manual=fx_man, tob_manual=tob_man)
                     n_upd += 1
             except Exception as exc:
                 problems.append(f"Onverwachte fout: {exc}")
@@ -2297,6 +2575,58 @@ def page_transactions():
                 st.rerun()
             elif not problems:
                 st.info("Geen wijzigingen gevonden.")
+
+        # ── TOB en EUR-tegenwaarde herberekenen ──────────────────────────────
+        st.divider()
+        with st.expander("🔄 TOB en EUR-tegenwaarde controleren/herberekenen"):
+            st.caption(
+                "De TOB is een Belgische heffing op de **EUR-tegenwaarde**. In oudere versies kon "
+                "de wisselkoers stilzwijgend op 1,0 blijven staan wanneer de historische koers "
+                "niet opgehaald raakte — dan werd het tarief (bv. 0,35%) op het bedrag in **vreemde "
+                "munt** toegepast, en was de TOB fout. Deze controle herberekent de EUR-tegenwaarde "
+                "met de juiste koers en de TOB daarop. Lijnen met een **eigen wisselkoers** of een "
+                "**handmatige TOB** blijven ongemoeid.")
+            rt_changes, rt_suspect = _recompute_tob_preview(txns, ainfo)
+            if not rt_changes:
+                st.success("✅ Alle transacties in deze selectie kloppen — niets te herberekenen.")
+            else:
+                _dtob = sum(c["nieuw_tob"] - c["oud_tob"] for c in rt_changes)
+                st.warning(
+                    f"**{len(rt_changes)} transactie(s)** zouden wijzigen"
+                    + (f", waarvan **{rt_suspect}** met een TOB die duidelijk op de vréémde munt "
+                       "berekend lijkt" if rt_suspect else "")
+                    + f". Verschil in totale TOB: **{eur(_dtob)}**.")
+                show_df(pd.DataFrame([{
+                    "": "🚩" if c["verdacht"] else "",
+                    "ID": c["id"], "Datum": c["datum"],
+                    "Activum": asset_label(c["ticker"], names),
+                    "Munt": c["munt"],
+                    "Koers nu": c["oud_fx"], "Koers wordt": c["nieuw_fx"],
+                    "€ nu": c["oud_eur"], "€ wordt": c["nieuw_eur"],
+                    "TOB nu": c["oud_tob"], "TOB wordt": c["nieuw_tob"],
+                    "Δ TOB": c["nieuw_tob"] - c["oud_tob"],
+                } for c in rt_changes]), width="stretch", hide_index=True, column_config={
+                    "ID": st.column_config.NumberColumn(format="%d", width="small"),
+                    "Koers nu": st.column_config.NumberColumn(format="%.10g"),
+                    "Koers wordt": st.column_config.NumberColumn(format="%.10g"),
+                    "€ nu": st.column_config.NumberColumn(format="€ %.10g"),
+                    "€ wordt": st.column_config.NumberColumn(format="€ %.10g"),
+                    "TOB nu": st.column_config.NumberColumn(format="€ %.10g"),
+                    "TOB wordt": st.column_config.NumberColumn(format="€ %.10g"),
+                    "Δ TOB": st.column_config.NumberColumn(format="€ %+.10g"),
+                })
+                st.caption("🚩 = de opgeslagen TOB komt overeen met het tarief toegepast op het "
+                           "bedrag in vréémde munt — dat is precies de oude fout.")
+                if st.checkbox("Ja, herbereken deze transacties", key="tob_rc_confirm"):
+                    if st.button("🔄 Herberekening uitvoeren", type="primary", key="tob_rc_do"):
+                        for c in rt_changes:
+                            db.update_transaction(c["id"], fx_rate=c["nieuw_fx"],
+                                                  total_amount_eur=c["nieuw_eur"],
+                                                  tob_tax=c["nieuw_tob"])
+                        clear_cache()
+                        st.session_state["tob_rc_confirm"] = False
+                        st.success(f"✅ {len(rt_changes)} transactie(s) herberekend.")
+                        st.rerun()
 
         # Verwijderen (meerdere tegelijk, met bevestiging)
         st.divider()

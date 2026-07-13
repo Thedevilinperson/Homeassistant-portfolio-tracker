@@ -311,6 +311,15 @@ def _migrate(conn):
     if not _column_exists(cur, "assets", "price_fail_count"):
         cur.execute("ALTER TABLE assets ADD COLUMN price_fail_count INTEGER DEFAULT 0")
 
+    # Eigen wisselkoers: je broker hanteert vaak zijn eigen FX-koers (soms met een
+    # auto-FX-marge erin verwerkt). Die koers hoort BIJ DE TRANSACTIE en mag nooit
+    # overschreven worden door een herberekening met de historische marktkoers.
+    if not _column_exists(cur, "transactions", "fx_manual"):
+        cur.execute("ALTER TABLE transactions ADD COLUMN fx_manual INTEGER DEFAULT 0")
+    # Idem voor een handmatig gecorrigeerde TOB.
+    if not _column_exists(cur, "transactions", "tob_manual"):
+        cur.execute("ALTER TABLE transactions ADD COLUMN tob_manual INTEGER DEFAULT 0")
+
     # Yahoo-symbool laatst gevonden VIA de ISIN (cache/weergave). De ISIN blijft de
     # brondata voor koersopzoeking; dit is enkel een gemakskolom zodat je ziet welk
     # concreet symbool daaraan gekoppeld werd, zonder dat de ticker zelf de bron van
@@ -966,7 +975,8 @@ def add_transaction(ticker, transaction_type, date, quantity, price_per_unit,
                     total_amount, currency="EUR", tob_tax=0.0, notes=None,
                     account=DEFAULT_ACCOUNT, costs=0.0, costs_currency="EUR",
                     fx_rate=1.0, total_amount_eur=None, costs_eur=None,
-                    price_target=None, is_performance_share=0, income_tax_eur=0.0):
+                    price_target=None, is_performance_share=0, income_tax_eur=0.0,
+                    fx_manual=0, tob_manual=0):
     if total_amount_eur is None:
         total_amount_eur = total_amount * (fx_rate or 1.0)
     if costs_eur is None:
@@ -976,12 +986,14 @@ def add_transaction(ticker, transaction_type, date, quantity, price_per_unit,
         """INSERT INTO transactions
            (ticker,transaction_type,date,quantity,price_per_unit,total_amount,
             currency,tob_tax,notes,account,costs,costs_currency,costs_eur,
-            total_amount_eur,fx_rate,price_target,is_performance_share,income_tax_eur)
-           VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+            total_amount_eur,fx_rate,price_target,is_performance_share,income_tax_eur,
+            fx_manual,tob_manual)
+           VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
         (ticker.upper(), transaction_type, date, quantity, price_per_unit,
          total_amount, currency, tob_tax, notes, account, costs, costs_currency,
          costs_eur, total_amount_eur, fx_rate, price_target,
-         int(is_performance_share or 0), income_tax_eur or 0.0)
+         int(is_performance_share or 0), income_tax_eur or 0.0,
+         int(fx_manual or 0), int(tob_manual or 0))
     )
     conn.commit()
     conn.close()
@@ -992,7 +1004,8 @@ def update_transaction(txn_id: int, **fields):
     allowed = {"ticker", "transaction_type", "date", "quantity", "price_per_unit",
                "total_amount", "currency", "tob_tax", "notes", "account", "costs",
                "costs_currency", "costs_eur", "total_amount_eur", "fx_rate",
-               "price_target", "is_performance_share", "income_tax_eur"}
+               "price_target", "is_performance_share", "income_tax_eur",
+               "fx_manual", "tob_manual"}
     sets, vals = [], []
     for k, v in fields.items():
         if k in allowed:
