@@ -2,6 +2,25 @@
 
 Alle noemenswaardige wijzigingen aan de Portfolio Tracker add-on.
 
+## 0.35.2
+Bugfix: StreamlitAPIException bij het herberekenen van de TOB.
+
+**Oorzaak.** Na een geslaagde herberekening zette de code het bevestigingsvinkje terug uit met
+st.session_state["tob_rc_confirm"] = False. Streamlit verbiedt dat: een widget-key mag niet meer
+overschreven worden nadat de widget in diezelfde run is aangemaakt. De herberekening zelf liep
+wél door, maar eindigde in een foutmelding i.p.v. een bevestiging.
+
+**Opgelost** met een nonce in de key van de checkbox: na de actie krijgt de checkbox een nieuwe
+key en is het dus een nieuwe (lege) widget. Het vinkje staat daardoor netjes uit, zonder een
+verboden toekenning.
+
+**Dezelfde fout zat ook in de dividendherberekening** (div_rc_confirm) - daar zou ze op precies
+hetzelfde moment toegeslagen hebben. Ook gefixt. Een scan van alle widget-keys in app.py
+bevestigt dat dit de enige twee plaatsen waren waar een key ná het aanmaken van de widget werd
+overschreven.
+
+Herbouwen (niet enkel herstarten) via de knop "Herbouwen" in Home Assistant.
+
 ## 0.35.1
 Fix + transparantie rond "gesloten posities": de app zegt nu WELKE posities ze overslaat.
 

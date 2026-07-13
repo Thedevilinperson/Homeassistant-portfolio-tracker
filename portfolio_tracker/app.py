@@ -2627,14 +2627,19 @@ def page_transactions():
                 })
                 st.caption("🚩 = de opgeslagen TOB komt overeen met het tarief toegepast op het "
                            "bedrag in vréémde munt — dat is precies de oude fout.")
-                if st.checkbox("Ja, herbereken deze transacties", key="tob_rc_confirm"):
+                # Nonce in de key: Streamlit verbiedt het overschrijven van een widget-key
+                # nadat de widget is aangemaakt (StreamlitAPIException). Door de key te
+                # veranderen is het een NIEUWE checkbox, die vanzelf leeg begint — zo
+                # blijft het vinkje na een herberekening niet aangevinkt staan.
+                _tobn = st.session_state.get("tob_rc_nonce", 0)
+                if st.checkbox("Ja, herbereken deze transacties", key=f"tob_rc_confirm_{_tobn}"):
                     if st.button("🔄 Herberekening uitvoeren", type="primary", key="tob_rc_do"):
                         for c in rt_changes:
                             db.update_transaction(c["id"], fx_rate=c["nieuw_fx"],
                                                   total_amount_eur=c["nieuw_eur"],
                                                   tob_tax=c["nieuw_tob"])
                         clear_cache()
-                        st.session_state["tob_rc_confirm"] = False
+                        st.session_state["tob_rc_nonce"] = _tobn + 1   # geen widget-key
                         st.success(f"✅ {len(rt_changes)} transactie(s) herberekend.")
                         st.rerun()
 
@@ -3248,11 +3253,14 @@ def page_dividends():
             })
             _conf_lbl = ("Ja, overschrijf ook mijn handmatige correcties" if (_incl and _nman)
                          else "Ja, voer deze herberekening uit")
-            if st.checkbox(_conf_lbl, key="div_rc_confirm"):
+            # Zelfde valkuil als bij de TOB: een widget-key mag niet overschreven worden
+            # nadat de widget is aangemaakt. Nonce in de key i.p.v. de waarde resetten.
+            _divn = st.session_state.get("div_rc_nonce", 0)
+            if st.checkbox(_conf_lbl, key=f"div_rc_confirm_{_divn}"):
                 if st.button("🔄 Herberekening uitvoeren", type="primary", key="div_recompute"):
                     done = _recompute_dividend_chain(divs, _rvrate, include_manual=_incl)
                     clear_cache()
-                    st.session_state["div_rc_confirm"] = False
+                    st.session_state["div_rc_nonce"] = _divn + 1   # geen widget-key
                     st.success(f"✅ {len(done)} lijn(en) herberekend.")
                     st.rerun()
 
