@@ -1203,6 +1203,11 @@ def _yf_symbol(ticker: str) -> str | None:
     return ticker
 
 
+# Na zoveel mislukte pogingen op rij stopt de app met koersen ophalen voor een activum.
+# Vijf bronnen die tien keer na elkaar niets vinden = geen tijdelijke storing.
+MAX_PRICE_FAILURES = 10
+_GIVEN_UP_LOGGED: set[str] = set()   # één waarschuwing per proces, geen logspam
+
 _FAIL_CACHE: dict[str, float] = {}   # ticker -> epoch van laatste volledige mislukking
 FAIL_CACHE_TTL = 1800  # 30 min — genoeg om herhaling elke 5 min te vermijden,
                        # kort genoeg om een terugkerende bron snel op te pikken
@@ -1236,8 +1241,25 @@ def get_current_price(ticker: str) -> tuple[float | None, str | None]:
             logger.info(f"get_current_price({ticker}): staat op 'enkel handmatig', maar er is "
                         "geen handmatige koers ingesteld.")
             return None, None
+
+        # Faalgrens: tien keer op rij niets gevonden bij álle bronnen is geen tijdelijke
+        # storing meer. Verdere pogingen zijn enkel verspilde netwerkcalls en logruis, dus
+        # de app stopt met proberen tot je de teller terugzet (Activa → koersophaling
+        # heractiveren) of een handmatige koers instelt.
+        if _db.get_price_fail_count(ticker) >= MAX_PRICE_FAILURES:
+            mp = _db.get_manual_price(ticker)
+            if mp:
+                _store(ticker, mp["price"], mp["currency"])
+                return mp["price"], mp["currency"]
+            if ticker not in _GIVEN_UP_LOGGED:
+                _GIVEN_UP_LOGGED.add(ticker)
+                logger.warning(
+                    f"get_current_price({ticker}): {MAX_PRICE_FAILURES}x na elkaar geen koers "
+                    "gevonden bij geen enkele bron — koersophaling is gestopt voor dit activum. "
+                    "Zet een handmatige koers, of heractiveer het ophalen op de Activa-pagina.")
+            return None, None
     except Exception as exc:
-        logger.warning(f"get_current_price({ticker}): manual_only-check faalde ({exc})")
+        logger.warning(f"get_current_price({ticker}): status-check faalde ({exc})")
 
     recently_failed = (time.time() - _FAIL_CACHE.get(ticker, 0)) < FAIL_CACHE_TTL
 
@@ -1297,9 +1319,34 @@ def get_current_price(ticker: str) -> tuple[float | None, str | None]:
         currency = currency or "EUR"
         _store(ticker, price, currency)
         _FAIL_CACHE.pop(ticker, None)
+        # Gelukt: de faalteller terug op nul. Een tijdelijke storing mag een activum niet
+        # stilaan naar de faalgrens duwen.
+        try:
+            import database as _db
+            if _db.get_price_fail_count(ticker):
+                _db.reset_price_failures(ticker)
+                _GIVEN_UP_LOGGED.discard(ticker)
+        except Exception:
+            pass
         return price, currency
+
     if not recently_failed:
         _FAIL_CACHE[ticker] = time.time()
+    # Mislukt: tel dit mee. Bereikt de teller MAX_PRICE_FAILURES, dan stopt de app hierboven
+    # met verdere pogingen voor dit activum.
+    try:
+        import database as _db
+        n = _db.record_price_failure(ticker)
+        if n == MAX_PRICE_FAILURES:
+            logger.warning(
+                f"get_current_price({ticker}): {n}e mislukte poging op rij — koersophaling "
+                "wordt voor dit activum GESTOPT. Zet een handmatige koers, of heractiveer het "
+                "ophalen op de Activa-pagina.")
+        elif n and n % 3 == 0:
+            logger.info(f"get_current_price({ticker}): {n}/{MAX_PRICE_FAILURES} mislukte "
+                        "pogingen op rij.")
+    except Exception:
+        pass
     return None, None
 
 

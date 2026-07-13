@@ -164,7 +164,11 @@ def get_overview(year: int, account=None, live: bool = False) -> dict:
     de laatste 20 minuten wordt nog live (parallel) opgehaald. live=True (via de
     knop 'Ververs prijzen') forceert wel een volledig live rondje."""
     assets = db.get_assets()
-    tickers = [a["ticker"] for a in assets]
+    # Enkel open posities hebben een actuele koers nodig; voor een volledig verkochte
+    # positie zou dat alleen maar netwerkcalls kosten. (De historiek en de gerealiseerde
+    # meerwaarden komen sowieso uit de transacties, niet uit de actuele koers.)
+    open_tickers = set(db.get_open_position_tickers())
+    tickers = [a["ticker"] for a in assets if a["ticker"] in open_tickers]
     prices = md.get_prices_for_tickers(tickers,
                                        max_stale_minutes=None if live else 20)
     overview = tax_mod.calculate_tax_overview(year=year, current_prices=prices,
@@ -1643,6 +1647,7 @@ def page_assets():
                 "Fotomoment": round(a["snapshot_price"], 4) if a.get("snapshot_price") is not None else None,
                 "Handmatige koers": round(mp, 4) if mp is not None else None,
                 "Enkel handm.": bool(a.get("manual_only")),
+                "Mislukt": int(a.get("price_fail_count") or 0),
                 "Laatste koers": round(mp, 4) if mp is not None else (round(lp["price"], 4) if lp else None),
             })
         cc = st.column_config
@@ -1680,6 +1685,12 @@ def page_assets():
                                                    "(Yahoo, onvista, Börse Frankfurt, Tradegate, Lang & Schwarz) een koers "
                                                    "vindt. Zet de ISIN correct in — dan werken de meeste warrants "
                                                    "automatisch. Leeg = volledig automatisch."),
+                "Mislukt": cc.NumberColumn(
+                    disabled=True, format="%d",
+                    help=f"Aantal mislukte koersophalingen op rij. Vanaf "
+                         f"{md.MAX_PRICE_FAILURES} stopt de app met proberen voor dit activum "
+                         "(geen nutteloze netwerkcalls en logruis meer). Heractiveer hieronder "
+                         "of zet een handmatige koers."),
                 "Enkel handm.": cc.CheckboxColumn(
                     help="Sla ALLE onlinebronnen over voor dit effect en gebruik enkel de "
                          "handmatige koers. Aanzetten voor effecten die nergens publiek "
@@ -1694,6 +1705,31 @@ def page_assets():
                    "Börse Frankfurt). Vindt geen enkele bron het effect, zet dan een "
                    "**handmatige koers** én vink **Enkel handm.** aan — dat stopt ook de "
                    "foutmeldingen in de log.")
+
+        _stuck = [a for a in assets
+                  if int(a.get("price_fail_count") or 0) >= md.MAX_PRICE_FAILURES
+                  and not a.get("manual_only")]
+        if _stuck:
+            st.warning(
+                f"⏸️ Koersophaling **gestopt** voor {len(_stuck)} activum/activa na "
+                f"{md.MAX_PRICE_FAILURES} mislukte pogingen op rij: "
+                + ", ".join(asset_label(a["ticker"], a_names) for a in _stuck)
+                + ".  Vijf bronnen die tien keer na elkaar niets vinden, wijst op een effect dat "
+                  "nergens genoteerd staat — verdere pogingen zijn dan enkel verspilde "
+                  "netwerkcalls. Zet een **handmatige koers** (en vink **Enkel handm.** aan), of "
+                  "heractiveer hieronder als je denkt dat het een tijdelijke storing was.")
+            rc1, rc2 = st.columns([3, 1])
+            _rsel = rc1.multiselect("Heractiveren", [a["ticker"] for a in _stuck],
+                                    default=[a["ticker"] for a in _stuck],
+                                    format_func=lambda t: asset_label(t, a_names),
+                                    key="reactivate_sel", label_visibility="collapsed")
+            if rc2.button("🔄 Heractiveer", key="reactivate_btn") and _rsel:
+                for t in _rsel:
+                    db.reset_price_failures(t)
+                    md._GIVEN_UP_LOGGED.discard(t)
+                clear_cache()
+                st.success(f"✅ Koersophaling opnieuw actief voor {len(_rsel)} activum/activa.")
+                st.rerun()
 
         with st.expander("🔬 Bronnen diagnose — waarom vindt de app geen koers?"):
             st.caption("Vraagt élke koersbron apart wat ze van deze ISIN weet en toont het "

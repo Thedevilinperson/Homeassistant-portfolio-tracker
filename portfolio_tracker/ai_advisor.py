@@ -369,6 +369,85 @@ ADVISOR_PERSONA = (
 )
 
 
+# ── API-parameters verschillen per modelgeneratie ────────────────────────────
+# De GPT-5-familie weigert 'max_tokens' ("Use 'max_completion_tokens' instead") en
+# aanvaardt vaak enkel de standaardtemperatuur. De GPT-4-familie kent
+# 'max_completion_tokens' dan weer niet. In plaats van dat hard te coderen (en bij elk
+# nieuw model opnieuw te breken) leren we per model wat werkt: we kiezen een verstandige
+# startwaarde, en als de API een parameter afwijst, halen we net díé parameter weg en
+# proberen we opnieuw. Wat werkte, onthouden we per proces.
+_MODEL_QUIRKS: dict[str, dict] = {}   # model -> {"token_param": ..., "no_temp": bool, "no_json": bool}
+
+
+def _token_param(model: str) -> str:
+    """Naam van de tokenlimiet-parameter voor dit model."""
+    q = _MODEL_QUIRKS.get(model, {})
+    if "token_param" in q:
+        return q["token_param"]
+    # GPT-5 en de o-serie gebruiken max_completion_tokens; oudere modellen max_tokens.
+    m = model.lower()
+    return "max_completion_tokens" if (m.startswith("gpt-5") or m.startswith("o1")
+                                       or m.startswith("o3") or m.startswith("o4")) \
+        else "max_tokens"
+
+
+def _supports_temperature(model: str) -> bool:
+    if _MODEL_QUIRKS.get(model, {}).get("no_temp"):
+        return False
+    m = model.lower()
+    # Redeneermodellen aanvaarden enkel de standaardtemperatuur.
+    return not (m.startswith("gpt-5") or m.startswith("o1") or m.startswith("o3")
+                or m.startswith("o4"))
+
+
+def _create_with_fallback(client: OpenAI, model: str, kwargs: dict, track_as: str):
+    """Doet de chat-call en corrigeert zichzelf als de API een parameter afwijst.
+
+    Een 400 met code 'unsupported_parameter' zegt exact WELKE parameter fout zit; we
+    passen enkel die aan (max_tokens <-> max_completion_tokens, temperature weg,
+    response_format weg) en proberen opnieuw. Zo blijft de app werken op zowel oude als
+    nieuwe modelgeneraties, zonder dat een verkeerde parameter als 'JSON-modus niet
+    ondersteund' wordt gelogd — die misdiagnose maskeerde de echte fout."""
+    for _ in range(4):
+        try:
+            resp = client.chat.completions.create(**kwargs)
+            # Onthoud wat werkte, zodat de volgende call meteen juist is.
+            q = _MODEL_QUIRKS.setdefault(model, {})
+            q["token_param"] = ("max_completion_tokens" if "max_completion_tokens" in kwargs
+                                else "max_tokens")
+            q["no_temp"] = "temperature" not in kwargs
+            q["no_json"] = "response_format" not in kwargs
+            return resp
+        except Exception as exc:
+            msg = str(exc)
+            q = _MODEL_QUIRKS.setdefault(model, {})
+            if "max_tokens" in msg and "max_completion_tokens" in msg and "max_tokens" in kwargs:
+                kwargs["max_completion_tokens"] = kwargs.pop("max_tokens")
+                q["token_param"] = "max_completion_tokens"
+                logger.info(f"_chat({track_as}): {model} wil 'max_completion_tokens' — aangepast")
+                continue
+            if "max_completion_tokens" in msg and "max_completion_tokens" in kwargs \
+                    and "unsupported" in msg.lower():
+                kwargs["max_tokens"] = kwargs.pop("max_completion_tokens")
+                q["token_param"] = "max_tokens"
+                logger.info(f"_chat({track_as}): {model} wil 'max_tokens' — aangepast")
+                continue
+            if "temperature" in msg and "temperature" in kwargs:
+                kwargs.pop("temperature")
+                q["no_temp"] = True
+                logger.info(f"_chat({track_as}): {model} aanvaardt enkel de standaardtemperatuur "
+                            "— temperature weggelaten")
+                continue
+            if "response_format" in msg and "response_format" in kwargs:
+                kwargs.pop("response_format")
+                q["no_json"] = True
+                logger.info(f"_chat({track_as}): {model} ondersteunt de JSON-modus niet "
+                            "— opnieuw zonder response_format")
+                continue
+            raise
+    raise RuntimeError(f"Kon geen werkende parametercombinatie vinden voor model {model}.")
+
+
 def _chat_raw(client: OpenAI, model: str, system_msg: str, user_msg: str,
               max_tokens: int = MAX_TOKENS, temperature: float = 0.4,
               track_as: str = "chat", json_mode: bool = False) -> tuple[str, str | None]:
@@ -385,20 +464,13 @@ def _chat_raw(client: OpenAI, model: str, system_msg: str, user_msg: str,
             {"role": "system", "content": system_msg},
             {"role": "user",   "content": user_msg},
         ],
-        max_tokens=max_tokens,
-        temperature=temperature,
     )
+    kwargs[_token_param(model)] = max_tokens
+    if _supports_temperature(model):
+        kwargs["temperature"] = temperature
     if json_mode:
         kwargs["response_format"] = {"type": "json_object"}
-    try:
-        response = client.chat.completions.create(**kwargs)
-    except Exception as exc:
-        if not json_mode:
-            raise
-        logger.info(f"_chat_raw({track_as}): JSON-modus niet ondersteund ({exc}) — "
-                    "opnieuw zonder response_format")
-        kwargs.pop("response_format", None)
-        response = client.chat.completions.create(**kwargs)
+    response = _create_with_fallback(client, model, kwargs, track_as)
 
     # Tokengebruik + kost registreren (best effort — nooit de call laten falen)
     try:

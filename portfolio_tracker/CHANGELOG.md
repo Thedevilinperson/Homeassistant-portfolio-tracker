@@ -2,6 +2,38 @@
 
 Alle noemenswaardige wijzigingen aan de Portfolio Tracker add-on.
 
+## 0.34.1
+Drie fixes: de 400-fout op nieuwe modellen, geen koersen meer voor gesloten posities, en de app
+stopt met proberen na 10 mislukte ophalingen.
+
+**API-fout op de GPT-5-modellen (400 Bad Request).** De nieuwe modellen weigeren 'max_tokens'
+("Use 'max_completion_tokens' instead") en aanvaarden vaak enkel de standaardtemperatuur.
+Erger: mijn foutafhandeling stelde de VERKEERDE diagnose - ze zag een 400 en concludeerde
+"JSON-modus niet ondersteund", verwijderde response_format en probeerde opnieuw met dezelfde
+foute parameter. Vandaar twee keer 400 en dan een harde fout.
+
+Opgelost met een adaptieve parameterlaag: de app kiest een verstandige startwaarde per
+modelfamilie (GPT-5/o-serie -> max_completion_tokens, geen temperature; GPT-4 -> max_tokens),
+en wijst de API tóch een parameter af, dan wordt exact díé parameter aangepast en de call
+opnieuw gedaan. Wat werkte, wordt per model onthouden, zodat de volgende oproep meteen juist
+is. Nieuwe modellen breken de app dus niet meer, en de log vermeldt voortaan de échte reden.
+
+**Geen koersen meer voor gesloten posities.** De scheduler haalde elke 5 minuten koersen op voor
+ÁLLE activa, ook voor posities die je volledig verkocht hebt. Nu enkel nog voor open posities
+(netto aantal > 0). De historiek en de gerealiseerde meerwaarden blijven uiteraard bewaard - die
+komen uit de transacties, niet uit de actuele koers. Activa zonder enige transactie (net
+toegevoegd, nog niets gekocht) worden wél gevolgd, zodat je de koers al ziet vóór je koopt.
+
+**Stoppen na 10 mislukte pogingen.** Nieuwe teller per activum (kolom price_fail_count). Vinden
+alle bronnen tien keer op rij niets, dan is dat geen tijdelijke storing maar een instrument dat
+nergens genoteerd staat: de app stopt met proberen. Dat scheelt vijf mislukte netwerkcalls en
+evenveel logregels bij élke koersverversing. Een geslaagde ophaling zet de teller terug op nul,
+zodat een tijdelijke storing een activum niet stilaan naar de grens duwt. Een handmatige koers
+blijft gewoon werken. In het activaoverzicht zie je de teller in de kolom "Mislukt", met een
+waarschuwing en een knop "🔄 Heractiveer" wanneer een activum gestopt is.
+
+Herbouwen (niet enkel herstarten) via de knop "Herbouwen" in Home Assistant.
+
 ## 0.34.0
 Eigen model voor luik 2, kostenraming per oproep, actuele modellen, en getallen zonder
 overbodige nullen.

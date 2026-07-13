@@ -304,6 +304,13 @@ def _migrate(conn):
     if not _column_exists(cur, "assets", "manual_only"):
         cur.execute("ALTER TABLE assets ADD COLUMN manual_only INTEGER DEFAULT 0")
 
+    # Aantal opeenvolgende mislukte koersophalingen. Na een grens (10) stopt de app met
+    # proberen: blijven vijf bronnen tien keer op rij niets vinden, dan is dat geen
+    # tijdelijke storing maar een instrument dat nergens genoteerd staat — en dan zijn
+    # verdere pogingen enkel nog verspilde netwerkcalls en logruis.
+    if not _column_exists(cur, "assets", "price_fail_count"):
+        cur.execute("ALTER TABLE assets ADD COLUMN price_fail_count INTEGER DEFAULT 0")
+
     # Yahoo-symbool laatst gevonden VIA de ISIN (cache/weergave). De ISIN blijft de
     # brondata voor koersopzoeking; dit is enkel een gemakskolom zodat je ziet welk
     # concreet symbool daaraan gekoppeld werd, zonder dat de ticker zelf de bron van
@@ -1335,6 +1342,50 @@ def get_previous_closes(tickers: list[str], before_date: str) -> dict[str, dict]
     ).fetchall()
     conn.close()
     return {r["ticker"]: dict(r) for r in rows}
+
+
+def get_open_position_tickers(epsilon: float = 1e-9) -> list[str]:
+    """Tickers met een OPEN positie (netto aantal > 0), op basis van de transacties.
+    Voor een volledig verkochte positie hoeft er geen koers meer opgehaald te worden —
+    de historiek blijft bewaard, maar de app stopt met er netwerkcalls aan te besteden."""
+    conn = get_connection()
+    rows = conn.execute(
+        """SELECT ticker,
+                  SUM(CASE WHEN transaction_type='buy'  THEN quantity
+                           WHEN transaction_type='sell' THEN -quantity
+                           ELSE 0 END) AS net
+           FROM transactions WHERE ticker IS NOT NULL
+           GROUP BY ticker"""
+    ).fetchall()
+    conn.close()
+    return [r["ticker"] for r in rows if (r["net"] or 0) > epsilon]
+
+
+def record_price_failure(ticker: str) -> int:
+    """Tel één mislukte koersophaling voor dit activum en geef de nieuwe stand terug."""
+    conn = get_connection()
+    conn.execute("UPDATE assets SET price_fail_count = COALESCE(price_fail_count,0) + 1 "
+                 "WHERE ticker=?", (ticker.upper(),))
+    conn.commit()
+    row = conn.execute("SELECT price_fail_count FROM assets WHERE ticker=?",
+                       (ticker.upper(),)).fetchone()
+    conn.close()
+    return int(row["price_fail_count"]) if row and row["price_fail_count"] else 0
+
+
+def reset_price_failures(ticker: str):
+    conn = get_connection()
+    conn.execute("UPDATE assets SET price_fail_count=0 WHERE ticker=?", (ticker.upper(),))
+    conn.commit()
+    conn.close()
+
+
+def get_price_fail_count(ticker: str) -> int:
+    conn = get_connection()
+    row = conn.execute("SELECT price_fail_count FROM assets WHERE ticker=?",
+                       (ticker.upper(),)).fetchone()
+    conn.close()
+    return int(row["price_fail_count"]) if row and row["price_fail_count"] else 0
 
 
 def get_latest_prices(tickers: list[str]) -> dict[str, dict]:

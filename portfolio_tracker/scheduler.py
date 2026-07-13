@@ -46,13 +46,28 @@ BRUSSELS = ZoneInfo("Europe/Brussels")
 # ── Jobs ──────────────────────────────────────────────────────────────────────
 
 def job_track_prices():
-    """Sla actuele koersen op voor alle gekende activa."""
-    assets = db.get_assets()
-    if not assets:
+    """Sla actuele koersen op voor de activa met een OPEN positie.
+
+    Volledig verkochte posities worden overgeslagen: hun historiek blijft bewaard, maar
+    er is geen reden om er elke 5 minuten netwerkcalls aan te besteden. Activa waarvoor
+    de koersophaling is gestopt (10 mislukte pogingen op rij, zie market_data) worden
+    binnenin get_current_price overgeslagen."""
+    open_tickers = db.get_open_position_tickers()
+    all_assets = db.get_assets()
+    if not all_assets:
         logger.info("Geen activa geregistreerd — koerstracking overgeslagen.")
         return
-    tickers = [a["ticker"] for a in assets]
-    logger.info(f"📈 Koersen ophalen voor {len(tickers)} ticker(s)...")
+    # Activa zonder enige transactie (net toegevoegd, nog niets gekocht) willen we wél
+    # volgen: dan kan je de koers al zien vóór je koopt.
+    with_tx = {t["ticker"] for t in db.get_transactions() if t.get("ticker")}
+    tickers = [a["ticker"] for a in all_assets
+               if a["ticker"] in open_tickers or a["ticker"] not in with_tx]
+    closed = len(all_assets) - len(tickers)
+    if not tickers:
+        logger.info("Geen open posities — koerstracking overgeslagen.")
+        return
+    logger.info(f"📈 Koersen ophalen voor {len(tickers)} ticker(s)"
+                + (f" ({closed} gesloten positie(s) overgeslagen)" if closed else "") + "...")
     prices = md.get_prices_for_tickers(tickers)
     saved, failed = 0, []
     for ticker, info in prices.items():
