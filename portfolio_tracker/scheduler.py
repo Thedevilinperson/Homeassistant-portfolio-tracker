@@ -31,6 +31,7 @@ from apscheduler.events import EVENT_JOB_ERROR, EVENT_JOB_EXECUTED
 
 import database as db
 import market_data as md
+import belgian_tax as tax
 import ai_advisor
 
 logging.basicConfig(
@@ -52,22 +53,20 @@ def job_track_prices():
     er is geen reden om er elke 5 minuten netwerkcalls aan te besteden. Activa waarvoor
     de koersophaling is gestopt (10 mislukte pogingen op rij, zie market_data) worden
     binnenin get_current_price overgeslagen."""
-    open_tickers = db.get_open_position_tickers()
-    all_assets = db.get_assets()
-    if not all_assets:
+    if not db.get_assets():
         logger.info("Geen activa geregistreerd — koerstracking overgeslagen.")
         return
-    # Activa zonder enige transactie (net toegevoegd, nog niets gekocht) willen we wél
-    # volgen: dan kan je de koers al zien vóór je koopt.
-    with_tx = {t["ticker"] for t in db.get_transactions() if t.get("ticker")}
-    tickers = [a["ticker"] for a in all_assets
-               if a["ticker"] in open_tickers or a["ticker"] not in with_tx]
-    closed = len(all_assets) - len(tickers)
+    # Dezelfde FIFO-logica als het dashboard (zie belgian_tax.open_position_tickers):
+    # geen tweede, afwijkende positieberekening.
+    tickers, closed = tax.open_position_tickers()
     if not tickers:
         logger.info("Geen open posities — koerstracking overgeslagen.")
         return
-    logger.info(f"📈 Koersen ophalen voor {len(tickers)} ticker(s)"
-                + (f" ({closed} gesloten positie(s) overgeslagen)" if closed else "") + "...")
+    logger.info(f"📈 Koersen ophalen voor {len(tickers)} ticker(s)...")
+    if closed:
+        # Namen erbij: zonder die lijst kan je niet controleren of de app terecht
+        # denkt dat een positie gesloten is.
+        logger.info(f"⏭️  {len(closed)} gesloten positie(s) overgeslagen: {', '.join(closed)}")
     prices = md.get_prices_for_tickers(tickers)
     saved, failed = 0, []
     for ticker, info in prices.items():

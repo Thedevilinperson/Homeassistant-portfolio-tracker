@@ -169,8 +169,8 @@ def get_overview(year: int, account=None, live: bool = False) -> dict:
     # Enkel open posities hebben een actuele koers nodig; voor een volledig verkochte
     # positie zou dat alleen maar netwerkcalls kosten. (De historiek en de gerealiseerde
     # meerwaarden komen sowieso uit de transacties, niet uit de actuele koers.)
-    open_tickers = set(db.get_open_position_tickers())
-    tickers = [a["ticker"] for a in assets if a["ticker"] in open_tickers]
+    # Dezelfde FIFO-logica als het dashboard zelf — geen tweede positieberekening.
+    tickers, _closed = tax_mod.open_position_tickers()
     prices = md.get_prices_for_tickers(tickers,
                                        max_stale_minutes=None if live else 20)
     overview = tax_mod.calculate_tax_overview(year=year, current_prices=prices,
@@ -1866,6 +1866,16 @@ def page_assets():
                    "Börse Frankfurt). Vindt geen enkele bron het effect, zet dan een "
                    "**handmatige koers** én vink **Enkel handm.** aan — dat stopt ook de "
                    "foutmeldingen in de log.")
+
+        _open_t, _closed_t = tax_mod.open_position_tickers()
+        if _closed_t:
+            st.caption(
+                f"⏭️ **Geen koersen meer voor {len(_closed_t)} gesloten positie(s):** "
+                + ", ".join(asset_label(t, a_names) for t in _closed_t)
+                + ".  Dit zijn de activa waarvan de app denkt dat je ze volledig verkocht hebt "
+                  "(zelfde FIFO-berekening als het dashboard). Staat hier iets tussen dat je nog "
+                  "wél bezit, dan ontbreekt er een transactie — controleer de aankopen/verkopen "
+                  "op de 💰 Transacties-pagina.")
 
         _stuck = [a for a in assets
                   if int(a.get("price_fail_count") or 0) >= md.MAX_PRICE_FAILURES

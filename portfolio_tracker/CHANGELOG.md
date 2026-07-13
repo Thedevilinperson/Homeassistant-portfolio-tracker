@@ -2,6 +2,32 @@
 
 Alle noemenswaardige wijzigingen aan de Portfolio Tracker add-on.
 
+## 0.35.1
+Fix + transparantie rond "gesloten posities": de app zegt nu WELKE posities ze overslaat.
+
+**Twee positieberekeningen naast elkaar - dat had ik nooit mogen doen.** Voor het overslaan van
+gesloten posities (0.34.1) schreef ik een eigen SQL-som (SUM(buy) - SUM(sell)) in database.py,
+terwijl het dashboard en de portefeuillepagina de FIFO-logica van belgian_tax gebruiken. Twee
+implementaties van dezelfde vraag lopen vroeg of laat uiteen, en dan haalt de app geen koersen
+meer op voor een positie die je wél nog hebt - zonder dat je ziet waarom.
+
+Die eigen SQL is verwijderd. Er is nu één bron van waarheid: belgian_tax.open_position_tickers(),
+die build_fifo_positions gebruikt op de split-gecorrigeerde transacties - exact wat het dashboard
+toont. De scheduler kan dus per definitie niet meer van het dashboard verschillen.
+
+**De log noemt de namen.** "5 gesloten positie(s) overgeslagen" zonder namen is niet
+controleerbaar. De scheduler logt nu welke tickers worden overgeslagen, en op de 🏢 Activa-pagina
+staat dezelfde lijst met een korte uitleg. Staat er iets tussen dat je nog wél bezit, dan
+ontbreekt er een transactie (of staat er een verkoop te veel) - dan weet je meteen waar te
+kijken.
+
+Let op: het is goed mogelijk dat de 5 overgeslagen posities gewoon KLOPPEN (volledig verkocht).
+De nieuwe lijst maakt dat controleerbaar in plaats van giswerk. Kijk zeker na of de warrant
+NL0015002RI2 in die lijst staat: zo ja, dan denkt de app dat je hem verkocht hebt en ontbreekt
+er een aankoop in je transacties.
+
+Herbouwen (niet enkel herstarten) via de knop "Herbouwen" in Home Assistant.
+
 ## 0.35.0
 Eigen wisselkoers per transactie, filters die een herlaad overleven, en de TOB-fout op vreemde
 munten gevonden én herstelbaar gemaakt.

@@ -515,7 +515,37 @@ def total_costs_eur(transactions: list[dict]) -> float:
     return sum(float(t.get("costs_eur") or 0.0) for t in transactions)
 
 
-# ── Portefeuillewaarde (EUR) ──────────────────────────────────────────────────
+def open_position_tickers(epsilon: float = 1e-6) -> tuple[list[str], list[str]]:
+    """(open_tickers, gesloten_tickers) — welke activa hebben nog een positie?
+
+    BELANGRIJK: dit gebruikt exact DEZELFDE FIFO-logica als het dashboard en de
+    portefeuillepagina (build_fifo_positions op de split-gecorrigeerde transacties).
+    In 0.34.1 stond hier een eigen SQL-som (SUM(buy) - SUM(sell)), en dat is precies
+    het soort duplicaat dat stilletjes uiteen gaat lopen met de rest van de app: elk
+    transactietype dat niet letterlijk 'buy' of 'sell' heet, elke splitsing en elke
+    andere nuance in _fifo_core telde daar niet mee, waardoor een activum ten onrechte
+    als 'gesloten' kon worden bestempeld en er geen koersen meer voor werden opgehaald.
+    Eén bron van waarheid is hier belangrijker dan een snellere query.
+
+    Activa ZONDER transacties gelden als open: je hebt ze net toegevoegd en wil de
+    koers al zien vóór je koopt.
+    """
+    assets = [a["ticker"] for a in db.get_assets()]
+    txns = db.get_transactions()
+    positions, _ = build_fifo_positions(txns)
+    with_tx = {t["ticker"] for t in txns if t.get("ticker")}
+
+    open_t, closed_t = [], []
+    for tk in assets:
+        qty = (positions.get(tk) or {}).get("total_quantity", 0.0) or 0.0
+        if qty > epsilon or tk not in with_tx:
+            open_t.append(tk)
+        else:
+            closed_t.append(tk)
+    return open_t, closed_t
+
+
+# ── Portefeuillewaarde (EUR) ─────────────────────────────────────────────────
 
 def _price_eur(price: float | None, currency: str) -> float | None:
     if price is None:

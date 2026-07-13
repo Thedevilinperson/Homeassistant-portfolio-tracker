@@ -1357,23 +1357,6 @@ def get_previous_closes(tickers: list[str], before_date: str) -> dict[str, dict]
     return {r["ticker"]: dict(r) for r in rows}
 
 
-def get_open_position_tickers(epsilon: float = 1e-9) -> list[str]:
-    """Tickers met een OPEN positie (netto aantal > 0), op basis van de transacties.
-    Voor een volledig verkochte positie hoeft er geen koers meer opgehaald te worden —
-    de historiek blijft bewaard, maar de app stopt met er netwerkcalls aan te besteden."""
-    conn = get_connection()
-    rows = conn.execute(
-        """SELECT ticker,
-                  SUM(CASE WHEN transaction_type='buy'  THEN quantity
-                           WHEN transaction_type='sell' THEN -quantity
-                           ELSE 0 END) AS net
-           FROM transactions WHERE ticker IS NOT NULL
-           GROUP BY ticker"""
-    ).fetchall()
-    conn.close()
-    return [r["ticker"] for r in rows if (r["net"] or 0) > epsilon]
-
-
 def record_price_failure(ticker: str) -> int:
     """Tel één mislukte koersophaling voor dit activum en geef de nieuwe stand terug."""
     conn = get_connection()
