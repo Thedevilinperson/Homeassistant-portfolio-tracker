@@ -2,6 +2,48 @@
 
 Alle noemenswaardige wijzigingen aan de Portfolio Tracker add-on.
 
+## 0.36.0
+Groep A van de openstaande lijst: dashboard-tijdstip, 2-decimalen door de hele app, en de
+bevinding rond de US-koersen onder een filter.
+
+**Punt 7 - hele app op maximaal 2 decimalen (zonder overbodige nullen).** De centrale
+weergave-instellingen staan nu op 2 decimalen i.p.v. 4: show_df() (alle read-only tabellen)
+en num() ronden af op 2 decimalen, en het bestaande '%.10g'-formaat laat de overbodige nullen
+weg zoals voorheen. De INLINE bedrag/koers-teksten die nog op 4 decimalen stonden (o.a. de
+waarde bij toekenning, de gemiddelde kostprijs op de grafiek, de snapshot-prijs per stuk) staan
+nu ook op 2.
+
+Bewust NIET beperkt tot 2 decimalen, want dat zou fout of onbruikbaar zijn:
+- **Wisselkoersen** (bv. de historische FX-koers bij een transactie): blijven op 4. Een JPY-koers
+  als 0,01 i.p.v. 0,0061 is waardeloos.
+- **Aantallen/stuks** (verkoop- en beschikbaarheidsmeldingen): blijven op volle precisie, anders
+  klopt 'beschikbaar' niet meer bij fractionele posities.
+- **AI-microkosten in $** ($0,0034): op 4, anders lees je overal $0,00.
+- **De BEWERKBARE tabellen** (transacties, dividenden, verkoop/simulatie, WHT-tarieven): blijven
+  op volle precisie. Afronden van een invoerveld kan de opgeslagen waarde veranderen, en een
+  RV-tarief als 26,375% mag niet op 26,38 komen. Zeg maar als je die tabellen OOK op 2 decimalen
+  wil zien, dan pak ik de niet-bewerkbare (berekende) kolommen daarin apart mee.
+
+**Punt 4 - datum en uur van de laatste koersupdate in de dashboardtabel.** De tabel
+'Dagresultaat vandaag' heeft een extra kolom 'Laatste update' (DD/MM UU:MM, Brusselse tijd): het
+tijdstip waarop de planner de koers voor dat activum het recentst wegschreef. Zo zie je meteen of
+een koers echt vers is of al dagen stilstaat.
+
+**Punt 1 - US-aandelen 'updaten niet' onder een filter: wat ik vond.** Ik heb het koerspad
+volledig nagelopen. De koersen worden ALTIJD globaal opgehaald voor alle open posities
+(open_position_tickers is niet rekening-afhankelijk) en per ticker toegepast op genormaliseerde
+(uppercase) sleutels. De rekeningfilter bepaalt enkel WELKE posities getoond worden, niet welke
+koersen opgehaald of hoe ze gekoppeld worden. In de code is er dus geen pad waarlangs een filter
+de koers van een US-aandeel anders maakt. De meest waarschijnlijke verklaring is dat de US-markt
+gesloten is op het moment van kijken (koers = vorige slot = 0%), wat opvalt zodra je op een
+US-zware rekening filtert. De nieuwe kolom 'Laatste update' maakt dit nu controleerbaar: staat de
+tijd daar recent, dan is 0% normaal (markt dicht); staat ze dagen terug, dan is er wel degelijk
+een echt updateprobleem (bv. de SK Hynix-tickerwijziging) - stuur me in dat geval de tickers +
+de tijdstippen uit die kolom, dan fix ik het gericht. Dit valt sowieso samen met de statuspagina
+van punt 2/3.
+
+Herbouwen (niet enkel herstarten) via de knop "Herbouwen" in Home Assistant.
+
 ## 0.35.2
 Bugfix: StreamlitAPIException bij het herberekenen van de TOB.
 

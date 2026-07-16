@@ -99,18 +99,37 @@ def pct(val: float | None, decimals: int = 2) -> str:
     return f"{sign}{_trim_zeros(f'{val:.{decimals}f}')}%"
 
 
-def num(val: float | None, decimals: int = 4) -> str:
-    """Gewoon getal (aantal, koers) zonder overbodige nullen: 10 i.p.v. 10,0000."""
+def num(val: float | None, decimals: int = 2) -> str:
+    """Gewoon getal (aantal, koers) zonder overbodige nullen: 10 i.p.v. 10,00.
+    Standaard max. 2 decimalen (0.35 → 0.36: hele app op 2 decimalen). Roep expliciet
+    met een hoger 'decimals' aan waar meer precisie nodig is (wisselkoersen, aantallen)."""
     if val is None:
         return "—"
     return _trim_zeros(f"{val:,.{decimals}f}")
 
 
-def show_df(df, dec: int = 4, **kwargs):
+def _short_ts(ts: str | None) -> str:
+    """Formatteer een price_history-timestamp ('JJJJ-MM-DD UU:MM:SS') als 'DD/MM UU:MM'.
+    De timestamps staan al in lokale tijd (de container draait op TZ=Europe/Brussels),
+    dus geen omrekening nodig. Leeg/onbekend -> '—'."""
+    if not ts:
+        return "—"
+    try:
+        dt = datetime.strptime(str(ts)[:16], "%Y-%m-%d %H:%M")
+        return dt.strftime("%d/%m %H:%M")
+    except (ValueError, TypeError):
+        return str(ts)[:16] or "—"
+
+
+def show_df(df, dec: int = 2, **kwargs):
     """st.dataframe met de floats afgerond op 'dec' decimalen. Samen met de '%.10g'-
     kolomformaten zorgt dat ervoor dat gehele getallen ZONDER nullen na de komma
-    verschijnen (10 i.p.v. 10,0000) terwijl echte decimalen behouden blijven — en dat
+    verschijnen (10 i.p.v. 10,00) terwijl echte decimalen behouden blijven — en dat
     afrondingsruis (333.29999999999995) geen eindeloze decimalen oplevert.
+
+    Standaard 2 decimalen (0.36: hele app op max. 2 decimalen na de komma, zonder
+    overbodige nullen). Geef expliciet dec=<n> mee voor een read-only tabel die méér
+    precisie nodig heeft (bv. een wisselkoerstabel).
     Enkel voor read-only tabellen; data_editor blijft ongewijzigd, want daar zou
     afronden de opgeslagen waarden kunnen aanpassen."""
     try:
@@ -1022,6 +1041,10 @@ def page_dashboard():
                     f"({pct(_worst[1]['change_pct'])}, {eur(_worst[1]['pl_eur'])})")
 
         names_dp = asset_name_map()
+        # Tijdstip van de laatst vastgelegde koers per ticker (uit price_history) — dit
+        # is wat de achtergrondplanner het recentst wegschreef. Zo zie je meteen of een
+        # koers (bv. een US-aandeel) écht recent is of al dagen stilstaat.
+        _last_ts = db.get_latest_prices(list(dpl))
         drows = []
         for t in sorted(dpl, key=lambda x: dpl[x]["pl_eur"], reverse=True):
             d = dpl[t]
@@ -1034,6 +1057,7 @@ def page_dashboard():
                 "Δ vandaag (%)":  d["change_pct"],
                 "Dag-P/L (€)":    d["pl_eur"],
                 "Huidige waarde": pv[t]["current_value"],
+                "Laatste update": _short_ts((_last_ts.get(t.upper()) or {}).get("timestamp")),
             })
         show_df(pd.DataFrame(drows), width="stretch", hide_index=True, column_config={
             "Aantal":         st.column_config.NumberColumn(format="%.10g"),
@@ -1042,10 +1066,16 @@ def page_dashboard():
             "Δ vandaag (%)":  st.column_config.NumberColumn(format="%+.10g%%"),
             "Dag-P/L (€)":    st.column_config.NumberColumn(format="€ %+.10g"),
             "Huidige waarde": st.column_config.NumberColumn(format="€ %.10g"),
+            "Laatste update": st.column_config.TextColumn(
+                help="Tijdstip (DD/MM UU:MM, Brusselse tijd) van de laatst vastgelegde koers "
+                     "voor dit activum. Staat dit ver in het verleden, dan is de koers niet "
+                     "meer ververst — bv. een tickerwijziging of een instrument dat geen enkele "
+                     "bron nog terugvindt."),
         })
         _missing = [t for t in pv if t not in dpl]
         cap = ("Referentie = de laatste vastgelegde koers van de vorige (beurs)dag. Koersen en "
-               "vorige slotkoersen staan in de native munt; de dag-P/L staat in euro.")
+               "vorige slotkoersen staan in de native munt; de dag-P/L staat in euro. "
+               "'Laatste update' = wanneer de planner de koers het recentst vastlegde.")
         if _missing:
             cap += (f"  ·  Geen vorige koers voor: {', '.join(names_dp.get(t, t) for t in _missing)} "
                     "(nog te weinig koershistoriek).")
@@ -1512,7 +1542,7 @@ def page_portfolio():
                 name=nmap.get(sel, sel),
             ))
             fig.add_hline(y=avg_cost, line_dash="dash", line_color="#fdcb6e",
-                          annotation_text=f"Gem. kostprijs {avg_cost:.4f}")
+                          annotation_text=f"Gem. kostprijs {num(avg_cost, 2)}")
             fig.update_layout(
                 title=f"{asset_label(sel, nmap)} — {days} dagen",
                 height=340, plot_bgcolor="rgba(0,0,0,0)", paper_bgcolor="rgba(0,0,0,0)",
@@ -1676,7 +1706,7 @@ def page_assets():
                         st.rerun()
         if snap_val and snap_val > 0 and currency != "EUR":
             _fxs, _snap_eur_prev = compute_eur(snap_val, currency, tax_mod.SNAPSHOT_DATE)
-            st.caption(f"≈ €{_snap_eur_prev:,.4f}/stuk (koers 31/12/2025: {_fxs:.4f})")
+            st.caption(f"≈ €{num(_snap_eur_prev, 2)}/stuk (koers 31/12/2025: {_fxs:.4f})")
 
         # Koersdoel meteen bij het toevoegen instellen (i.p.v. pas bij een transactie).
         # Staging analoog aan het koersdoel in het transactieformulier, maar met eigen
@@ -2323,7 +2353,7 @@ def page_transactions():
             _fx_prev, _eur_prev = 0.0, 0.0
         if is_perf:
             tob_amount = 0.0
-            st.info(f"**Waarde bij toekenning:** {currency} {total_amount:,.4f}"
+            st.info(f"**Waarde bij toekenning:** {currency} {num(total_amount, 2)}"
                     f"{'' if currency == 'EUR' else f' ≈ €{_eur_prev:,.2f}'} | **TOB:** €0,00 (toekenning)")
         else:
             tob_amount = tax_mod.calculate_tob(asset_info.get("asset_type", "stock"),
@@ -2332,7 +2362,7 @@ def page_transactions():
                                                bool(asset_info.get("belgian_registered", 1)),
                                                txn_date=txn_date)
             eur_hint = "" if currency == "EUR" else f" ≈ **€{_eur_prev:,.2f}** (koers {_fx_prev:.4f})"
-            st.info(f"**Totaalwaarde:** {currency} {total_amount:,.4f}{eur_hint} | **TOB:** €{tob_amount:,.2f}")
+            st.info(f"**Totaalwaarde:** {currency} {num(total_amount, 2)}{eur_hint} | **TOB:** €{tob_amount:,.2f}")
             if st.checkbox("TOB manueel aanpassen", key=kk("tob_man")):
                 tob_amount = st.number_input("TOB (€)", min_value=0.0, value=tob_amount,
                                              step=0.01, format="%.10g", key=kk("tob_val"))
