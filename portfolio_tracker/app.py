@@ -4286,6 +4286,121 @@ def _evolution_df(sig: str):
     return tax_mod.reconstruct_portfolio_evolution(txns, price_map, fx_map, ticker_currency)
 
 
+def _koersdoel_historiek_section():
+    """Punt 8: evolutie van de koersdoelen per activum (handmatig én AI), met de
+    mogelijkheid om het koersdoel opnieuw te bepalen. Toont per activum een tijdlijn
+    van wanneer welk koersdoel is vastgelegd of gewijzigd."""
+    st.divider()
+    st.subheader("🎯 Koersdoel-historiek")
+
+    hist_tickers = db.get_tickers_with_target_history()
+    names = asset_name_map()
+
+    if not hist_tickers:
+        st.caption("Nog geen koersdoelen vastgelegd. Zodra je een koersdoel instelt "
+                   "(handmatig bij een activum/transactie of via een AI-advies), verschijnt "
+                   "de evolutie hier per activum.")
+        return
+
+    sel = st.selectbox("Activum", hist_tickers,
+                       format_func=lambda t: f"{names.get(t, t)} ({t})",
+                       key="pt_hist_ticker")
+    hist = db.get_price_target_history(sel)   # chronologisch (oudste eerst)
+    if not hist:
+        st.caption("Geen koersdoelen voor dit activum.")
+        return
+
+    SRC_LBL = {"manual": "✍️ Handmatig", "ai": "🤖 AI"}
+
+    # ── Tabel: nieuwste eerst, met wijziging t.o.v. het vorige koersdoel ──────
+    rows = []
+    for i, h in enumerate(hist):
+        prev = hist[i - 1]["target"] if i > 0 else None
+        delta = (h["target"] - prev) if prev is not None else None
+        note = h.get("note")
+        label = SRC_LBL.get(h["source"], h["source"])
+        if h["source"] == "ai" and note:
+            label += f" ({note})"
+        elif note and note != "huidig koersdoel (migratie)":
+            label += f" · {note}"
+        rows.append({
+            "Vastgelegd op": _short_ts(h["set_at"]),
+            "Koersdoel":     h["target"],
+            "Munt":          h["currency"],
+            "Δ t.o.v. vorige": delta,
+            "Bron":          label,
+        })
+    rows.reverse()   # nieuwste bovenaan
+    show_df(pd.DataFrame(rows), width="stretch", hide_index=True, column_config={
+        "Koersdoel":       st.column_config.NumberColumn(format="%.10g"),
+        "Δ t.o.v. vorige": st.column_config.NumberColumn(format="%+.10g"),
+    })
+
+    # ── Grafiek: koersdoel-evolutie (trapjeslijn) + werkelijke koers ─────────
+    try:
+        xs = [datetime.strptime(str(h["set_at"])[:19], "%Y-%m-%d %H:%M:%S") for h in hist]
+    except (ValueError, TypeError):
+        xs = None
+    if xs and len(xs) >= 1:
+        fig = go.Figure()
+        # Werkelijke koers als achtergrond (native munt), indien beschikbaar.
+        try:
+            start = min(xs).strftime("%Y-%m-%d")
+            series = md.get_price_series(sel, start)
+            if series is not None and len(series):
+                fig.add_trace(go.Scatter(
+                    x=list(series.index), y=list(series.values), mode="lines",
+                    name="Koers", line=dict(color="rgba(160,160,160,0.55)", width=1.5)))
+        except Exception:
+            pass
+        # Koersdoel als trapjeslijn tot vandaag doorgetrokken.
+        tx = xs + [datetime.now()]
+        ty = [h["target"] for h in hist] + [hist[-1]["target"]]
+        fig.add_trace(go.Scatter(
+            x=tx, y=ty, mode="lines", name="Koersdoel",
+            line=dict(color="#fdcb6e", width=2, shape="hv")))
+        # Markers per bron (kleur = handmatig vs AI).
+        for src, col, nm in (("manual", "#0984e3", "Handmatig"), ("ai", "#00b894", "AI")):
+            pts = [(x, h["target"]) for x, h in zip(xs, hist) if h["source"] == src]
+            if pts:
+                fig.add_trace(go.Scatter(
+                    x=[p[0] for p in pts], y=[p[1] for p in pts], mode="markers",
+                    name=nm, marker=dict(color=col, size=9,
+                                         line=dict(color="white", width=1))))
+        fig.update_layout(height=320, margin=dict(t=30, b=30, l=20, r=20),
+                          plot_bgcolor="rgba(0,0,0,0)", paper_bgcolor="rgba(0,0,0,0)",
+                          legend=dict(orientation="h", yanchor="bottom", y=1.0,
+                                      xanchor="right", x=1.0),
+                          title=f"Koersdoel-evolutie — {names.get(sel, sel)} ({hist[-1]['currency']})")
+        st.plotly_chart(fig, width="stretch")
+
+    st.caption("De trapjeslijn toont het geldende koersdoel over de tijd; elk bolletje is een "
+               "moment waarop een koersdoel werd vastgelegd of gewijzigd (blauw = handmatig, "
+               "groen = AI). De grijze lijn is de werkelijke koers, indien beschikbaar.")
+
+    # ── Koersdoel opnieuw bepalen (handmatig) ────────────────────────────────
+    with st.expander("🎯 Koersdoel opnieuw bepalen"):
+        _cur_default = hist[-1]["currency"] or "EUR"
+        hc1, hc2, hc3 = st.columns([2, 1, 1])
+        new_tgt = hc1.number_input(f"Nieuw koersdoel ({_cur_default})", min_value=0.0,
+                                   step=0.01, value=float(hist[-1]["target"]),
+                                   key=f"pt_new_{sel}")
+        new_cur = hc2.text_input("Munt", value=_cur_default, key=f"pt_cur_{sel}").strip().upper()
+        hc3.markdown("&nbsp;")
+        if hc3.button("Vastleggen", key=f"pt_set_{sel}", type="primary"):
+            if new_tgt and new_tgt > 0:
+                db.update_asset(sel, price_target=float(new_tgt),
+                                price_target_currency=(new_cur or _cur_default))
+                clear_cache()
+                st.success(f"🎯 Nieuw koersdoel {num(new_tgt, 2)} {new_cur or _cur_default} "
+                           f"vastgelegd voor {names.get(sel, sel)}.")
+                st.rerun()
+            else:
+                st.warning("Geef een koersdoel groter dan 0 in.")
+        st.caption("Het nieuwe koersdoel wordt het actieve doel op het activum én komt als "
+                   "handmatige wijziging in de historiek hierboven.")
+
+
 def page_evolution():
     st.title("📈 Waarde-evolutie & vergelijking per rekening")
 
@@ -4300,6 +4415,7 @@ def page_evolution():
 
     if df is None or df.empty:
         st.warning("Kon geen historische reeks opbouwen — koersdata (yfinance) niet beschikbaar voor deze tickers.")
+        _koersdoel_historiek_section()
         return
 
     acct_cols = sorted(c[len("value::"):] for c in df.columns
@@ -4396,6 +4512,8 @@ def page_evolution():
                               plot_bgcolor="rgba(0,0,0,0)", paper_bgcolor="rgba(0,0,0,0)")
         fig_cmp.update_yaxes(ticksuffix="%")
         st.plotly_chart(fig_cmp, width='stretch')
+
+    _koersdoel_historiek_section()
 
 
 # ── Navigatie ─────────────────────────────────────────────────────────────────

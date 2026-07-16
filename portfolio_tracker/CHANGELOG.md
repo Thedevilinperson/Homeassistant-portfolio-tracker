@@ -2,6 +2,42 @@
 
 Alle noemenswaardige wijzigingen aan de Portfolio Tracker add-on.
 
+## 0.37.0
+Punt 8 van Groep B: een volledige koersdoel-historiek per activum op de Evolutie-pagina,
+met alle koersdoelen erin - handmatig én AI - en de mogelijkheid om een koersdoel opnieuw
+te bepalen.
+
+**Nieuwe tabel price_target_history.** Elk koersdoel wordt nu vastgelegd met datum, waarde,
+munt en bron ('manual' of 'ai'). De logging zit centraal in de database-laag, dus ELK
+koersdoel wordt automatisch mee opgenomen, ongeacht waar het vandaan komt:
+- handmatig bij het toevoegen van een activum, bij een transactie, via de Activa-tabel, of via
+  de nieuwe knop op de Evolutie-pagina;
+- elk AI-koersdoel uit de dagelijkse adviesrondes (Luik 1).
+
+Om herhaling te vermijden wordt een koersdoel enkel gelogd als het effectief WIJZIGT: hetzelfde
+koersdoel van dezelfde bron twee keer na elkaar levert geen dubbele lijn op. Een handmatig doel
+ná een AI-doel met dezelfde waarde (of omgekeerd) wordt wél bijgehouden - dat is een bewuste
+bevestiging vanuit een andere bron.
+
+**Eenmalige backfill.** Bij de eerste start van deze versie wordt de historiek meteen gevuld met
+wat er al in de database zat: bestaande AI-koersdoelen (met hun eigen datum uit ai_ratings),
+koersdoelen die aan transacties hangen (met de transactiedatum), en het huidige handmatige
+koersdoel op elk activum (als recentste ijkpunt). Zo staat er meteen een tijdlijn, ook voor
+koersdoelen van vóór deze versie. De backfill draait maar één keer en dedupt consecutieve
+gelijke waarden.
+
+**Op de Evolutie-pagina: '🎯 Koersdoel-historiek'.** Kies een activum en je krijgt:
+- een tabel (nieuwste eerst) met wanneer welk koersdoel werd vastgelegd, de bron (handmatig/AI +
+  model) en de wijziging t.o.v. het vorige doel;
+- een grafiek met het geldende koersdoel als trapjeslijn door de tijd, bolletjes per moment
+  (blauw = handmatig, groen = AI) en de werkelijke koers als grijze achtergrondlijn;
+- een uitklapbaar blok 'Koersdoel opnieuw bepalen' om meteen een nieuw handmatig doel vast te
+  leggen - dat wordt het actieve doel én komt als wijziging in de historiek.
+
+Alle bedragen volgen de 2-decimalen-weergave van 0.36.
+
+Herbouwen (niet enkel herstarten) via de knop "Herbouwen" in Home Assistant.
+
 ## 0.36.0
 Groep A van de openstaande lijst: dashboard-tijdstip, 2-decimalen door de hele app, en de
 bevinding rond de US-koersen onder een filter.

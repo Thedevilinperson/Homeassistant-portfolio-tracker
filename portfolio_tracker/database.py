@@ -9,8 +9,11 @@ Uitbreidingen:
 """
 import sqlite3
 import os
+import logging
 from datetime import datetime
 from pathlib import Path
+
+logger = logging.getLogger(__name__)
 
 DATA_DIR = os.environ.get("DATA_DIR", "/app/data")
 DB_PATH = os.path.join(DATA_DIR, "portfolio.db")
@@ -118,6 +121,17 @@ def init_db():
         );
         CREATE INDEX IF NOT EXISTS idx_ai_ratings_batch ON ai_ratings(batch_id);
         CREATE INDEX IF NOT EXISTS idx_ai_ratings_ticker ON ai_ratings(ticker);
+
+        CREATE TABLE IF NOT EXISTS price_target_history (
+            id        INTEGER PRIMARY KEY AUTOINCREMENT,
+            ticker    TEXT    NOT NULL,
+            target    REAL    NOT NULL,      -- koersdoel in de native munt
+            currency  TEXT    DEFAULT 'EUR',
+            source    TEXT    NOT NULL,      -- 'manual' | 'ai'
+            note      TEXT,                  -- bv. AI-model of 'via transactie'
+            set_at    TEXT    DEFAULT (datetime('now'))
+        );
+        CREATE INDEX IF NOT EXISTS idx_pth_ticker ON price_target_history(ticker, set_at);
 
         CREATE TABLE IF NOT EXISTS market_ideas (
             id              INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -347,7 +361,68 @@ def _migrate(conn):
     _relax_transactions_price_check(conn, cur)
     _relax_dividends_ticker_notnull(conn, cur)
 
+    _backfill_price_targets(conn, cur)
+
     conn.commit()
+
+
+def _backfill_price_targets(conn, cur):
+    """Vul de koersdoel-historiek (punt 8) éénmalig met wat er al in de database zit,
+    zodat de tijdlijn meteen gevuld is: bestaande AI-koersdoelen (uit ai_ratings, met
+    hun eigen datum), koersdoelen die aan transacties hangen (met de transactiedatum),
+    en het huidige handmatige koersdoel op elk activum (als 'nu'). Draait enkel als de
+    tabel nog leeg is — daarna houdt log_price_target de historiek bij."""
+    have = cur.execute("SELECT COUNT(*) c FROM price_target_history").fetchone()
+    if have and have["c"]:
+        return  # al gevuld
+
+    events = []  # (set_at, ticker, target, currency, source, note)
+    # 1) AI-koersdoelen uit ai_ratings
+    for r in cur.execute(
+        "SELECT ticker, price_target, currency, model, created_at FROM ai_ratings "
+        "WHERE price_target IS NOT NULL ORDER BY created_at ASC, id ASC"
+    ).fetchall():
+        events.append((str(r["created_at"] or ""), r["ticker"], r["price_target"],
+                       r["currency"] or "EUR", "ai", r["model"]))
+    # 2) Koersdoelen die aan transacties hangen (datum = transactiedatum)
+    for r in cur.execute(
+        "SELECT ticker, price_target, currency, date FROM transactions "
+        "WHERE price_target IS NOT NULL ORDER BY date ASC, id ASC"
+    ).fetchall():
+        events.append((str(r["date"] or "")[:10] + " 00:00:00", r["ticker"],
+                       r["price_target"], r["currency"] or "EUR", "manual", "via transactie"))
+    # 3) Het huidige handmatige koersdoel op het activum zelf (als recentste ijkpunt)
+    now = datetime.now().strftime("%Y-%m-%d %H:%M:00")
+    for r in cur.execute(
+        "SELECT ticker, price_target, price_target_currency, currency FROM assets "
+        "WHERE price_target IS NOT NULL"
+    ).fetchall():
+        events.append((now, r["ticker"], r["price_target"],
+                       r["price_target_currency"] or r["currency"] or "EUR",
+                       "manual", "huidig koersdoel (migratie)"))
+
+    # Sorteer chronologisch en dedup per (ticker, source): enkel echte wijzigingen.
+    events.sort(key=lambda e: (e[1], e[4], e[0]))  # ticker, source, set_at
+    last_val = {}  # (ticker, source) -> (target, currency)
+    to_insert = []
+    for set_at, ticker, target, currency, source, note in events:
+        try:
+            tgt = round(float(target), 6)
+        except (TypeError, ValueError):
+            continue
+        key = (ticker.upper(), source)
+        prev = last_val.get(key)
+        if prev and abs(prev[0] - tgt) < 1e-6 and prev[1] == (currency or "EUR"):
+            continue  # zelfde bron, zelfde waarde na elkaar -> overslaan
+        last_val[key] = (tgt, currency or "EUR")
+        to_insert.append((ticker.upper(), tgt, currency or "EUR", source, note,
+                          set_at or now))
+
+    if to_insert:
+        cur.executemany(
+            "INSERT INTO price_target_history (ticker,target,currency,source,note,set_at) "
+            "VALUES (?,?,?,?,?,?)", to_insert
+        )
 
 
 def _relax_dividends_ticker_notnull(conn, cur):
@@ -773,6 +848,13 @@ def save_ai_rating(batch_id, ticker, rating, price_target=None,
     )
     conn.commit()
     conn.close()
+    # Koersdoel-historiek: elk AI-koersdoel mee opnemen (punt 8). Dedup gebeurt in
+    # log_price_target zelf (zelfde bron + zelfde waarde na elkaar => niet opnieuw).
+    if price_target is not None:
+        try:
+            log_price_target(ticker, price_target, currency, "ai", note=model)
+        except Exception as e:
+            logger.warning(f"log_price_target(ai,{ticker}) faalde: {e}")
 
 
 def get_recent_rating_batches(limit: int = 9) -> list[str]:
@@ -812,6 +894,67 @@ def get_latest_price_target(ticker: str) -> dict | None:
     ).fetchone()
     conn.close()
     return dict(row) if row else None
+
+
+# ── Koersdoel-historiek (punt 8) ─────────────────────────────────────────────
+
+def log_price_target(ticker: str, target, currency: str = "EUR",
+                     source: str = "manual", note: str | None = None,
+                     set_at: str | None = None) -> bool:
+    """Leg een koersdoel vast in de historiek. Bron is 'manual' of 'ai'.
+
+    Dedup: is het laatst gelogde koersdoel VAN DEZELFDE BRON voor deze ticker exact
+    hetzelfde (waarde + munt), dan wordt er niets toegevoegd — zo blijft de tijdlijn
+    een lijst van ECHTE wijzigingen i.p.v. een herhaling bij elke opslag of AI-ronde.
+    Een handmatig doel ná een AI-doel (of omgekeerd) met dezelfde waarde wordt wél
+    gelogd, want dat is een betekenisvolle bevestiging vanuit een andere bron.
+    Geeft True terug als er effectief een rij is toegevoegd."""
+    if target is None:
+        return False
+    try:
+        tgt = round(float(target), 6)
+    except (TypeError, ValueError):
+        return False
+    cur = (currency or "EUR")
+    conn = get_connection()
+    last = conn.execute(
+        "SELECT target,currency FROM price_target_history "
+        "WHERE ticker=? AND source=? ORDER BY set_at DESC, id DESC LIMIT 1",
+        (ticker.upper(), source)
+    ).fetchone()
+    if last and abs((last["target"] or 0) - tgt) < 1e-6 and (last["currency"] or "EUR") == cur:
+        conn.close()
+        return False
+    conn.execute(
+        "INSERT INTO price_target_history (ticker,target,currency,source,note,set_at) "
+        "VALUES (?,?,?,?,?,COALESCE(?, datetime('now')))",
+        (ticker.upper(), tgt, cur, source, note, set_at)
+    )
+    conn.commit()
+    conn.close()
+    return True
+
+
+def get_price_target_history(ticker: str) -> list[dict]:
+    """Alle vastgelegde koersdoelen voor een ticker, NIEUWSTE eerst."""
+    conn = get_connection()
+    rows = conn.execute(
+        "SELECT target,currency,source,note,set_at FROM price_target_history "
+        "WHERE ticker=? ORDER BY set_at ASC, id ASC",
+        (ticker.upper(),)
+    ).fetchall()
+    conn.close()
+    return [dict(r) for r in rows]
+
+
+def get_tickers_with_target_history() -> list[str]:
+    """Tickers waarvoor minstens één koersdoel is vastgelegd (alfabetisch)."""
+    conn = get_connection()
+    rows = conn.execute(
+        "SELECT DISTINCT ticker FROM price_target_history ORDER BY ticker"
+    ).fetchall()
+    conn.close()
+    return [r["ticker"] for r in rows]
 
 
 # ── AI-gebruik & kosten ───────────────────────────────────────────────────────
@@ -893,6 +1036,9 @@ def add_asset(ticker, name, asset_type="stock", etf_subtype="distributing",
     )
     conn.commit()
     conn.close()
+    if price_target is not None:
+        log_price_target(ticker, price_target,
+                         price_target_currency or currency or "EUR", "manual")
 
 
 def update_asset(ticker, name=None, asset_type=None, etf_subtype=None,
@@ -924,6 +1070,13 @@ def update_asset(ticker, name=None, asset_type=None, etf_subtype=None,
         conn.execute(f"UPDATE assets SET {','.join(fields)} WHERE ticker=?", vals)
         conn.commit()
     conn.close()
+    # Koersdoel-historiek: een handmatige wijziging van het koersdoel loggen (punt 8).
+    if price_target is not None and not clear_price_target:
+        cur = price_target_currency
+        if cur is None:
+            a = get_asset(ticker)
+            cur = (a.get("price_target_currency") or a.get("currency") or "EUR") if a else "EUR"
+        log_price_target(ticker, price_target, cur, "manual")
 
 
 def get_assets() -> list[dict]:
@@ -997,6 +1150,9 @@ def add_transaction(ticker, transaction_type, date, quantity, price_per_unit,
     )
     conn.commit()
     conn.close()
+    if price_target is not None:
+        log_price_target(ticker, price_target, currency or "EUR", "manual",
+                         note="via transactie", set_at=(str(date)[:10] + " 00:00:00"))
 
 
 def update_transaction(txn_id: int, **fields):
@@ -1017,7 +1173,13 @@ def update_transaction(txn_id: int, **fields):
     conn = get_connection()
     conn.execute(f"UPDATE transactions SET {', '.join(sets)} WHERE id=?", vals)
     conn.commit()
+    # Ticker + munt van deze transactie ophalen voor een eventuele koersdoel-log.
+    row = conn.execute("SELECT ticker, currency, date FROM transactions WHERE id=?",
+                       (txn_id,)).fetchone()
     conn.close()
+    if fields.get("price_target") is not None and row:
+        log_price_target(row["ticker"], fields["price_target"],
+                         row["currency"] or "EUR", "manual", note="via transactie")
 
 
 def get_transactions(ticker=None, year=None, txn_type=None, account=None,
