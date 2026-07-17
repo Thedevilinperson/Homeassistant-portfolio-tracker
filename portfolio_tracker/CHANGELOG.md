@@ -2,6 +2,26 @@
 
 Alle noemenswaardige wijzigingen aan de Portfolio Tracker add-on.
 
+## 0.40.0
+Diagnosehulp voor punt 6 (Euronext geeft geen koers terug). Nog geen fix — eerst zicht op wat
+Euronext precies terugstuurt.
+
+**Nieuw: '🔧 Euronext-respons inspecteren' op de Status-pagina.** Geef een ISIN (en optioneel een
+MIC) in en de app haalt de RUWE Euronext-respons op zoals de add-on ze ziet: HTTP-status,
+content-type, lengte, het begin van de body, en wat de tabelparser eruit haalt. Zo wordt meteen
+zichtbaar waarom er geen koers uit komt. Puur diagnostisch — het verandert niets aan de
+koersophaling.
+
+Waarom deze aanpak: de Euronext-oproep gebeurt server-side in de add-on (niet in de browser),
+dus in F12 → Network zie je niets. En een browser kan door andere cookies/IP een ander antwoord
+krijgen dan de add-on. Deze knop toont exact wat de add-on binnenkrijgt. Draai ze voor een ISIN
+die faalt en bezorg me de uitvoer (de 'body_head'), dan pas ik de parser gericht aan. De
+waarschijnlijke oorzaak is dat het detailed-quote-fragment niet langer een HTML-tabel is (Euronext
+is op Drupal 10 overgestapt; mogelijk een JSON-envelope of andere opmaak), maar dat bevestigt de
+ruwe respons.
+
+Herbouwen (niet enkel herstarten) via de knop "Herbouwen" in Home Assistant.
+
 ## 0.39.0
 Punt 5 van Groep C: Deutsche Börse Live als koersbron, en de aparte bronnen 'Börse Frankfurt'
 en 'Lang & Schwarz' verwijderd.

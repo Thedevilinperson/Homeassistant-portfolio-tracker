@@ -1157,6 +1157,49 @@ def _price_euronext(isin: str) -> tuple[float | None, str | None]:
     return None, None
 
 
+def euronext_raw_probe(isin: str, mic: str | None = None) -> dict:
+    """Diagnose (punt 6): haal de RUWE Euronext-respons op zoals de add-on die ziet, om
+    zichtbaar te maken waarom er geen koers uit komt. Geeft per endpoint de HTTP-status,
+    het content-type, de lengte en het begin van de body terug, plus wat _euronext_table
+    eruit haalt. Puur diagnostisch — verandert niets aan de koersophaling."""
+    import requests
+    isin = (isin or "").strip().upper()
+    out = {"isin": isin, "mic": mic, "endpoints": []}
+    if not _isin_valid(isin):
+        out["error"] = "Ongeldige ISIN"
+        return out
+    resolved = mic or _euronext_resolve(isin) or "XBRU"
+    out["mic"] = resolved
+    hdrs = _euronext_headers()
+    out["request_headers"] = hdrs
+    endpoints = [
+        ("getDetailedQuoteAjax",
+         f"https://live.euronext.com/en/intraday_chart/getDetailedQuoteAjax/{isin}-{resolved}/full"),
+        ("getChartData/intraday",
+         f"https://live.euronext.com/intraday_chart/getChartData/{isin}-{resolved}/intraday"),
+    ]
+    for name, url in endpoints:
+        rec = {"name": name, "url": url}
+        try:
+            r = requests.get(url, headers=hdrs, timeout=10)
+            body = r.text or ""
+            rec.update(status=r.status_code,
+                       content_type=r.headers.get("Content-Type", ""),
+                       length=len(body),
+                       body_head=body[:2500])
+            if name == "getDetailedQuoteAjax":
+                try:
+                    tbl = _euronext_table(body)
+                    rec["parsed_rows"] = len(tbl)
+                    rec["parsed_labels"] = list(tbl.keys())[:25]
+                except Exception as e:
+                    rec["parse_error"] = str(e)
+        except Exception as e:
+            rec["error"] = str(e)
+        out["endpoints"].append(rec)
+    return out
+
+
 # Externe ISIN-bronnen, in volgorde geprobeerd na Yahoo. Uitbreidbaar met extra
 # bronnen door een functie (isin)->(prijs,munt) toe te voegen aan deze lijst.
 # onvista eerst: open API zonder salt/TLS-verdediging die ook derivaten dekt.

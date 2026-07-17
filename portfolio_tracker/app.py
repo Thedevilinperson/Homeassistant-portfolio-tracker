@@ -4809,6 +4809,39 @@ def page_status():
                 + (f" · {summ['errors']} netwerkfout(en)" if summ.get('errors') else "")
                 + ("" if summ.get("online") else " · (offline: enkel koersdata-checks)"))
 
+    with st.expander("🔧 Euronext-respons inspecteren (diagnose)"):
+        st.caption("Haalt de RUWE Euronext-respons op zoals de add-on ze ziet — handig om te "
+                   "achterhalen waarom Euronext geen koers teruggeeft. Puur diagnostisch, "
+                   "verandert niets. Kopieer de uitvoer hieronder en bezorg ze me, dan pas ik "
+                   "de parser gericht aan.")
+        dc1, dc2 = st.columns([2, 1])
+        diag_isin = dc1.text_input("ISIN", key="eur_diag_isin",
+                                   placeholder="bv. BE0003739530").strip().upper()
+        diag_mic = dc2.text_input("MIC (optioneel)", key="eur_diag_mic",
+                                  placeholder="XBRU").strip().upper() or None
+        if st.button("Euronext bevragen", key="eur_diag_run"):
+            if not diag_isin:
+                st.warning("Geef een ISIN in.")
+            else:
+                with st.spinner("Ruwe Euronext-respons ophalen..."):
+                    res = md.euronext_raw_probe(diag_isin, diag_mic)
+                st.session_state["eur_diag_result"] = res
+        res = st.session_state.get("eur_diag_result")
+        if res:
+            st.write(f"**ISIN {res.get('isin')} · handelsplaats {res.get('mic')}**")
+            if res.get("error"):
+                st.error(res["error"])
+            for ep in res.get("endpoints", []):
+                st.markdown(f"**{ep['name']}** — HTTP {ep.get('status', ep.get('error', '?'))} · "
+                            f"{ep.get('content_type', '')} · {ep.get('length', 0)} tekens"
+                            + (f" · geparste tabelrijen: {ep['parsed_rows']}"
+                               if "parsed_rows" in ep else ""))
+                if ep.get("parsed_labels"):
+                    st.caption("Labels: " + ", ".join(ep["parsed_labels"]))
+                if ep.get("body_head"):
+                    st.code(ep["body_head"], language="html")
+                st.caption(ep["url"])
+
     events = db.get_status_events()
     if not events:
         st.success("✅ Geen openstaande waarschuwingen. Je koersdata ziet er gezond uit.")
