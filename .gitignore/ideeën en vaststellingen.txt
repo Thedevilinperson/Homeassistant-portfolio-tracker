@@ -4,10 +4,26 @@ Nieuw
 
 UI
 - 
-
+AI mag niet systematisch koersdoelen bepalen en deze updaten. Enkel als ik manueel opdracht geef om een nieuw koersdoel te bepalen mag dit in de evoolutie terecht komen
 
 Structurelere aanpassingen
-wachten tot warrants zijn opgelost - koersen van posities die in de gehele portfolio op 0 staan, moeten niet meer opgehaald worden
+1) In het dashboard updaten de US-aandelen niet als er een filter actief is
+
+2) 2 aandelen tonen 0% voor de dagelijkse P/L, zie screenshot. Voor AMZE lijkt de app de huidige koers gelijk te nemen aan de laatste slotkoers (er bljkt geen koersupdate te zijn, dus dat lijkt mij normaal gedrag, maar kan dit ergens gesignaleerd worden onder de tabel, of nog beter, zie puntje 3 hieronder voor een pagina met statusupdate). Voor SK Hynix komt er gewoon geen update: er is een wijziging van de ticker uitgevoerd van SKHYV naar SKHY. Ik heb dit bijgewerkt in de app, maar de app zoekt eerst op yahoo finance via de ISIN en daar staan nu 2 producten (1 met de oude ticker die niet meer updatet) en 1 met de nieuwe ticker. Hoe kan je er voor zorgen dat de app dergelijke wijzigingen detecteert en als waarschuwing ergens weergeeft en vervolgens ook de juiste koers terug gaat selecteren? zie ook punt 3) hieronder. De kolom 'gevonden ticker' in de tabel van activa wordt niet mee gewijzigd als de ticker wordt aangepast, pak je dit mee?
+
+3) voor AMZE staat er een aandelen split gepland. Kan je iets bouwen dat wijzigingen aan tickers, splitingen van aandelen, mergers, ... screent en als waarschuwing op een aparte pagina weergeeft? Zo ook bv. dat een aandeel op een hele dag geen wijziging in koers heeft gezien? Een soort statusupdate van de ISIN, tickers, ...
+
+4) Kan je in de tabel in het dashboard de datum en uur van de laatste koers-update toevoegen?
+
+5) ik heb nog een extra bron gevonden om aandelen op te zoeken: https://live.deutsche-boerse.com kan je deze integreren en kan je 'Börse Frankfurt' en 'Lang & Schwarz' verwijderen uit de app inclusief de bijhorende functies?
+
+6) Euronext geeft nog geen data terug: "Instrument gekend op XBRU (HTTP 200, 0 velden), maar geen koersveld met een waarde. Velden: (geen tabel)"
+
+7) kan je er voor zorgen dat alle cijfers in de hele app met maximaal 2 decimalen na de komma worden weergegeven? Uiteraard nog steeds rekening houdend met de huidige instelling dat er geen overbodige nullen woerden toegevoegd.
+
+Laatste versies van de bestanden staan in context
+
+8) kan je een mogelijkheid inbouwen om het koersdoel te herbepalen, maar ook om de evolutie in de vastgelegde koersdoelen bij te houden (met een duidelijke weergave per activum wanneer welk koersdoel vastegeldg werd of gewijizgd werd. Dit kan geïntegreerd worden in de pagina 'evolutie'
 
 
 

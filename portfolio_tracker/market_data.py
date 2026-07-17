@@ -172,6 +172,7 @@ def _price_from_yahoo_symbol(symbol: str) -> tuple[float | None, str | None]:
 
 _ISIN_SYMBOL_CACHE: dict[str, str] = {}
 _ISIN_QUOTE_CACHE: dict[str, dict] = {}
+_ISIN_QUOTES_CACHE: dict[str, list] = {}   # alle kandidaten per ISIN (punt 2/3)
 
 
 def _yahoo_isin_quote(isin: str) -> dict:
@@ -209,6 +210,187 @@ def _yahoo_symbol_for_isin(isin: str) -> str | None:
     sym = _yahoo_isin_quote(isin).get("symbol") or ""
     _ISIN_SYMBOL_CACHE[isin] = sym
     return sym or None
+
+
+# ── Statuscontrole: tickerwijziging, meerdere producten, splits, naam (punt 2/3) ──
+
+def _yahoo_isin_candidates(isin: str) -> list[dict]:
+    """ALLE Yahoo-zoekresultaten voor een ISIN (niet enkel de eerste). Elk item:
+    {'symbol','name','quoteType','exchange'}. Basis voor het opsporen van een
+    tickerwijziging of van meerdere producten onder dezelfde ISIN (bv. SK Hynix, waar
+    het oude symbool blijft bestaan maar niet meer beweegt naast het nieuwe)."""
+    if not _isin_valid(isin):
+        return []
+    if isin in _ISIN_QUOTES_CACHE:
+        return _ISIN_QUOTES_CACHE[isin]
+    out = []
+    try:
+        import requests
+        resp = requests.get(
+            "https://query2.finance.yahoo.com/v1/finance/search",
+            params={"q": isin, "quotesCount": 8, "newsCount": 0},
+            headers={"User-Agent": "Mozilla/5.0"}, timeout=6)
+        if resp.ok:
+            for q in resp.json().get("quotes", []):
+                sym = (q.get("symbol") or "").strip()
+                if not sym:
+                    continue
+                out.append({
+                    "symbol":    sym,
+                    "name":      q.get("longname") or q.get("shortname") or "",
+                    "quoteType": (q.get("quoteType") or "").upper(),
+                    "exchange":  q.get("exchDisp") or q.get("exchange") or "",
+                })
+    except Exception as e:
+        logger.warning(f"_yahoo_isin_candidates({isin}): {e}")
+    _ISIN_QUOTES_CACHE[isin] = out
+    return out
+
+
+def _yahoo_symbol_activity(symbol: str) -> tuple[float | None, float | None]:
+    """(koers, epoch van de laatste noteringstijd) voor een Yahoo-symbool, of (None,None).
+    De noteringstijd (regularMarketTime) onderscheidt een nog-verhandeld symbool van een
+    'bevroren' oud symbool dat wel nog een (oude) slotkoers teruggeeft."""
+    if not symbol:
+        return None, None
+    try:
+        import requests
+        resp = requests.get(
+            f"https://query1.finance.yahoo.com/v8/finance/chart/{symbol}",
+            params={"range": "5d", "interval": "1d"},
+            headers={"User-Agent": "Mozilla/5.0"}, timeout=6)
+        if resp.ok:
+            results = (resp.json().get("chart", {}) or {}).get("result") or []
+            if results:
+                meta = results[0].get("meta", {}) or {}
+                price = _to_float(meta.get("regularMarketPrice"))
+                t = meta.get("regularMarketTime")
+                return price, (float(t) if t else None)
+    except Exception as e:
+        logger.info(f"_yahoo_symbol_activity({symbol}): {e}")
+    return None, None
+
+
+def resolve_active_symbol(isin: str) -> dict:
+    """Kies uit de Yahoo-kandidaten voor een ISIN het symbool dat het RECENTST verhandeld
+    werd (hoogste regularMarketTime). Zo wint bij een tickerwijziging het nieuwe, actieve
+    symbool van het oude, bevroren symbool. Geeft {'symbol','candidates','multiple'}."""
+    cands = _yahoo_isin_candidates(isin)
+    if not cands:
+        return {"symbol": None, "candidates": [], "multiple": False}
+    best_sym, best_t = None, -1.0
+    for c in cands[:6]:   # begrens netwerkcalls; Yahoo sorteert op relevantie
+        price, t = _yahoo_symbol_activity(c["symbol"])
+        c["price"] = price
+        c["market_time"] = t
+        if t is not None and t > best_t:
+            best_t, best_sym = t, c["symbol"]
+    if best_sym is None:
+        with_price = [c for c in cands if c.get("price") is not None]
+        best_sym = (with_price[0]["symbol"] if with_price else cands[0]["symbol"])
+    return {"symbol": best_sym, "candidates": cands,
+            "multiple": len({c["symbol"].upper() for c in cands}) > 1}
+
+
+_NAME_NOISE = ("inc", "inc.", "incorporated", "corp", "corp.", "corporation", "co",
+               "co.", "ltd", "ltd.", "limited", "plc", "ag", "nv", "n.v.", "sa",
+               "s.a.", "se", "the", "holding", "holdings", "group", "adr",
+               "american", "depositary", "shares", "class", "when", "issued")
+
+
+def _norm_name(s: str) -> str:
+    import re
+    s = (s or "").lower()
+    s = re.sub(r"[^a-z0-9 ]+", " ", s)
+    toks = [w for w in s.split() if w and w not in _NAME_NOISE]
+    return " ".join(toks)
+
+
+def _name_differs(stored: str, yahoo: str) -> bool:
+    """True als twee namen duidelijk verschillen (na normalisatie: hoofdletters,
+    leestekens en veelvoorkomende suffixen weg). Conservatief, om ruis te vermijden:
+    is de ene naam een deel van de andere, dan tellen ze als gelijk."""
+    a, b = _norm_name(stored), _norm_name(yahoo)
+    if not a or not b:
+        return False
+    if a == b or a in b or b in a:
+        return False
+    aw, bw = set(a.split()), set(b.split())
+    overlap = len(aw & bw) / max(1, len(aw | bw))
+    return overlap < 0.34
+
+
+def asset_status_probe(asset: dict, online: bool = True) -> dict:
+    """Netwerk-gebaseerde statuscontrole voor één activum. Geeft:
+      {'resolved_symbol': str|None, 'events': [{kind,severity,message,detail}, ...],
+       'splits': [(datum, ratio), ...]}
+    Volledig defensief: bij offline of netwerkfouten geen events en geen crash.
+
+    Checks: (1) tickerwijziging / meerdere producten onder één ISIN — kiest meteen het
+    actieve symbool, (2) uitgevoerde aandelensplits via yfinance, (3) een naam die bij de
+    bron afwijkt (mogelijke rebranding/fusie-indicatie)."""
+    ticker = (asset.get("ticker") or "").upper()
+    isin = (asset.get("isin") or "").strip().upper()
+    stored_sym = (asset.get("resolved_symbol") or "").strip().upper() or None
+    events, detected_splits, new_sym = [], [], None
+
+    if not online:
+        return {"resolved_symbol": stored_sym, "events": [], "splits": []}
+
+    # 1) Tickerwijziging / meerdere producten onder dezelfde ISIN
+    if _isin_valid(isin):
+        try:
+            res = resolve_active_symbol(isin)
+            new_sym = (res.get("symbol") or "").upper() or None
+            cand_syms = sorted({c["symbol"].upper() for c in res.get("candidates", [])})
+            if new_sym and stored_sym and new_sym != stored_sym:
+                events.append({
+                    "kind": "ticker_change", "severity": "warning",
+                    "message": f"Actief Yahoo-symbool gewijzigd: {stored_sym} → {new_sym}.",
+                    "detail": {"old": stored_sym, "new": new_sym, "candidates": cand_syms},
+                })
+            elif len(cand_syms) > 1:
+                events.append({
+                    "kind": "ticker_change", "severity": "info",
+                    "message": (f"Meerdere producten op Yahoo voor deze ISIN "
+                                f"({', '.join(cand_syms)}); actief gekozen: {new_sym}."),
+                    "detail": {"new": new_sym, "candidates": cand_syms},
+                })
+        except Exception as e:
+            logger.info(f"asset_status_probe/ticker({ticker}): {e}")
+
+    probe_sym = new_sym or stored_sym or (ticker if not _isin_valid(ticker) else None)
+
+    # 2) Uitgevoerde aandelensplits
+    if probe_sym:
+        try:
+            spl = yf.Ticker(probe_sym).splits
+            if spl is not None and len(spl):
+                for dt, ratio in spl.items():
+                    d = dt.strftime("%Y-%m-%d") if hasattr(dt, "strftime") else str(dt)[:10]
+                    r = float(ratio)
+                    if r and abs(r - 1.0) > 1e-9:
+                        detected_splits.append((d, r))
+        except Exception as e:
+            logger.info(f"asset_status_probe/splits({probe_sym}): {e}")
+
+    # 3) Naamsafwijking (rebranding/fusie-indicatie)
+    if probe_sym:
+        try:
+            info = yf.Ticker(probe_sym).info or {}
+            yname = (info.get("longName") or info.get("shortName") or "").strip()
+            stored_name = (asset.get("name") or "").strip()
+            if yname and stored_name and _name_differs(stored_name, yname):
+                events.append({
+                    "kind": "name_change", "severity": "info",
+                    "message": f"Naam bij de bron wijkt af: '{stored_name}' ↔ '{yname}'.",
+                    "detail": {"stored": stored_name, "yahoo": yname},
+                })
+        except Exception as e:
+            logger.info(f"asset_status_probe/name({probe_sym}): {e}")
+
+    return {"resolved_symbol": (new_sym or stored_sym), "events": events,
+            "splits": detected_splits}
 
 
 def _price_tradegate(isin: str) -> tuple[float | None, str | None]:

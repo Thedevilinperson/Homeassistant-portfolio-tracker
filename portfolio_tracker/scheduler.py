@@ -7,6 +7,7 @@ Jobs:
   • Werkdag 07:45         → LUIK 2: marktopportuniteiten (6 koopideeën wereldwijd)
   • Werkdag 18:00         → LUIK 1: dagelijks portefeuilleadvies (ratings + tekst)
   • Dagelijks 22:30       → koersen van de voorgestelde aandelen opvolgen
+  • Dagelijks 22:45       → statuscontrole (verouderde koersen, splits, tickerwijzigingen)
   • 1e van de maand 07:30 → AI-modelprijzen verversen
   • 1e van de maand 08:00 → belastingoptimalisatieadvies
 """
@@ -163,6 +164,23 @@ def job_refresh_ai_prices():
                     f"{len(res['unchanged'])} ongewijzigd")
 
 
+def job_status_checks():
+    """Dagelijkse statuscontrole van de portefeuille (punt 2/3): verouderde koersen,
+    dagen zonder koersbeweging, tickerwijzigingen / meerdere producten onder één ISIN
+    (met bijwerken van de resolved_symbol), niet-geregistreerde aandelensplits en
+    naamsafwijkingen. Resultaten komen op de statuspagina in de app."""
+    logger.info("🩺 Statuscontrole van de portefeuille...")
+    try:
+        s = db.run_status_checks(online=True)
+    except Exception as exc:
+        logger.warning(f"Statuscontrole mislukt (niet kritiek): {exc}")
+        return
+    logger.info(f"✅ Statuscontrole: {s.get('checked', 0)} activa gecontroleerd — "
+                f"{s.get('new', 0)} nieuw(e), {s.get('resolved', 0)} opgelost, "
+                f"{s.get('open', 0)} open waarschuwing(en)"
+                + (f", {s['errors']} netwerkfout(en)" if s.get('errors') else ""))
+
+
 def on_job_error(event):
     logger.error(f"❌ Job '{event.job_id}' mislukt: {event.exception}")
 
@@ -247,6 +265,15 @@ def main():
         job_refresh_ai_prices,
         trigger=CronTrigger(day=1, hour=7, minute=30, timezone=BRUSSELS),
         id="monthly_ai_prices",
+        replace_existing=True,
+        misfire_grace_time=3600,
+    )
+
+    # ── Dagelijkse statuscontrole: 22:45 (na de VS-slotbel + koersopvolging) ──
+    scheduler.add_job(
+        job_status_checks,
+        trigger=CronTrigger(hour=22, minute=45, timezone=BRUSSELS),
+        id="status_checks",
         replace_existing=True,
         misfire_grace_time=3600,
     )

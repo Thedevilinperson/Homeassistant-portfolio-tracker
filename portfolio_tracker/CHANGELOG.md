@@ -2,6 +2,50 @@
 
 Alle noemenswaardige wijzigingen aan de Portfolio Tracker add-on.
 
+## 0.38.0
+Punt 2 + 3 van Groep B: een aparte statuspagina die de gezondheid van je koersdata bewaakt,
+met automatische detectie van tickerwijzigingen, splits, naamsafwijkingen, verouderde koersen
+en dagen zonder koersbeweging.
+
+**Nieuwe pagina '🩺 Status'.** Toont openstaande waarschuwingen met een kleurbadge per ernst
+(🔴 fout, 🟠 waarschuwing, 🔵 info), telkens met activum, boodschap, sinds-wanneer en acties
+('✓ Gezien', 'Sluiten', en bij een split 'Split registreren'). Een knop '🔄 Nu controleren'
+draait de controle meteen; ze draait sowieso elke dag automatisch om 22:45 (nieuwe planner-job).
+
+**Wat er gecontroleerd wordt:**
+- **Tickerwijziging / meerdere producten onder één ISIN.** Yahoo geeft voor sommige ISIN's
+  meerdere symbolen terug (bv. SK Hynix: het oude SKHYV blijft bestaan naast het nieuwe SKHY,
+  maar beweegt niet meer). De app kiest nu het symbool dat het RECENTST verhandeld werd (op
+  basis van de noteringstijd), werkt de kolom 'Gevonden ticker' (resolved_symbol) automatisch
+  bij, en meldt de wijziging. Zo pakt de app voortaan de juiste, actieve koers.
+- **Aandelensplits.** Uitgevoerde splits (via yfinance) die nog niet geregistreerd zijn, worden
+  gemeld. Ze worden NIET automatisch toegepast — dat zou je kostbasis wijzigen; pas na 'Split
+  registreren' worden je transacties aangepast (FIFO).
+- **Naamsafwijking.** Wijkt de naam bij de bron sterk af van de opgeslagen naam (na normalisatie
+  van suffixen als Inc/AG/ADR), dan wordt dat gemeld — een mogelijke indicatie van een fusie of
+  rebranding.
+- **Verouderde koers.** Geen nieuwe koers sinds meer dan X dagen (instelbaar via
+  'status_stale_days', standaard 4). Dit ving in de tests meteen de bevroren SK Hynix-koers op.
+- **Geen koersbeweging op een dag.** Een activum waarvan de koers een hele dag identiek bleef
+  (min = max over minstens 3 metingen) — bv. AMZE, waar de bron telkens dezelfde slotkoers
+  teruggeeft. Dit is het signaal dat je vroeg voor de US-aandelen op 0%.
+
+Toestanden die niet meer gelden (koers wordt weer ververst, split geregistreerd, ...) worden bij
+de volgende controle automatisch gesloten. Dezelfde toestand levert geen dubbele waarschuwingen.
+
+**Verband met punt 1.** Een US-aandeel op 0% is normaal als de markt gesloten is; is er écht een
+updateprobleem (zoals de SK Hynix-tickerwijziging), dan verschijnt dat nu als 'Verouderde koers'
+én 'Tickerwijziging' op deze pagina, met de koers die zichzelf herstelt zodra het actieve symbool
+gekozen is.
+
+Opmerkingen: de online-detectie ('Nu controleren') doet netwerkcalls per activum en kan bij een
+grote portefeuille even duren. De netwerkdelen zijn met mocks getest (de sandbox heeft geen
+live toegang); de databasedelen (verouderd/geen beweging, opslag, auto-sluiten) zijn end-to-end
+getest. Aangekondigde (nog niet uitgevoerde) splits zijn via gratis bronnen niet betrouwbaar
+detecteerbaar — enkel uitgevoerde splits worden opgepikt.
+
+Herbouwen (niet enkel herstarten) via de knop "Herbouwen" in Home Assistant.
+
 ## 0.37.0
 Punt 8 van Groep B: een volledige koersdoel-historiek per activum op de Evolutie-pagina,
 met alle koersdoelen erin - handmatig én AI - en de mogelijkheid om een koersdoel opnieuw

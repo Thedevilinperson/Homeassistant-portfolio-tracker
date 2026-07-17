@@ -4777,6 +4777,101 @@ def page_simulation():
                 "wordt de kostbasis voor toekomstige meerwaarden de heraankoopprijs.")
 
 
+def page_status():
+    st.title("🩺 Status & waarschuwingen")
+    st.caption("De gezondheid van je koersdata op één plek: verouderde koersen, dagen zonder "
+               "koersbeweging, tickerwijzigingen of meerdere producten onder één ISIN, "
+               "niet-geregistreerde aandelensplits en naamsafwijkingen (mogelijke fusie of "
+               "rebranding).")
+
+    last = db.get_setting("status_last_run")
+    c1, c2 = st.columns([1, 2])
+    with c1:
+        if st.button("🔄 Nu controleren", type="primary", width="stretch"):
+            with st.spinner("Statuscontrole uitvoeren (koersdata + online bronnen)..."):
+                summary = db.run_status_checks(online=True)
+            st.session_state["status_last_summary"] = summary
+            clear_cache()
+            st.rerun()
+    with c2:
+        if last:
+            st.caption(f"Laatste controle: {_short_ts(last)} · draait ook automatisch elke dag "
+                       "om 22:45.")
+        else:
+            st.caption("Nog geen automatische controle uitgevoerd — klik op 'Nu controleren' of "
+                       "wacht op de dagelijkse run (22:45).")
+
+    summ = st.session_state.get("status_last_summary")
+    if summ:
+        st.info(f"Laatste run: {summ.get('checked', 0)} activa gecontroleerd · "
+                f"{summ.get('new', 0)} nieuw · {summ.get('resolved', 0)} opgelost · "
+                f"{summ.get('open', 0)} open"
+                + (f" · {summ['errors']} netwerkfout(en)" if summ.get('errors') else "")
+                + ("" if summ.get("online") else " · (offline: enkel koersdata-checks)"))
+
+    events = db.get_status_events()
+    if not events:
+        st.success("✅ Geen openstaande waarschuwingen. Je koersdata ziet er gezond uit.")
+        st.caption("Tip: staat een US-aandeel op 0% dagwinst, kijk dan op het Dashboard naar de "
+                   "kolom 'Laatste update'. Is die recent, dan is 0% normaal (markt gesloten); "
+                   "staat ze dagen terug, dan verschijnt hier een waarschuwing 'Verouderde koers'.")
+        return
+
+    names = asset_name_map()
+    SEV = {"error": "🔴", "warning": "🟠", "info": "🔵"}
+    KIND = {"stale_price": "Verouderde koers", "flat_price": "Geen koersbeweging",
+            "ticker_change": "Tickerwijziging", "split": "Aandelensplit",
+            "name_change": "Naamsafwijking"}
+
+    n_warn = sum(1 for e in events if e["severity"] in ("warning", "error"))
+    n_info = sum(1 for e in events if e["severity"] == "info")
+    st.markdown(f"**{len(events)} openstaande waarschuwing(en)** — {n_warn} ter opvolging, "
+                f"{n_info} informatief.")
+    st.divider()
+
+    for e in events:
+        icon = SEV.get(e["severity"], "⚪")
+        nm = names.get(e["ticker"], e["ticker"])
+        d = e.get("detail") or {}
+        with st.container(border=True):
+            left, right = st.columns([5, 1])
+            with left:
+                ack = " · ✓ gezien" if e.get("acknowledged") else ""
+                st.markdown(f"{icon} **{nm}** ({e['ticker']}) · *{KIND.get(e['kind'], e['kind'])}*{ack}")
+                st.write(e["message"])
+                meta = f"Sinds {_short_ts(e['detected_at'])}"
+                if e.get("isin"):
+                    meta += f" · ISIN {e['isin']}"
+                if e["kind"] == "ticker_change" and d.get("candidates"):
+                    meta += f" · kandidaten: {', '.join(d['candidates'])}"
+                if e["kind"] == "name_change" and d.get("yahoo"):
+                    meta += f" · bron: '{d['yahoo']}'"
+                if e["kind"] == "ticker_change" and d.get("new"):
+                    meta += " · 'Gevonden ticker' is automatisch bijgewerkt"
+                st.caption(meta)
+            with right:
+                if e["kind"] == "split" and d.get("splits"):
+                    if st.button("Split registreren", key=f"sp_{e['id']}", width="stretch"):
+                        for d_, r_ in d["splits"]:
+                            db.add_split(e["ticker"], d_, float(r_))
+                        db.resolve_status_event_by_id(e["id"])
+                        clear_cache()
+                        st.rerun()
+                if not e.get("acknowledged"):
+                    if st.button("✓ Gezien", key=f"ack_{e['id']}", width="stretch"):
+                        db.acknowledge_status_event(e["id"])
+                        st.rerun()
+                if st.button("Sluiten", key=f"cl_{e['id']}", width="stretch"):
+                    db.resolve_status_event_by_id(e["id"])
+                    st.rerun()
+
+    st.caption("'Sluiten' verbergt een waarschuwing; blijft de toestand bestaan, dan verschijnt "
+               "ze bij de volgende controle opnieuw. Een aandelensplit wordt NIET automatisch "
+               "toegepast — pas na 'Split registreren' worden je transacties en kostbasis "
+               "aangepast (FIFO). Een gedetecteerde tickerwijziging werkt de kolom 'Gevonden "
+               "ticker' meteen bij en selecteert voortaan het actieve symbool.")
+
+
 PAGES = {
     "📊 Dashboard":            page_dashboard,
     "💼 Portefeuille":         page_portfolio,
@@ -4788,6 +4883,7 @@ PAGES = {
     "🧮 Simulatie":            page_simulation,
     "🧾 Belgische Belasting":  page_tax,
     "🤖 AI Advisor":           page_ai_advisor,
+    "🩺 Status":               page_status,
     "⚙️ Instellingen":         page_settings,
 }
 

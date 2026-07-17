@@ -133,6 +133,21 @@ def init_db():
         );
         CREATE INDEX IF NOT EXISTS idx_pth_ticker ON price_target_history(ticker, set_at);
 
+        CREATE TABLE IF NOT EXISTS status_events (
+            id          INTEGER PRIMARY KEY AUTOINCREMENT,
+            ticker      TEXT    NOT NULL,
+            isin        TEXT,
+            kind        TEXT    NOT NULL,   -- stale_price|flat_price|ticker_change|split|name_change
+            severity    TEXT    DEFAULT 'warning',  -- info|warning|error
+            message     TEXT,
+            detail      TEXT,               -- JSON met specifieke gegevens
+            detected_at TEXT    DEFAULT (datetime('now')),
+            updated_at  TEXT    DEFAULT (datetime('now')),
+            resolved_at TEXT,               -- gevuld wanneer de toestand niet meer geldt
+            acknowledged INTEGER DEFAULT 0  -- door de gebruiker afgevinkt
+        );
+        CREATE INDEX IF NOT EXISTS idx_status_open ON status_events(ticker, kind, resolved_at);
+
         CREATE TABLE IF NOT EXISTS market_ideas (
             id              INTEGER PRIMARY KEY AUTOINCREMENT,
             batch_id        TEXT    NOT NULL,
@@ -215,6 +230,7 @@ def init_db():
             ('investment_volume_month',     '0'),
             ('investment_volume_year',      '0'),
             ('openai_price_target_model',   ''),
+            ('status_stale_days',           '4'),
             ('anthropic_api_key',           ''),
             ('openai_api_key',              '');
     """)
@@ -955,6 +971,259 @@ def get_tickers_with_target_history() -> list[str]:
     ).fetchall()
     conn.close()
     return [r["ticker"] for r in rows]
+
+
+# ── Statusgebeurtenissen / waarschuwingen (punt 2 + 3) ───────────────────────
+
+import json as _json
+
+
+def record_status_event(ticker: str, kind: str, severity: str, message: str,
+                        detail=None, isin: str | None = None) -> bool:
+    """Registreer (of werk bij) een openstaande statusgebeurtenis voor (ticker, kind).
+
+    Bestaat er al een OPENSTAANDE (niet-opgeloste) gebeurtenis van dezelfde soort voor
+    deze ticker, dan wordt die bijgewerkt (boodschap/detail/tijd) zonder de gebruiker
+    opnieuw te alarmeren — het blijft één lopende waarschuwing. Bestaat ze nog niet, dan
+    wordt er een nieuwe aangemaakt. Geeft True terug als er een NIEUWE gebeurtenis is
+    aangemaakt (voor de teller 'nieuw')."""
+    det = _json.dumps(detail, ensure_ascii=False) if detail is not None else None
+    conn = get_connection()
+    row = conn.execute(
+        "SELECT id FROM status_events WHERE ticker=? AND kind=? AND resolved_at IS NULL "
+        "ORDER BY id DESC LIMIT 1", (ticker.upper(), kind)
+    ).fetchone()
+    created = False
+    if row:
+        conn.execute(
+            "UPDATE status_events SET severity=?, message=?, detail=?, isin=COALESCE(?,isin), "
+            "updated_at=datetime('now') WHERE id=?",
+            (severity, message, det, isin, row["id"])
+        )
+    else:
+        conn.execute(
+            "INSERT INTO status_events (ticker,isin,kind,severity,message,detail) "
+            "VALUES (?,?,?,?,?,?)", (ticker.upper(), isin, kind, severity, message, det)
+        )
+        created = True
+    conn.commit()
+    conn.close()
+    return created
+
+
+def resolve_status_event(ticker: str, kind: str) -> int:
+    """Sluit de openstaande gebeurtenis(sen) van (ticker, kind) — de toestand geldt niet
+    meer (bv. de koers wordt weer bijgewerkt). Geeft het aantal gesloten rijen terug."""
+    conn = get_connection()
+    cur = conn.execute(
+        "UPDATE status_events SET resolved_at=datetime('now') "
+        "WHERE ticker=? AND kind=? AND resolved_at IS NULL", (ticker.upper(), kind)
+    )
+    n = cur.rowcount
+    conn.commit()
+    conn.close()
+    return n or 0
+
+
+def acknowledge_status_event(event_id: int) -> None:
+    conn = get_connection()
+    conn.execute("UPDATE status_events SET acknowledged=1, updated_at=datetime('now') WHERE id=?",
+                 (event_id,))
+    conn.commit()
+    conn.close()
+
+
+def resolve_status_event_by_id(event_id: int) -> None:
+    conn = get_connection()
+    conn.execute("UPDATE status_events SET resolved_at=datetime('now') WHERE id=?", (event_id,))
+    conn.commit()
+    conn.close()
+
+
+def delete_status_event(event_id: int) -> None:
+    conn = get_connection()
+    conn.execute("DELETE FROM status_events WHERE id=?", (event_id,))
+    conn.commit()
+    conn.close()
+
+
+def get_status_events(include_resolved: bool = False) -> list[dict]:
+    """Openstaande statusgebeurtenissen (of alle, incl. opgeloste). Detail wordt naar een
+    dict teruggeparset."""
+    conn = get_connection()
+    q = "SELECT * FROM status_events"
+    if not include_resolved:
+        q += " WHERE resolved_at IS NULL"
+    q += " ORDER BY (severity='error') DESC, (severity='warning') DESC, updated_at DESC, id DESC"
+    rows = conn.execute(q).fetchall()
+    conn.close()
+    out = []
+    for r in rows:
+        d = dict(r)
+        try:
+            d["detail"] = _json.loads(d["detail"]) if d.get("detail") else {}
+        except (ValueError, TypeError):
+            d["detail"] = {}
+        out.append(d)
+    return out
+
+
+def detect_stale_prices(tickers: list[str], max_days: float) -> list[dict]:
+    """Tickers waarvan de laatst vastgelegde koers ouder is dan max_days. Puur op basis
+    van price_history — geen netwerk. Tickers zonder enige koers worden overgeslagen."""
+    if not tickers:
+        return []
+    latest = get_latest_prices(tickers)
+    now = datetime.now()
+    out = []
+    for t in tickers:
+        row = latest.get(t.upper())
+        if not row or not row.get("timestamp"):
+            continue
+        try:
+            ts = datetime.strptime(str(row["timestamp"])[:19], "%Y-%m-%d %H:%M:%S")
+        except (ValueError, TypeError):
+            continue
+        age_days = (now - ts).total_seconds() / 86400.0
+        if age_days > max_days:
+            out.append({
+                "ticker": t.upper(),
+                "message": (f"Geen nieuwe koers sinds {ts.strftime('%d/%m %H:%M')} "
+                            f"({age_days:.0f} dagen geleden)."),
+                "detail": {"last": row["timestamp"], "age_days": round(age_days, 1)},
+            })
+    return out
+
+
+def detect_flat_prices(tickers: list[str], min_measurements: int = 3) -> list[dict]:
+    """Tickers die op hun recentste koersdag GEEN ENKELE koersbeweging vertoonden
+    (min == max over minstens 'min_measurements' metingen die dag). Puur uit
+    price_history — geen netwerk. Signaleert o.a. een effect waarvan de koers de hele
+    dag identiek blijft (bv. omdat de bron telkens dezelfde slotkoers teruggeeft)."""
+    if not tickers:
+        return []
+    keys = [t.upper() for t in tickers]
+    placeholders = ",".join("?" * len(keys))
+    conn = get_connection()
+    out = []
+    for t in keys:
+        row = conn.execute(
+            """SELECT date(timestamp) d, COUNT(*) n, MIN(price) mn, MAX(price) mx
+               FROM price_history WHERE ticker=?
+               GROUP BY date(timestamp) ORDER BY d DESC LIMIT 1""", (t,)
+        ).fetchone()
+        if not row or not row["d"]:
+            continue
+        if (row["n"] or 0) >= min_measurements and row["mn"] is not None \
+                and abs((row["mn"] or 0) - (row["mx"] or 0)) < 1e-9:
+            out.append({
+                "ticker": t,
+                "message": (f"Koers bewoog niet op {row['d']} — {row['n']} metingen, "
+                            f"allemaal dezelfde waarde."),
+                "detail": {"date": row["d"], "n": row["n"], "price": row["mn"]},
+            })
+    conn.close()
+    return out
+
+
+def run_status_checks(online: bool = True, tickers: list[str] | None = None) -> dict:
+    """Voer alle statuscontroles uit en werk de status_events-tabel bij. Bedoeld voor
+    de dagelijkse planner (online=True) én de knop op de statuspagina.
+
+    - Altijd (geen netwerk): verouderde koersen en 'geen koersbeweging op een dag'.
+    - Online: tickerwijziging/meerdere producten onder één ISIN (met bijwerken van de
+      resolved_symbol-kolom), niet-geregistreerde aandelensplits, en naamsafwijkingen.
+    Toestanden die niet meer gelden worden automatisch gesloten. Splits worden NIET
+    automatisch toegepast (dat zou de kostbasis wijzigen) — enkel gemeld."""
+    if tickers is None:
+        try:
+            import belgian_tax as _bt
+            tickers, _ = _bt.open_position_tickers()
+        except Exception:
+            tickers = [a["ticker"] for a in get_assets()]
+    tickers = [t.upper() for t in (tickers or [])]
+    assets = {a["ticker"].upper(): a for a in get_assets()}
+    summary = {"checked": len(tickers), "new": 0, "resolved": 0, "open": 0,
+               "online": online, "errors": 0}
+
+    try:
+        stale_days = float(get_setting("status_stale_days", "4") or 4)
+    except (ValueError, TypeError):
+        stale_days = 4.0
+
+    stale = {f["ticker"]: f for f in detect_stale_prices(tickers, stale_days)}
+    flat = {f["ticker"]: f for f in detect_flat_prices(tickers)}
+
+    md = None
+    if online:
+        try:
+            import market_data as md  # lazy, defensief
+        except Exception as e:
+            logger.warning(f"run_status_checks: market_data niet importeerbaar ({e})")
+            md = None
+
+    for t in tickers:
+        a = assets.get(t, {"ticker": t})
+        isin = a.get("isin")
+
+        # DB-checks
+        if t in stale:
+            if record_status_event(t, "stale_price", "warning", stale[t]["message"],
+                                   stale[t]["detail"], isin):
+                summary["new"] += 1
+        else:
+            summary["resolved"] += resolve_status_event(t, "stale_price")
+
+        if t in flat:
+            if record_status_event(t, "flat_price", "info", flat[t]["message"],
+                                   flat[t]["detail"], isin):
+                summary["new"] += 1
+        else:
+            summary["resolved"] += resolve_status_event(t, "flat_price")
+
+        # Netwerk-checks
+        if online and md is not None:
+            try:
+                probe = md.asset_status_probe(a, online=True)
+            except Exception as e:
+                logger.info(f"asset_status_probe({t}): {e}")
+                summary["errors"] += 1
+                probe = None
+            if probe:
+                rs = (probe.get("resolved_symbol") or "").strip().upper()
+                if rs and rs != (a.get("resolved_symbol") or "").strip().upper():
+                    try:
+                        update_asset(t, resolved_symbol=rs)
+                    except Exception as e:
+                        logger.warning(f"resolved_symbol bijwerken ({t}) faalde: {e}")
+                evs = {e["kind"]: e for e in probe.get("events", [])}
+                for kind in ("ticker_change", "name_change"):
+                    if kind in evs:
+                        e = evs[kind]
+                        if record_status_event(t, kind, e["severity"], e["message"],
+                                               e.get("detail"), isin):
+                            summary["new"] += 1
+                    else:
+                        summary["resolved"] += resolve_status_event(t, kind)
+                # Splits: enkel nog niet-geregistreerde melden (niet auto-toepassen)
+                known = {(s["split_date"], round(float(s["ratio"]), 6)) for s in get_splits(t)}
+                new_splits = [(d, r) for (d, r) in probe.get("splits", [])
+                              if (d, round(float(r), 6)) not in known]
+                if new_splits:
+                    d, r = sorted(new_splits)[-1]
+                    msg = f"Niet-geregistreerde aandelensplit gedetecteerd: {r:g}-voudig op {d}."
+                    if record_status_event(t, "split", "warning", msg,
+                                           {"splits": new_splits}, isin):
+                        summary["new"] += 1
+                else:
+                    summary["resolved"] += resolve_status_event(t, "split")
+
+    summary["open"] = len(get_status_events())
+    try:
+        set_setting("status_last_run", datetime.now().strftime("%Y-%m-%d %H:%M:00"))
+    except Exception:
+        pass
+    return summary
 
 
 # ── AI-gebruik & kosten ───────────────────────────────────────────────────────
