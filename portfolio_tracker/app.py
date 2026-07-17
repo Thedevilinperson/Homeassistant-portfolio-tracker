@@ -1759,12 +1759,12 @@ def page_assets():
                 elif _name_found:
                     st.info("ℹ️ Naam gevonden, maar (nog) geen automatische koers. Controleer de "
                             "velden en klik op Toevoegen — de app blijft koersen proberen via de "
-                            "ISIN (onvista, Börse Frankfurt, Tradegate, Lang & Schwarz). Lukt dat "
+                            "ISIN (onvista, Euronext, Tradegate, Deutsche Börse Live). Lukt dat "
                             "niet, zet dan een **handmatige koers** in het overzicht als laatste redmiddel.")
                 else:
                     st.info("ℹ️ Deze ISIN staat niet op Yahoo en er werd (nog) geen naam of externe koers "
                             "gevonden. Vul zelf een **naam** in en klik op Toevoegen — de app blijft koersen "
-                            "proberen via de ISIN (onvista, Börse Frankfurt, Tradegate, Lang & Schwarz). "
+                            "proberen via de ISIN (onvista, Euronext, Tradegate, Deutsche Börse Live). "
                             "Lukt dat niet, zet dan een **handmatige koers** in het overzicht als laatste "
                             "redmiddel.")
             else:
@@ -1873,7 +1873,7 @@ def page_assets():
                                               help="Slotkoers 31/12/2025 (native). Leeg = geen fotomoment."),
                 "Handmatige koers": cc.NumberColumn(min_value=0.0, format="%.10g",
                                               help="Laatste redmiddel: enkel gebruikt als geen enkele onlinebron "
-                                                   "(Yahoo, onvista, Börse Frankfurt, Tradegate, Lang & Schwarz) een koers "
+                                                   "(Yahoo, onvista, Euronext, Tradegate, Deutsche Börse Live) een koers "
                                                    "vindt. Zet de ISIN correct in — dan werken de meeste warrants "
                                                    "automatisch. Leeg = volledig automatisch."),
                 "Mislukt": cc.NumberColumn(
@@ -1893,7 +1893,7 @@ def page_assets():
                    "buitenlandse bronbelasting en de EUR-fotomomentwaarde volgen automatisch. "
                    "Staat een effect niet op Yahoo (bv. een warrant)? Vul de **ISIN** in — koersen "
                    "worden dan via de ISIN opgehaald (Yahoo, onvista, Euronext, Tradegate, L&S, "
-                   "Börse Frankfurt). Vindt geen enkele bron het effect, zet dan een "
+                   "Deutsche Börse Live). Vindt geen enkele bron het effect, zet dan een "
                    "**handmatige koers** én vink **Enkel handm.** aan — dat stopt ook de "
                    "foutmeldingen in de log.")
 

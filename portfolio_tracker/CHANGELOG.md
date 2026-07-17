@@ -2,6 +2,39 @@
 
 Alle noemenswaardige wijzigingen aan de Portfolio Tracker add-on.
 
+## 0.39.0
+Punt 5 van Groep C: Deutsche Börse Live als koersbron, en de aparte bronnen 'Börse Frankfurt'
+en 'Lang & Schwarz' verwijderd.
+
+**Nieuwe bron 'Deutsche Börse Live' (live.deutsche-boerse.com).** Belangrijk om te weten: die
+site gebruikt dezelfde officiële backend als Xetra/Börse Frankfurt (api.boerse-frankfurt.de) —
+er is geen aparte, salt-vrije API. De vroegere twee bronnen zijn daarom samengevoegd tot één
+nette bron die per handelsplaats (MIC) achtereenvolgens probeert:
+1. de kop-koers zoals de live-site die toont (quote_box/single — één call, de 'last price');
+2. de recentste bied/laat (dekt illiquide certificaten zonder recente trade);
+3. de laatste EOD-slotkoers van de afgelopen 14 dagen.
+De bewezen stappen 2 en 3 (die de oude 'Börse Frankfurt'-bron ook al deed) blijven behouden, met
+de kop-koers als snellere eerste poging erbovenop.
+
+**Verwijderd:** de aparte providers 'Börse Frankfurt' en 'Lang & Schwarz' (ls-tc.de), inclusief
+de L&S-functie. De onderliggende Deutsche Börse-API-client (sessie, salt, headers, backoff) is
+hergebruikt en hernoemd naar een neutrale naam, want die client praat met dezelfde officiële
+backend en is nog nodig voor de nieuwe bron én voor de historische slotkoers van het fotomoment.
+
+**Bronvolgorde nu:** Yahoo → onvista → Euronext → Tradegate → Deutsche Börse Live. Deutsche
+Börse Live staat bewust laatst: de backend-WAF geeft af en toe 403 en elke poging kost door de
+salt-/retry-afhandeling meer tijd. De bronvermeldingen in de app (activaformulier, diagnose) zijn
+overal bijgewerkt.
+
+Eerlijke kanttekening: omdat de backend dezelfde is als de oude 'Börse Frankfurt', is de winst
+vooral consolidatie (één nette bron i.p.v. twee overlappende) plus de snellere quote_box-call.
+Of de WAF je stoort hangt af van je IP — vanaf je thuisnetwerk (residentieel IP) is de kans
+kleiner dan vanuit een datacenter. Ik kon de nieuwe endpoint niet vanuit de sandbox live testen
+(geen netwerktoegang tot die host); de bron-selectie en de terugval-logica zijn met mocks getest,
+de echte werking test jij live zoals afgesproken.
+
+Herbouwen (niet enkel herstarten) via de knop "Herbouwen" in Home Assistant.
+
 ## 0.38.0
 Punt 2 + 3 van Groep B: een aparte statuspagina die de gezondheid van je koersdata bewaakt,
 met automatische detectie van tickerwijzigingen, splits, naamsafwijkingen, verouderde koersen

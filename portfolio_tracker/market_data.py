@@ -419,16 +419,16 @@ def _price_tradegate(isin: str) -> tuple[float | None, str | None]:
     return None, None
 
 
-_BF_SALT_CACHE: dict = {"salt": None, "ts": 0.0, "source": None}
+_DBG_SALT_CACHE: dict = {"salt": None, "ts": 0.0, "source": None}
 # Fallback-salt (uit een oudere JS-bundle). Wordt enkel gebruikt als het dynamisch
 # ophalen faalt; de salt kan wijzigen, daarom halen we ze bij voorkeur live op.
-_BF_SALT_FALLBACK = "w4icATTGtnjAZMbkL3kJwxMfEAKDa3MN"
+_DBG_SALT_FALLBACK = "w4icATTGtnjAZMbkL3kJwxMfEAKDa3MN"
 
-_BF_SESSION = None
-_BF_BLOCK = {"until": 0.0, "last_force": 0.0, "fails": 0}
+_DBG_SESSION = None
+_DBG_BLOCK = {"until": 0.0, "last_force": 0.0, "fails": 0}
 
 
-def _bf_urlencode(params: dict) -> str:
+def _dbg_urlencode(params: dict) -> str:
     """Canonieke, deterministische query-string voor de trace-id-hash. De server
     herrekent de hash over de URL die hij ontvangt; de gehashte string moet dus
     byte-identiek zijn aan wat effectief verstuurd wordt. Daarom: percent-encoding
@@ -444,7 +444,7 @@ def _bf_urlencode(params: dict) -> str:
     return urllib.parse.urlencode(norm, quote_via=urllib.parse.quote)
 
 # Volwaardige browserheaders: de WAF van boerse-frankfurt.de weigert kale clients.
-_BF_BROWSER_HEADERS = {
+_DBG_BROWSER_HEADERS = {
     "User-Agent": ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
                    "(KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36"),
     "Accept-Language": "de-DE,de;q=0.9,en;q=0.8",
@@ -460,15 +460,15 @@ _BF_BROWSER_HEADERS = {
 }
 
 
-def _bf_session():
+def _dbg_session():
     """Eén gedeelde sessie voor alle Börse-Frankfurt-verkeer. Bij voorkeur via
     curl_cffi met Chrome-imitatie: hun WAF blokkeert clients op TLS-vingerafdruk,
     en de standaard Python-requests-handdruk wordt als bot herkend (403 met leeg
     antwoord, ondanks correcte salt en headers). curl_cffi zit al in de container
     (dependency van yfinance). Terugval: gewone requests.Session. De sessie bezoekt
     eerst de homepage zodat WAF-cookies verzameld worden."""
-    global _BF_SESSION
-    if _BF_SESSION is None:
+    global _DBG_SESSION
+    if _DBG_SESSION is None:
         s = None
         try:
             from curl_cffi import requests as curl_requests
@@ -480,18 +480,18 @@ def _bf_session():
                 "Referer": "https://www.boerse-frankfurt.de/",
                 "Accept-Language": "de-DE,de;q=0.9,en;q=0.8",
             })
-            logger.info("_bf_session: curl_cffi met Chrome-imitatie actief")
+            logger.info("_dbg_session: curl_cffi met Chrome-imitatie actief")
         except Exception as e:
-            logger.warning(f"_bf_session: curl_cffi niet bruikbaar ({e}); terugval op requests "
+            logger.warning(f"_dbg_session: curl_cffi niet bruikbaar ({e}); terugval op requests "
                            "(kans op 403 door TLS-vingerafdruk)")
             import requests
             s = requests.Session()
-            s.headers.update(_BF_BROWSER_HEADERS)
-        _BF_SESSION = s
-    return _BF_SESSION
+            s.headers.update(_DBG_BROWSER_HEADERS)
+        _DBG_SESSION = s
+    return _DBG_SESSION
 
 
-def _bf_salt(force: bool = False) -> str:
+def _dbg_salt(force: bool = False) -> str:
     """Haal de (wisselende) salt van boerse-frankfurt.de dynamisch op. De salt zit in
     een JS-bundle waarvan de naam per build/framework verandert (main.HASH.js,
     main-HASH.js, index-HASH.js, chunks...). Daarom generiek: eerst de homepage-HTML
@@ -500,13 +500,13 @@ def _bf_salt(force: bool = False) -> str:
     falen wélke bundles er gevonden werden, zodat de add-on-log de diagnose toont."""
     import time
     now = time.time()
-    if not force and _BF_SALT_CACHE["salt"] and (now - _BF_SALT_CACHE["ts"] < 86400):
-        return _BF_SALT_CACHE["salt"]
+    if not force and _DBG_SALT_CACHE["salt"] and (now - _DBG_SALT_CACHE["ts"] < 86400):
+        return _DBG_SALT_CACHE["salt"]
     salt, why = None, ""
     SALT_RE = r'salt\s*[:=]\s*["\'](\w{8,})["\']'
     try:
         import re
-        s = _bf_session()
+        s = _dbg_session()
         resp = s.get("https://www.boerse-frankfurt.de/", timeout=8)
         if not resp.ok:
             why = f"homepage HTTP {resp.status_code}"
@@ -563,13 +563,13 @@ def _bf_salt(force: bool = False) -> str:
     except Exception as e:
         why = str(e)
     if salt:
-        logger.info(f"_bf_salt: dynamisch opgehaald ({salt[:6]}...)")
-        _BF_SALT_CACHE.update(salt=salt, ts=now, source="dynamisch")
+        logger.info(f"_dbg_salt: dynamisch opgehaald ({salt[:6]}...)")
+        _DBG_SALT_CACHE.update(salt=salt, ts=now, source="dynamisch")
     else:
-        logger.warning(f"_bf_salt: TERUGVAL-salt gebruikt (dynamisch ophalen mislukt: {why}). "
-                       "Als Börse Frankfurt 403 blijft geven, is deze salt wellicht verouderd.")
-        _BF_SALT_CACHE.update(salt=_BF_SALT_FALLBACK, ts=now, source="terugval")
-    return _BF_SALT_CACHE["salt"]
+        logger.warning(f"_dbg_salt: TERUGVAL-salt gebruikt (dynamisch ophalen mislukt: {why}). "
+                       "Als Deutsche Börse Live 403 blijft geven, is deze salt wellicht verouderd.")
+        _DBG_SALT_CACHE.update(salt=_DBG_SALT_FALLBACK, ts=now, source="terugval")
+    return _DBG_SALT_CACHE["salt"]
 
 
 def _frankfurt_now():
@@ -591,7 +591,7 @@ def _frankfurt_now():
         return utc + datetime.timedelta(hours=2 if dst else 1)
 
 
-def _bf_headers(url: str) -> dict:
+def _dbg_headers(url: str) -> dict:
     """Vereiste Börse-Frankfurt-headers: Client-Date (UTC ISO), X-Client-TraceId
     (md5 van datum+URL+salt) en X-Security (md5 van de Frankfurt-tijd JJJJMMDDUUMM).
     Algoritme geverifieerd tegen het gedocumenteerde voorbeeld en tegen bf4py."""
@@ -599,7 +599,7 @@ def _bf_headers(url: str) -> dict:
     import datetime
     now_utc = datetime.datetime.now(datetime.timezone.utc).replace(tzinfo=None)
     client_date = now_utc.isoformat(timespec="milliseconds") + "Z"
-    salt = _bf_salt()
+    salt = _dbg_salt()
     return {
         "client-date":      client_date,
         "x-client-traceid": hashlib.md5((client_date + url + salt).encode()).hexdigest(),
@@ -609,75 +609,75 @@ def _bf_headers(url: str) -> dict:
 
 
 import threading
-_BF_LOCK = threading.Lock()  # gedeelde BF-sessie + salt-/blok-status zijn niet
+_DBG_LOCK = threading.Lock()  # gedeelde BF-sessie + salt-/blok-status zijn niet
                              # thread-safe; koersen worden sinds 0.30.0 parallel
                              # opgehaald, dus BF-calls verlopen een voor een
 
 
-def _bf_request(function: str, params: dict, _retry: bool = True):
+def _dbg_request(function: str, params: dict, _retry: bool = True):
     """GET naar https://api.boerse-frankfurt.de/v1/data/<function>?<params> via de
     gedeelde sessie met de vereiste headers. Bij een 403 wordt eenmalig de salt vers
     opgehaald en opnieuw geprobeerd (de salt roteert af en toe). Blijft het 403, dan
     pauzeert de provider met exponentiële backoff (30s, 60s, 120s, ... max 10 min)
     zodat een tijdelijke weigering de interactieve app niet lang blokkeert; een
     geslaagde call reset de backoff. Logt status én een stukje van het antwoord.
-    Deze functie is geserialiseerd met een lock (zie _BF_LOCK)."""
+    Deze functie is geserialiseerd met een lock (zie _DBG_LOCK)."""
     import time
     import urllib.parse
-    with _BF_LOCK:
-        return _bf_request_locked(function, params, _retry)
+    with _DBG_LOCK:
+        return _dbg_request_locked(function, params, _retry)
 
 
-def _bf_request_locked(function: str, params: dict, _retry: bool = True):
+def _dbg_request_locked(function: str, params: dict, _retry: bool = True):
     import time
     import urllib.parse
-    if time.time() < _BF_BLOCK["until"]:
+    if time.time() < _DBG_BLOCK["until"]:
         return None  # recent geblokkeerd (403): even niet opnieuw proberen
-    url = "https://api.boerse-frankfurt.de/v1/data/" + function + "?" + _bf_urlencode(params)
+    url = "https://api.boerse-frankfurt.de/v1/data/" + function + "?" + _dbg_urlencode(params)
     try:
-        s = _bf_session()
-        resp = s.get(url, headers=_bf_headers(url), timeout=(3.5, 10))
-        if resp.status_code == 403 and _retry and time.time() - _BF_BLOCK["last_force"] > 300:
+        s = _dbg_session()
+        resp = s.get(url, headers=_dbg_headers(url), timeout=(3.5, 10))
+        if resp.status_code == 403 and _retry and time.time() - _DBG_BLOCK["last_force"] > 300:
             # Salt mogelijk geroteerd of cookies verlopen: vers ophalen en 1x opnieuw.
-            logger.info(f"_bf_request({function}): 403 — salt/cookies verversen en opnieuw proberen")
-            _BF_BLOCK["last_force"] = time.time()
-            _bf_salt(force=True)
-            return _bf_request_locked(function, params, _retry=False)
+            logger.info(f"_dbg_request({function}): 403 — salt/cookies verversen en opnieuw proberen")
+            _DBG_BLOCK["last_force"] = time.time()
+            _dbg_salt(force=True)
+            return _dbg_request_locked(function, params, _retry=False)
         if resp.status_code == 403:
-            _BF_BLOCK["fails"] = min(_BF_BLOCK["fails"] + 1, 6)
-            pause = min(600, 30 * (2 ** (_BF_BLOCK["fails"] - 1)))  # 30,60,120,240,480,600
-            _BF_BLOCK["until"] = time.time() + pause
+            _DBG_BLOCK["fails"] = min(_DBG_BLOCK["fails"] + 1, 6)
+            pause = min(600, 30 * (2 ** (_DBG_BLOCK["fails"] - 1)))  # 30,60,120,240,480,600
+            _DBG_BLOCK["until"] = time.time() + pause
             body = (resp.text or "")[:120].replace("\n", " ")
-            logger.warning(f"_bf_request({function}): HTTP 403 blijft na verse salt "
-                           f"(salt={_BF_SALT_CACHE.get('source')}) | {body} — "
-                           f"Börse Frankfurt {pause}s gepauzeerd (poging {_BF_BLOCK['fails']})")
+            logger.warning(f"_dbg_request({function}): HTTP 403 blijft na verse salt "
+                           f"(salt={_DBG_SALT_CACHE.get('source')}) | {body} — "
+                           f"Deutsche Börse Live {pause}s gepauzeerd (poging {_DBG_BLOCK['fails']})")
             return None
         if not resp.ok or not resp.text:
             body = (resp.text or "")[:120].replace("\n", " ")
-            logger.warning(f"_bf_request({function}): HTTP {resp.status_code} "
-                           f"(salt={_BF_SALT_CACHE.get('source')}) | {body}")
+            logger.warning(f"_dbg_request({function}): HTTP {resp.status_code} "
+                           f"(salt={_DBG_SALT_CACHE.get('source')}) | {body}")
             return None
         data = resp.json()
         if isinstance(data, dict) and data.get("messages"):
-            logger.warning(f"_bf_request({function}): geweigerd: {data['messages']}")
+            logger.warning(f"_dbg_request({function}): geweigerd: {data['messages']}")
             return None
-        _BF_BLOCK["fails"] = 0  # succes: backoff resetten
+        _DBG_BLOCK["fails"] = 0  # succes: backoff resetten
         return data
     except Exception as e:
-        logger.warning(f"_bf_request({function}): {e}")
+        logger.warning(f"_dbg_request({function}): {e}")
         return None
 
 
 # Handelsplaatsen (MIC) die we proberen als het instrument ze niet zelf meldt.
 # Warrants/certificaten (bv. ING Markets) noteren doorgaans op XFRA (Börse
 # Frankfurt Zertifikate) of XSC1/XSCO (Scoach); aandelen/ETF's op XETR.
-_BF_MICS = ["XFRA", "XSC1", "XSCO", "XETR", "XSTU"]
+_DBG_MICS = ["XFRA", "XSC1", "XSCO", "XETR", "XSTU"]
 
 
-def _bf_available_mics(isin: str) -> list:
+def _dbg_available_mics(isin: str) -> list:
     """Vraag de handelsplaatsen van dit instrument op via instrument_information;
     val terug op de standaardlijst als dat niet lukt."""
-    data = _bf_request("instrument_information", {"isin": isin})
+    data = _dbg_request("instrument_information", {"isin": isin})
     mics = []
     try:
         def _collect(obj):
@@ -694,26 +694,39 @@ def _bf_available_mics(isin: str) -> list:
     except Exception:
         pass
     seen, ordered = set(), []
-    for m in mics + _BF_MICS:
+    for m in mics + _DBG_MICS:
         if m not in seen:
             seen.add(m)
             ordered.append(m)
     return ordered
 
 
-def _price_boerse_frankfurt(isin: str) -> tuple[float | None, str | None]:
-    """(prijs, munt) via de Börse-Frankfurt-API. Werkt ook voor warrants en
-    certificaten (bv. ING Markets NL0015002RI2). Probeert per handelsplaats eerst
-    de recentste bied-/laatkoers (intraday) en daarna de laatste EOD-slotkoers."""
+def _price_deutsche_boerse(isin: str) -> tuple[float | None, str | None]:
+    """(prijs, munt) via Deutsche Börse Live (live.deutsche-boerse.com) — dezelfde
+    officiële databron als Xetra/Börse Frankfurt (api.boerse-frankfurt.de). Vervangt de
+    vroegere aparte 'Börse Frankfurt'- en 'Lang & Schwarz'-bronnen door één bron.
+
+    Per handelsplaats (MIC) in volgorde: (1) de kop-koers zoals de live-site die toont
+    (quote_box/single — één call), (2) de recentste bied/laat (dekt illiquide
+    certificaten zonder recente trade), (3) de laatste EOD-slotkoers van de afgelopen
+    14 dagen. Werkt ook voor warrants en certificaten. Alles defensief: elk afwijkend
+    antwoord levert (None, None) op zodat de volgende bron het overneemt."""
     if not _isin_valid(isin):
         return None, None
     import datetime
-    for mic in _bf_available_mics(isin)[:6]:
-        # 1) Recentste bied/laat (dekt illiquide certificaten zonder recente trade)
+    for mic in _dbg_available_mics(isin)[:6]:
+        # 1) Kop-koers zoals op live.deutsche-boerse.com (last price van de dag)
+        q = _dbg_request("quote_box/single", {"isin": isin, "mic": mic})
+        if isinstance(q, dict):
+            price = _to_float(q.get("lastPrice") or q.get("last") or q.get("price")
+                              or q.get("value"))
+            if price:
+                return price, (q.get("currency") or "EUR")
+        # 2) Recentste bied/laat (dekt illiquide certificaten zonder recente trade)
         now = datetime.datetime.now(datetime.timezone.utc)
         frm = (now - datetime.timedelta(days=5)).isoformat(timespec="seconds").replace("+00:00", "Z")
         to  = now.isoformat(timespec="seconds").replace("+00:00", "Z")
-        data = _bf_request("bid_ask_history",
+        data = _dbg_request("bid_ask_history",
                            {"limit": 1, "offset": 0, "isin": isin, "mic": mic,
                             "from": frm, "to": to})
         if isinstance(data, dict) and data.get("data"):
@@ -722,9 +735,9 @@ def _price_boerse_frankfurt(isin: str) -> tuple[float | None, str | None]:
                               or row.get("bidLimit") or row.get("askLimit"))
             if price:
                 return price, "EUR"
-        # 2) Laatste EOD-slotkoers (afgelopen 14 dagen)
+        # 3) Laatste EOD-slotkoers (afgelopen 14 dagen)
         today = datetime.date.today()
-        data = _bf_request("price_history",
+        data = _dbg_request("price_history",
                            {"isin": isin, "mic": mic, "limit": 20, "offset": 0,
                             "minDate": (today - datetime.timedelta(days=14)).isoformat(),
                             "maxDate": today.isoformat(),
@@ -736,72 +749,6 @@ def _price_boerse_frankfurt(isin: str) -> tuple[float | None, str | None]:
                 price = _to_float(r.get("close") or r.get("last"))
                 if price:
                     return price, "EUR"
-    return None, None
-
-
-def _price_lang_schwarz(isin: str) -> tuple[float | None, str | None]:
-    """(prijs, munt) via Lang & Schwarz (ls-tc.de) — een toegankelijker platform
-    zonder salt-beveiliging, als vangnet naast Börse Frankfurt en Tradegate. L&S
-    verhandelt veel warrants/certificaten. Werkwijze: instrument opzoeken op ISIN
-    (JSON-search) en daarna de recentste koers uit de mini-chartdata halen. Alle
-    stappen zijn defensief: elk afwijkend antwoord wordt gelogd en levert gewoon
-    (None, None) op zodat de volgende bron het overneemt."""
-    if not _isin_valid(isin):
-        return None, None
-    import requests
-    headers = {"User-Agent": _BF_BROWSER_HEADERS["User-Agent"],
-               "Accept": "application/json, text/plain, */*",
-               "Referer": "https://www.ls-tc.de/"}
-    try:
-        resp = requests.get("https://www.ls-tc.de/_rpc/json/.lstc/instrument/search/main",
-                            params={"q": isin, "localeId": 2},
-                            headers=headers, timeout=8)
-        if not resp.ok:
-            logger.info(f"_price_lang_schwarz({isin}): zoek-HTTP {resp.status_code}")
-            return None, None
-        try:
-            found = resp.json()
-        except ValueError:
-            logger.info(f"_price_lang_schwarz({isin}): zoekantwoord geen JSON")
-            return None, None
-        # Antwoord kan een lijst zijn of een dict met een lijst erin
-        items = found if isinstance(found, list) else \
-            (found.get("items") or found.get("data") or found.get("instruments") or [])
-        inst_id = None
-        for it in items:
-            if isinstance(it, dict):
-                if (it.get("isin") or "").upper() in ("", isin):
-                    inst_id = it.get("instrumentId") or it.get("id")
-                    if inst_id:
-                        break
-        if not inst_id:
-            logger.info(f"_price_lang_schwarz({isin}): geen instrument gevonden")
-            return None, None
-        resp2 = requests.get("https://www.ls-tc.de/_rpc/json/instrument/chart/dataForInstrument",
-                             params={"container": "chart1", "instrumentId": inst_id,
-                                     "marketId": 1, "quotetype": "mid",
-                                     "series": "intraday,history", "type": "mini"},
-                             headers=headers, timeout=8)
-        if not resp2.ok:
-            logger.info(f"_price_lang_schwarz({isin}): chart-HTTP {resp2.status_code}")
-            return None, None
-        try:
-            chart = resp2.json()
-        except ValueError:
-            logger.info(f"_price_lang_schwarz({isin}): chartantwoord geen JSON")
-            return None, None
-        series = (chart or {}).get("series") or {}
-        for key in ("intraday", "history"):
-            sdata = series.get(key) or {}
-            pts = sdata.get("data") or []
-            if pts:
-                last = pts[-1]
-                price = _to_float(last[1] if isinstance(last, (list, tuple)) and len(last) > 1 else last)
-                if price:
-                    return price, "EUR"
-        logger.info(f"_price_lang_schwarz({isin}): geen koerspunten in chartdata")
-    except Exception as e:
-        logger.warning(f"_price_lang_schwarz({isin}): {e}")
     return None, None
 
 
@@ -818,7 +765,7 @@ _ONVISTA_HEADERS_BASE = {
 
 def _onvista_headers() -> dict:
     h = dict(_ONVISTA_HEADERS_BASE)
-    h["User-Agent"] = _BF_BROWSER_HEADERS["User-Agent"]
+    h["User-Agent"] = _DBG_BROWSER_HEADERS["User-Agent"]
     return h
 
 
@@ -966,7 +913,7 @@ def _euronext_mic_candidates(isin: str) -> list[str]:
 
 
 def _euronext_headers() -> dict:
-    return {"User-Agent": _BF_BROWSER_HEADERS["User-Agent"],
+    return {"User-Agent": _DBG_BROWSER_HEADERS["User-Agent"],
             "Accept": "*/*",
             "X-Requested-With": "XMLHttpRequest",
             "Referer": "https://live.euronext.com/"}
@@ -1213,16 +1160,18 @@ def _price_euronext(isin: str) -> tuple[float | None, str | None]:
 # Externe ISIN-bronnen, in volgorde geprobeerd na Yahoo. Uitbreidbaar met extra
 # bronnen door een functie (isin)->(prijs,munt) toe te voegen aan deze lijst.
 # onvista eerst: open API zonder salt/TLS-verdediging die ook derivaten dekt.
-# Börse Frankfurt staat nu LAATST: hun WAF blijft ondanks dynamische salt en
-# Chrome-TLS-imitatie regelmatig 403 geven, en elke poging kost door de
-# salt-/cookie-/retry-afhandeling merkbaar meer tijd dan de andere drie bronnen.
-# Zo kosten activa die toch al bij geen enkele bron gevonden worden (bv. heel
-# illiquide warrants) niet nodeloos de traagste, minst betrouwbare poging eerst.
+# Deutsche Börse Live (live.deutsche-boerse.com) staat nu LAATST: het gebruikt de
+# officiële api.boerse-frankfurt.de-backend, waarvan de WAF ondanks dynamische salt en
+# Chrome-TLS-imitatie af en toe 403 geeft, en elke poging kost door de salt-/cookie-/
+# retry-afhandeling merkbaar meer tijd dan de andere bronnen. Zo kosten activa die toch
+# al bij geen enkele bron gevonden worden (bv. heel illiquide warrants) niet nodeloos de
+# traagste poging eerst. Deze ene bron vervangt de vroegere aparte 'Börse Frankfurt'- en
+# 'Lang & Schwarz'-bronnen.
 # Euronext staat direct na onvista: snel (2 kleine calls), sleutelloos, en het
 # dekt precies het gat van de Duitse platformen - producten die enkel op
 # Euronext noteren (ING Markets-warrants, illiquide Brusselse fondsen, ...).
 _ISIN_PROVIDERS = [_price_onvista, _price_euronext, _price_tradegate,
-                   _price_lang_schwarz, _price_boerse_frankfurt]
+                   _price_deutsche_boerse]
 
 
 def probe_isin_meta(isin: str) -> dict:
@@ -1247,7 +1196,7 @@ def probe_isin_meta(isin: str) -> dict:
                    "BOND": "bond"}
         return {"name": it.get("name") or "", "type": type_map.get(etype, "stock"),
                "exchange": ""}
-    data = _bf_request("instrument_information", {"isin": isin})
+    data = _dbg_request("instrument_information", {"isin": isin})
     if isinstance(data, dict):
         name = None
         def _find_name(obj):
@@ -1280,9 +1229,8 @@ def probe_isin(isin: str) -> tuple[float | None, str | None, str | None]:
         p, c = _price_from_yahoo_symbol(sym)
         if p is not None:
             return p, c, f"Yahoo ({sym})"
-    names = {"_price_tradegate": "Tradegate", "_price_boerse_frankfurt": "Börse Frankfurt",
-             "_price_lang_schwarz": "Lang & Schwarz", "_price_onvista": "onvista",
-             "_price_euronext": "Euronext"}
+    names = {"_price_tradegate": "Tradegate", "_price_deutsche_boerse": "Deutsche Börse Live",
+             "_price_onvista": "onvista", "_price_euronext": "Euronext"}
     for provider in _ISIN_PROVIDERS:
         p, c = provider(isin)
         if p is not None:
@@ -1334,8 +1282,7 @@ def diagnose_isin(isin: str) -> list[dict]:
 
     # 3) De overige externe bronnen
     names = {"_price_onvista": "onvista", "_price_tradegate": "Tradegate",
-             "_price_lang_schwarz": "Lang & Schwarz",
-             "_price_boerse_frankfurt": "Börse Frankfurt"}
+             "_price_deutsche_boerse": "Deutsche Börse Live"}
     for provider in _ISIN_PROVIDERS:
         if provider.__name__ == "_price_euronext":
             continue  # hierboven al, uitgebreider
@@ -1647,7 +1594,7 @@ def get_close_on_date(ticker: str, on_date: str) -> float | None:
         price = _onvista_close_on_date(cand, on_date)
         if price is not None:
             return price
-        return _bf_close_on_date(cand, on_date)
+        return _dbg_close_on_date(cand, on_date)
     try:
         d = datetime.strptime(on_date[:10], "%Y-%m-%d")
         start = (d - timedelta(days=10)).strftime("%Y-%m-%d")
@@ -1660,16 +1607,16 @@ def get_close_on_date(ticker: str, on_date: str) -> float | None:
     return None
 
 
-def _bf_close_on_date(isin: str, on_date: str) -> float | None:
+def _dbg_close_on_date(isin: str, on_date: str) -> float | None:
     """Echte historische slotkoers via Börse Frankfurt (price_history), voor het
-    fotomoment. Anders dan _price_boerse_frankfurt (actuele koers) wordt hier
+    fotomoment. Anders dan _price_deutsche_boerse (actuele koers) wordt hier
     specifiek rond on_date gezocht, niet vandaag."""
     try:
         d = datetime.strptime(on_date[:10], "%Y-%m-%d")
     except Exception:
         return None
-    for mic in _bf_available_mics(isin)[:6]:
-        data = _bf_request("price_history",
+    for mic in _dbg_available_mics(isin)[:6]:
+        data = _dbg_request("price_history",
                            {"isin": isin, "mic": mic, "limit": 30, "offset": 0,
                             "minDate": (d - timedelta(days=10)).strftime("%Y-%m-%d"),
                             "maxDate": (d + timedelta(days=1)).strftime("%Y-%m-%d"),
