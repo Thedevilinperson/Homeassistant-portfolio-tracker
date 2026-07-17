@@ -2,6 +2,38 @@
 
 Alle noemenswaardige wijzigingen aan de Portfolio Tracker add-on.
 
+## 0.41.0
+Euronext ontsleuteld (punt 6, optie 3). Euronext Live versleutelt zijn AJAX-antwoorden nu als
+{"ct": "..."} (AES-CBC met een vaste sleutel + IV uit hun JavaScript). De app ontsleutelt dat nu
+server-side, met een zelfherstellende sleutelaanpak.
+
+**Ontsleuteling.** De {"ct": ...}-envelope wordt herkend op alle drie de Euronext-endpoints
+(detailed quote, chartdata én de zoeker/MIC-resolutie) en met AES-CBC/PKCS7 ontsleuteld voor de
+bestaande parsers ze zien. Zo werkt Euronext weer als koersbron — en straks als basis voor de
+FSMA-status (punt 9).
+
+**Zelf-afstemmende sleutel.** In plaats van een sleutel hard te coderen (die breekt bij rotatie),
+haalt de app de kandidaat-strings uit de live JS-bundels en zoekt het (sleutel, IV)-paar dat een
+ECHT versleuteld staal correct ontcijfert. Zo vindt hij de juiste sleutel zonder dat die vooraf
+gekend moet zijn, en herkent hij vanzelf een geldige payload.
+
+**Sleutelrotatie: detectie + logging.** Werkt de sleutel niet meer, dan komt er een duidelijke
+waarschuwing op de statuspagina ('Euronext-sleutel werkt niet meer, mogelijk geroteerd'). De
+dagelijkse statuscontrole (22:45) houdt de sleutel automatisch fris en herstelt een rotatie zelf;
+bij een wijziging wordt de nieuwe afdruk gelogd en als info-melding getoond.
+
+**Nieuw op de Status-pagina: '🔑 Euronext-sleutel'.** Toont of er een sleutel is (met afdruk en
+laatste controle), een knop '🔁 Sleutel opnieuw opbouwen', en een handmatige invoer voor sleutel/IV
+(met uitleg hoe je ze via F12 → Sources zelf vindt) voor als het automatisch opbouwen niet lukt.
+Het bestaande diagnoseblok '🔧 Euronext-respons inspecteren' blijft ernaast staan.
+
+Nieuwe afhankelijkheid: cryptography (voor AES). Getest: de AES-ontsleuteling, de zelf-afstemmende
+sleutelontdekking en de rotatiedetectie zijn end-to-end lokaal gevalideerd (met een nagebootste
+Euronext-bundel + staal). Het echte ophalen bij Euronext test jij live, zoals afgesproken — lukt
+het automatisch opbouwen niet meteen, gebruik dan één keer de handmatige invoer.
+
+Herbouwen (niet enkel herstarten) via de knop "Herbouwen" in Home Assistant.
+
 ## 0.40.0
 Diagnosehulp voor punt 6 (Euronext geeft geen koers terug). Nog geen fix — eerst zicht op wat
 Euronext precies terugstuurt.

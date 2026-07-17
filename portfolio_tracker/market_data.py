@@ -919,6 +919,261 @@ def _euronext_headers() -> dict:
             "Referer": "https://live.euronext.com/"}
 
 
+# ── Euronext-ontsleuteling (punt 6, optie 3) ─────────────────────────────────
+# Euronext Live versleutelt sinds kort zijn AJAX-antwoorden: {"ct": "<base64>"}. Dat is
+# AES-CBC met een VASTE sleutel + IV die in hun (geobfusceerde) JS-bundle staan. We
+# ontsleutelen server-side. De sleutel kan roteren; daarom:
+#   • bewaren we sleutel/IV in de instellingen (handmatig instelbaar én automatisch),
+#   • kan de app de sleutel HERGEBRUIKEN uit de bundle (zelfherstellend), waarbij we het
+#     juiste (sleutel, IV)-paar VALIDEREN tegen een echt versleuteld staal,
+#   • detecteren en loggen we een sleutelwijziging, met een statuswaarschuwing.
+
+# Referentie-ISIN (liquide Euronext-Brussel-aandeel) om een vers versleuteld staal op te
+# halen waartegen we kandidaat-sleutels valideren.
+_EURONEXT_KEY_REF = ("BE0003796134", "XBRU")   # Colruyt op Euronext Brussel
+
+
+def _euronext_is_ct(text: str) -> bool:
+    b = (text or "").lstrip()
+    return b.startswith("{") and '"ct"' in b[:48]
+
+
+def _aes_cbc_decrypt(ct_b64: str, key: bytes, iv: bytes) -> str | None:
+    """AES-CBC ontsleutelen (PKCS7). key = 16/24/32 bytes, iv = 16 bytes. Geeft de
+    plaintext als string, of None bij een ongeldige sleutel/opvulling."""
+    try:
+        import base64
+        from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
+        if len(key) not in (16, 24, 32) or len(iv) != 16:
+            return None
+        raw = base64.b64decode(ct_b64 + "=" * (-len(ct_b64) % 4))
+        if not raw or len(raw) % 16:
+            return None
+        dec = Cipher(algorithms.AES(key), modes.CBC(iv)).decryptor()
+        pt = dec.update(raw) + dec.finalize()
+        pad = pt[-1]
+        if 1 <= pad <= 16 and pt[-pad:] == bytes([pad]) * pad:
+            pt = pt[:-pad]
+        return pt.decode("utf-8", "replace")
+    except Exception:
+        return None
+
+
+def _euronext_payload_ok(pt: str) -> bool:
+    """Herkent of een ontsleutelde plaintext een geldige Euronext-payload is (HTML-tabel,
+    JSON, of het ISIN-MIC-DNA). Zo weten we of een kandidaat-sleutel de JUISTE is."""
+    if not pt:
+        return False
+    s = pt.lstrip()[:400].lower()
+    return ("<tr" in s or "<table" in s or s.startswith("{") or s.startswith("[")
+            or bool(__import__("re").search(r"[a-z]{2}[a-z0-9]{9,10}-[a-z0-9]{4}", s)))
+
+
+def _euronext_key_material() -> tuple[bytes | None, bytes | None]:
+    """Huidige (sleutel, IV) uit de instellingen. Beide worden als UTF-8 tekst bewaard
+    (zoals CryptoJS enc.Utf8.parse ze gebruikt)."""
+    try:
+        import database as db
+        k = (db.get_setting("euronext_aes_key", "") or "").encode("utf-8")
+        v = (db.get_setting("euronext_aes_iv", "") or "").encode("utf-8")
+        return (k or None), (v or None)
+    except Exception:
+        return None, None
+
+
+def euronext_decrypt_body(text: str) -> tuple[str | None, str]:
+    """Geeft (bruikbare_body, status) voor een Euronext-antwoord.
+    status: 'plain' (niet versleuteld), 'decrypted' (ok), 'no_key' (geen sleutel ingesteld),
+    'failed' (sleutel werkt niet — mogelijk geroteerd)."""
+    if not _euronext_is_ct(text):
+        return text, "plain"
+    try:
+        import json
+        ct = (json.loads(text) or {}).get("ct")
+    except ValueError:
+        return None, "failed"
+    if not ct:
+        return None, "failed"
+    key, iv = _euronext_key_material()
+    if not key or not iv:
+        return None, "no_key"
+    pt = _aes_cbc_decrypt(ct, key, iv)
+    if pt is not None and _euronext_payload_ok(pt):
+        return pt, "decrypted"
+    return None, "failed"
+
+
+def _euronext_fetch(url: str, params: dict | None = None):
+    import requests
+    return requests.get(url, params=params, headers=_euronext_headers(), timeout=10)
+
+
+def _euronext_fetch_sample() -> str | None:
+    """Haal een VERS versleuteld staal ({"ct": ...}) op voor een liquide referentie-ISIN,
+    om kandidaat-sleutels tegen te valideren."""
+    isin, mic = _EURONEXT_KEY_REF
+    try:
+        r = _euronext_fetch("https://live.euronext.com/en/intraday_chart/"
+                            f"getDetailedQuoteAjax/{isin}-{mic}/full")
+        if r.ok and _euronext_is_ct(r.text):
+            import json
+            return (json.loads(r.text) or {}).get("ct")
+    except Exception as e:
+        logger.info(f"_euronext_fetch_sample: {e}")
+    return None
+
+
+def _euronext_bundle_urls() -> list[str]:
+    """Vind de JS-bundels van live.euronext.com waarin de AES-sleutel/IV als tekst staan."""
+    import re
+    urls = []
+    try:
+        r = _euronext_fetch("https://live.euronext.com/en")
+        if r.ok:
+            for m in re.findall(r'src="([^"]+\.js[^"]*)"', r.text or ""):
+                u = m if m.startswith("http") else ("https://live.euronext.com" + m
+                                                    if m.startswith("/") else None)
+                if u and u not in urls:
+                    urls.append(u)
+    except Exception as e:
+        logger.info(f"_euronext_bundle_urls: {e}")
+    return urls[:12]
+
+
+def _euronext_key_candidates(js: str) -> list[str]:
+    """Kandidaat-sleutel/IV-strings uit een JS-bundle: tekstliteralen van 16/24/32 tekens,
+    met voorrang aan die vlak bij CryptoJS/AES/Utf8.parse/decrypt."""
+    import re
+    cands, seen = [], set()
+    near = re.findall(r'(?:Utf8\.parse|CryptoJS|AES|decrypt|secret|\bkey\b|\biv\b)'
+                      r'[^"\']{0,60}["\']([A-Za-z0-9+/=_\-]{16,32})["\']', js, re.I)
+    alllit = re.findall(r'["\']([A-Za-z0-9+/=_\-]{16,32})["\']', js)
+    for s in near + alllit:
+        if len(s) in (16, 24, 32) and s not in seen:
+            seen.add(s)
+            cands.append(s)
+    return cands[:80]
+
+
+def _euronext_find_working_key(sample_ct: str, candidates: list[str]):
+    """Zoek het (sleutel, IV)-paar dat het versleutelde staal correct ontsleutelt.
+    Probeert per kandidaat als sleutel: dezelfde string als IV, elke 16-teken-kandidaat als
+    IV, en een nul-IV. Geeft (key_str, iv_str) of None."""
+    ivs16 = [c for c in candidates if len(c) == 16] + ["0" * 16, "\x00" * 16]
+    for k in candidates:
+        if len(k) not in (16, 24, 32):
+            continue
+        kb = k.encode("utf-8")
+        for iv in ([k] if len(k) == 16 else []) + ivs16:
+            ivb = iv.encode("utf-8") if not iv.startswith("\x00") else b"\x00" * 16
+            if len(ivb) != 16:
+                continue
+            pt = _aes_cbc_decrypt(sample_ct, kb, ivb)
+            if pt is not None and _euronext_payload_ok(pt):
+                iv_str = iv if not iv.startswith("\x00") else ""
+                return k, iv_str
+    return None
+
+
+def euronext_rebuild_key(sample_ct: str | None = None) -> dict:
+    """Bouw de Euronext-sleutel opnieuw op uit de live JS-bundels en valideer hem tegen een
+    vers versleuteld staal. Bewaart een werkende sleutel in de instellingen, detecteert
+    rotatie en logt/waarschuwt. Geeft een rapport terug voor de UI."""
+    import hashlib
+    import database as db
+    rep = {"ok": False, "message": "", "fingerprint": None, "rotated": False,
+           "candidates": 0, "bundles": 0}
+    sample = sample_ct or _euronext_fetch_sample()
+    if not sample:
+        rep["message"] = ("Geen versleuteld staal kunnen ophalen bij Euronext "
+                          "(geen netwerk of endpoint gewijzigd).")
+        return rep
+    # Werkt de HUIDIGE sleutel nog?
+    key, iv = _euronext_key_material()
+    if key and iv and _aes_cbc_decrypt(sample, key, iv) and \
+            _euronext_payload_ok(_aes_cbc_decrypt(sample, key, iv)):
+        rep.update(ok=True, message="Huidige sleutel werkt nog.",
+                   fingerprint=hashlib.sha256(key).hexdigest()[:12])
+        db.set_setting("euronext_key_checked", datetime.now().strftime("%Y-%m-%d %H:%M:00"))
+        try:
+            db.resolve_status_event("EURONEXT", "euronext_key")
+        except Exception:
+            pass
+        return rep
+    # Anders: uit de bundels halen en valideren
+    bundles = _euronext_bundle_urls()
+    rep["bundles"] = len(bundles)
+    cands = []
+    for u in bundles:
+        try:
+            r = _euronext_fetch(u)
+            if r.ok:
+                cands += _euronext_key_candidates(r.text or "")
+        except Exception:
+            continue
+    seen, uniq = set(), []
+    for c in cands:
+        if c not in seen:
+            seen.add(c); uniq.append(c)
+    rep["candidates"] = len(uniq)
+    found = _euronext_find_working_key(sample, uniq)
+    if not found:
+        rep["message"] = (f"Geen werkende sleutel gevonden in {len(bundles)} bundel(s) "
+                          f"({len(uniq)} kandidaten). Stel de sleutel/IV desnoods handmatig in "
+                          "(zie de uitleg op de statuspagina).")
+        return rep
+    new_key, new_iv = found
+    old_fp = db.get_setting("euronext_key_fingerprint", "")
+    new_fp = hashlib.sha256(new_key.encode("utf-8")).hexdigest()[:12]
+    db.set_setting("euronext_aes_key", new_key)
+    db.set_setting("euronext_aes_iv", new_iv)
+    db.set_setting("euronext_key_fingerprint", new_fp)
+    db.set_setting("euronext_key_checked", datetime.now().strftime("%Y-%m-%d %H:%M:00"))
+    rotated = bool(old_fp and old_fp != new_fp)
+    rep.update(ok=True, fingerprint=new_fp, rotated=rotated,
+               message=(f"Nieuwe Euronext-sleutel gevonden en gevalideerd (afdruk {new_fp})."
+                        + (f" Let op: sleutel GEWIJZIGD (was {old_fp})." if rotated else "")))
+    logger.info(f"Euronext-sleutel opnieuw opgebouwd: {new_fp}"
+                + (f" (rotatie, was {old_fp})" if rotated else ""))
+    try:
+        if rotated:
+            db.record_status_event("EURONEXT", "euronext_key", "info",
+                                   f"Euronext-sleutel is geroteerd en automatisch bijgewerkt "
+                                   f"(afdruk {old_fp} → {new_fp}).",
+                                   {"old": old_fp, "new": new_fp})
+        else:
+            db.resolve_status_event("EURONEXT", "euronext_key")
+    except Exception:
+        pass
+    return rep
+
+
+def euronext_key_status() -> dict:
+    """Beknopte toestand van de Euronext-sleutel voor de statuspagina."""
+    import database as db
+    key, iv = _euronext_key_material()
+    fp = db.get_setting("euronext_key_fingerprint", "")
+    return {"has_key": bool(key and iv), "fingerprint": fp or None,
+            "checked": db.get_setting("euronext_key_checked", "") or None}
+
+
+def _euronext_note_key_problem(status: str, ctx: str) -> None:
+    """Log + statuswaarschuwing wanneer Euronext versleuteld antwoordt en de sleutel
+    ontbreekt of niet meer werkt. Eén lopende waarschuwing (deduped)."""
+    import database as db
+    if status == "no_key":
+        msg = ("Euronext geeft versleutelde koersen terug, maar er is nog geen sleutel "
+               "ingesteld. Bouw de Euronext-sleutel op via de statuspagina.")
+    else:
+        msg = ("De Euronext-sleutel werkt niet meer (mogelijk geroteerd). Bouw hem opnieuw op "
+               "via de statuspagina — knop 'Euronext-sleutel opnieuw opbouwen'.")
+    logger.warning(f"Euronext [{ctx}]: {msg}")
+    try:
+        db.record_status_event("EURONEXT", "euronext_key", "warning", msg, {"reason": status})
+    except Exception:
+        pass
+
+
 def _euronext_search_mic(isin: str) -> str | None:
     """Handelsplaats (MIC) via het zoek-endpoint van Euronext Live.
 
@@ -934,11 +1189,15 @@ def _euronext_search_mic(isin: str) -> str | None:
         if not resp.ok:
             logger.info(f"_euronext_search_mic({isin}): HTTP {resp.status_code}")
             return None
-        m = re.search(rf"{re.escape(isin)}-([A-Z0-9]{{4}})", resp.text or "")
+        body, dstat = euronext_decrypt_body(resp.text or "")
+        if dstat in ("no_key", "failed"):
+            _euronext_note_key_problem(dstat, f"search {isin}")
+            return None
+        m = re.search(rf"{re.escape(isin)}-([A-Z0-9]{{4}})", body or "")
         if m:
             return m.group(1)
         logger.info(f"_euronext_search_mic({isin}): niet gevonden in de zoeker "
-                    f"(antwoord {len(resp.text or '')} tekens) — handelsplaatsen worden afgetast")
+                    f"(antwoord {len(body or '')} tekens) — handelsplaatsen worden afgetast")
     except Exception as e:
         logger.warning(f"_euronext_search_mic({isin}): {e}")
     return None
@@ -1052,7 +1311,11 @@ def _euronext_quote_table(isin: str, mic: str):
         resp = requests.get(url, headers=_euronext_headers(), timeout=8)
         if not resp.ok:
             return None, None, resp.status_code, {}
-        tbl = _euronext_table(resp.text or "")
+        body, dstat = euronext_decrypt_body(resp.text or "")
+        if dstat in ("no_key", "failed"):
+            _euronext_note_key_problem(dstat, f"quote {isin}-{mic}")
+            return None, None, resp.status_code, {}
+        tbl = _euronext_table(body or "")
         price, cur, lbl = _euronext_price_from_table(tbl)
         if price:
             logger.info(f"_euronext_quote({isin},{mic}): koers {price} {cur} via label '{lbl}'")
@@ -1072,9 +1335,13 @@ def _euronext_chart_last(isin: str, mic: str, period: str) -> float | None:
                             headers=_euronext_headers(), timeout=8)
         if not resp.ok:
             return None
+        body, dstat = euronext_decrypt_body(resp.text or "")
+        if dstat in ("no_key", "failed"):
+            return None
         try:
-            pts = resp.json()
-        except ValueError:
+            import json as _json
+            pts = _json.loads(body)
+        except (ValueError, TypeError):
             return None
         if isinstance(pts, dict):
             pts = pts.get("data") or []

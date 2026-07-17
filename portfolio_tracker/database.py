@@ -231,6 +231,10 @@ def init_db():
             ('investment_volume_year',      '0'),
             ('openai_price_target_model',   ''),
             ('status_stale_days',           '4'),
+            ('euronext_aes_key',            ''),
+            ('euronext_aes_iv',             ''),
+            ('euronext_key_fingerprint',    ''),
+            ('euronext_key_checked',        ''),
             ('anthropic_api_key',           ''),
             ('openai_api_key',              '');
     """)
@@ -1161,6 +1165,15 @@ def run_status_checks(online: bool = True, tickers: list[str] | None = None) -> 
         except Exception as e:
             logger.warning(f"run_status_checks: market_data niet importeerbaar ({e})")
             md = None
+        # Euronext-sleutel dagelijks fris houden (goedkoop als hij nog werkt); dit
+        # herstelt automatisch een sleutelrotatie en logt/waarschuwt indien nodig.
+        if md is not None:
+            try:
+                kr = md.euronext_rebuild_key()
+                if kr.get("rotated"):
+                    summary["new"] += 1
+            except Exception as e:
+                logger.info(f"euronext_rebuild_key in statuscontrole: {e}")
 
     for t in tickers:
         a = assets.get(t, {"ticker": t})
