@@ -1352,6 +1352,33 @@ def _euronext_chart_last(isin: str, mic: str, period: str) -> float | None:
     return None
 
 
+def belgian_listing_probe(isin: str) -> dict:
+    """Punt 9: noteert dit effect op de Belgische gereglementeerde markt (Euronext Brussel,
+    MIC XBRU)? Gebruikt de bestaande Euronext-resolutie (gecachet).
+
+    Geeft {'ok', 'mic', 'xbru'}:
+      ok    = Euronext kent het instrument
+      mic   = de gevonden handelsplaats (XBRU, XAMS, XPAR, ...)
+      xbru  = True als het op Euronext Brussel noteert
+
+    LET OP bij de interpretatie: XBRU-notering is een BEWIJS dat het effect in België op
+    de gereglementeerde markt verhandeld wordt, maar het ontbreken ervan bewijst NIET dat
+    een fonds niet in België wordt aangeboden. Veel in België geregistreerde ETF's noteren
+    in Amsterdam of Parijs (bv. IWDA op XAMS). Daarom wordt deze uitslag enkel gebruikt om
+    de vlag positief te BEVESTIGEN, nooit om ze automatisch af te zetten."""
+    out = {"ok": False, "mic": None, "xbru": False}
+    if not _isin_valid(isin):
+        return out
+    try:
+        mic = _euronext_resolve(isin)
+    except Exception as e:
+        logger.info(f"belgian_listing_probe({isin}): {e}")
+        return out
+    if mic:
+        out.update(ok=True, mic=mic, xbru=(mic.upper() == "XBRU"))
+    return out
+
+
 def _euronext_resolve(isin: str) -> str | None:
     """De werkende handelsplaats (MIC) voor een ISIN, of None als Euronext het
     instrument niet kent. Eerst de zoeker; levert die niets op (typisch voor warrants

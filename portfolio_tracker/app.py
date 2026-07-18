@@ -1852,7 +1852,17 @@ def page_assets():
                 "Type":       cc.SelectboxColumn(options=list(TYPE_LBL.values())),
                 "ETF-type":   cc.SelectboxColumn(options=list(SUB_LBL.values()),
                                                  help="Enkel relevant voor ETF's (bepaalt mee de TOB)."),
-                "BE":         cc.CheckboxColumn(help="In België aangeboden/geregistreerd (FSMA)."),
+                "BE":         cc.CheckboxColumn(
+                    help="In België aangeboden/geregistreerd (FSMA). Dit vinkje stuurt de "
+                         "TOB (beurstaks) voor FONDSEN en ETF's:\n"
+                         "• aangeboden in België + KAPITALISEREND → 1,32% (max €4.000)\n"
+                         "• aangeboden in België + UITKEREND → 0,12% (max €1.300)\n"
+                         "• NIET in België aangeboden → 0,35% (max €1.600)\n"
+                         "Voor gewone aandelen maakt dit vinkje niets uit: die zijn altijd "
+                         "0,35%. Het heeft ook GEEN invloed op de roerende voorheffing — "
+                         "die 30% hangt af van de aard van de inkomsten en van je "
+                         "tussenpersoon, niet van de FSMA-registratie. Onderaan kan je dit "
+                         "automatisch laten bevestigen via de Euronext-notering."),
                 "Munt":       cc.SelectboxColumn(options=ACUR),
                 "Land":       cc.SelectboxColumn(options=clist,
                                                  help="Land van herkomst — bepaalt de buitenlandse bronbelasting."),
@@ -2012,6 +2022,53 @@ def page_assets():
                 st.rerun()
             elif not problems:
                 st.info("Geen wijzigingen gevonden.")
+
+        st.divider()
+        bec1, bec2 = st.columns([3, 1])
+        bec1.caption("🇧🇪 **Belgische notering (FSMA) automatisch bepalen** — controleert per ISIN "
+                     "bij Euronext of het effect op de Belgische gereglementeerde markt "
+                     "(Euronext Brussel, XBRU) noteert. Noteert het daar, dan wordt het BE-vinkje "
+                     "aangezet. Een effect dat NIET op XBRU noteert wordt nooit automatisch "
+                     "afgezet: veel in België aangeboden ETF's noteren in Amsterdam of Parijs, "
+                     "en dat afzetten zou je TOB verkeerd berekenen.")
+        if bec2.button("🇧🇪 Bepalen", key="be_detect_all", width="stretch"):
+            res_rows, n_set = [], 0
+            with st.spinner("Euronext-noteringen controleren..."):
+                for a in assets:
+                    isin = (a.get("isin") or "").strip()
+                    if not isin:
+                        res_rows.append({"Activum": asset_label(a["ticker"]), "ISIN": "—",
+                                         "Handelsplaats": "—",
+                                         "Uitslag": "Geen ISIN — niet te bepalen"})
+                        continue
+                    pr = md.belgian_listing_probe(isin)
+                    if pr.get("xbru"):
+                        if not a.get("belgian_registered"):
+                            db.update_asset(a["ticker"], belgian_registered=1)
+                            n_set += 1
+                            uit = "✅ XBRU — BE-vinkje aangezet"
+                        else:
+                            uit = "✅ XBRU — stond al aan"
+                    elif pr.get("ok"):
+                        uit = (f"Noteert op {pr['mic']}, niet op XBRU — vinkje ONGEMOEID "
+                               "(kan nog steeds in België aangeboden zijn)")
+                    else:
+                        uit = "Niet gevonden bij Euronext — vinkje ongemoeid"
+                    res_rows.append({"Activum": asset_label(a["ticker"]), "ISIN": isin,
+                                     "Handelsplaats": pr.get("mic") or "—", "Uitslag": uit})
+            st.session_state["be_detect_result"] = res_rows
+            if n_set:
+                clear_cache()
+            st.success(f"Klaar — {n_set} activum/activa op 'in België aangeboden' gezet.")
+        if st.session_state.get("be_detect_result"):
+            show_df(pd.DataFrame(st.session_state["be_detect_result"]),
+                    width="stretch", hide_index=True)
+            st.caption("Waarom dit fiscaal telt: het BE-vinkje bepaalt de **TOB** voor fondsen "
+                       "en ETF's — 1,32% (kapitaliserend, in België aangeboden), 0,12% "
+                       "(uitkerend, in België aangeboden) of 0,35% (niet in België aangeboden). "
+                       "Voor gewone aandelen verandert het niets (altijd 0,35%), en op de "
+                       "roerende voorheffing heeft het geen invloed. Bevestig bij twijfel in het "
+                       "prospectus/KIID van het fonds of via je bank — dit is geen fiscaal advies.")
 
         fmc1, fmc2 = st.columns([3, 1])
         fmc1.caption("📸 Fotomoment = slotkoers 31/12/2025 (native munt), gebruikt voor de "

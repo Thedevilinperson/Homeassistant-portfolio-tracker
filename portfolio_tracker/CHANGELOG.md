@@ -2,6 +2,34 @@
 
 Alle noemenswaardige wijzigingen aan de Portfolio Tracker add-on.
 
+## 0.43.0
+Punt 9: de Belgische notering (FSMA) automatisch laten bepalen via Euronext, plus uitleg bij
+het BE-vinkje over waarom dit fiscaal telt.
+
+**Nieuw op de Activa-pagina: '🇧🇪 Belgische notering (FSMA) automatisch bepalen'.** Controleert
+per ISIN bij Euronext (nu de ontsleuteling werkt) of het effect op de Belgische
+gereglementeerde markt noteert - Euronext Brussel, MIC XBRU. Je krijgt een tabel met per
+activum de gevonden handelsplaats en de uitslag.
+
+**BELANGRIJKE VEILIGHEID: het vinkje wordt enkel AANGEZET, nooit automatisch afgezet.** Reden:
+XBRU-notering bewijst dat een effect op de Belgische gereglementeerde markt verhandeld wordt,
+maar het ONTBREKEN ervan bewijst niet dat een fonds niet in België wordt aangeboden. Veel in
+België geregistreerde ETF's noteren in Amsterdam of Parijs (het klassieke voorbeeld: IWDA op
+XAMS). Zou de app die automatisch afzetten, dan zou ze de TOB verkeerd berekenen: 0,35% i.p.v.
+1,32% op een kapitaliserende ETF. Effecten die niet op XBRU noteren worden dus gerapporteerd,
+maar ongemoeid gelaten.
+
+**Uitleg bij het BE-vinkje (tooltip).** Het vinkje stuurt de TOB voor FONDSEN en ETF's:
+- in België aangeboden + KAPITALISEREND -> 1,32% (max 4.000 EUR)
+- in België aangeboden + UITKEREND -> 0,12% (max 1.300 EUR)
+- NIET in België aangeboden -> 0,35% (max 1.600 EUR)
+Voor gewone aandelen verandert het vinkje niets (altijd 0,35%). Op de roerende voorheffing
+heeft het GEEN invloed: die 30% hangt af van de aard van de inkomsten en van je tussenpersoon,
+niet van de FSMA-registratie. Op een ETF-aankoop van 10.000 EUR is dat het verschil tussen
+132 EUR en 35 EUR TOB - vandaar de voorzichtige aanpak hierboven.
+
+Herbouwen (niet enkel herstarten) via de knop "Herbouwen" in Home Assistant.
+
 ## 0.42.0
 Euronext-ontsleuteling CORRECT gemaakt. In 0.41 zat de aanname fout; met de brondata die je
 bezorgde (ajax_secure + cryptojs-aes-format.js) ligt het schema nu exact vast.
