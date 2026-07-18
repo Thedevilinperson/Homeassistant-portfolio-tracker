@@ -2,6 +2,36 @@
 
 Alle noemenswaardige wijzigingen aan de Portfolio Tracker add-on.
 
+## 0.44.0
+Punt 9, tweede bron: de officiële FSMA-lijsten van in België openbaar aangeboden fondsen, als
+aanvulling op de XBRU-controle van 0.43.
+
+**Wat er is toegevoegd.** Op de Activa-pagina, onder de XBRU-knop: '📋 Tweede bron: FSMA-lijst
+van in België aangeboden fondsen'. De app haalt vier officiële FSMA-lijsten op (ICB's en hun
+compartimenten, naar Belgisch én buitenlands recht), leest de namen eruit en koppelt ze aan je
+fondsen/ETF's met een gelijkenisscore. Je krijgt per fonds de beste match plus alternatieven.
+De lijsten worden lokaal gecachet en wekelijks ververst.
+
+Dit vult precies het gat van de XBRU-controle: fondsen die in Amsterdam of Parijs noteren maar
+wél in België worden aangeboden (het IWDA-geval) staan hier wel in.
+
+**Bewuste beperking: advies, geen automatisme.** De FSMA-lijsten bevatten GEEN ISIN's, enkel
+namen. Koppelen kan dus alleen op naam en is nooit sluitend. Daarom toont de app een voorstel
+met een score en zet JIJ het BE-vinkje aan via een bevestigingsselectie. Net als in 0.43 wordt
+er niets automatisch afgezet. Reden blijft dezelfde: het BE-vinkje bepaalt de TOB voor fondsen
+(1,32% / 0,12% / 0,35%), dus een foute automatische omzetting kost of bespaart je echt geld.
+Scores onder ~85 zijn het nakijken waard; een hoge score is een aanwijzing, geen bewijs.
+
+Bronnen (officiële FSMA-PDF's, wekelijks bijgewerkt): lijst van de compartimenten en van de
+ICB's naar buitenlands recht (art. 149 ICBE-wet) en dezelfde twee naar Belgisch recht.
+
+Nieuwe afhankelijkheid: pypdf (zuiver Python, geen systeempakketten) om de lijsten te lezen.
+Getest: het inlezen van de lijstopmaak en de naamkoppeling zijn gevalideerd op echte
+FSMA-tekst (o.a. 'iShares Euro Dividend UCITS ETF EUR Dist' koppelt correct op 100), en de
+app blijft netjes werken als de lijsten niet bereikbaar zijn.
+
+Herbouwen (niet enkel herstarten) via de knop "Herbouwen" in Home Assistant.
+
 ## 0.43.0
 Punt 9: de Belgische notering (FSMA) automatisch laten bepalen via Euronext, plus uitleg bij
 het BE-vinkje over waarom dit fiscaal telt.

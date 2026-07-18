@@ -2070,6 +2070,75 @@ def page_assets():
                        "roerende voorheffing heeft het geen invloed. Bevestig bij twijfel in het "
                        "prospectus/KIID van het fonds of via je bank — dit is geen fiscaal advies.")
 
+        with st.expander("📋 Tweede bron: FSMA-lijst van in België aangeboden fondsen"):
+            st.caption("De FSMA publiceert de officiële lijsten van openbare ICB's en hun "
+                       "compartimenten (Belgisch én buitenlands recht). Dat is DE bron voor "
+                       "'wordt dit fonds in België openbaar aangeboden' — en dus voor de TOB. "
+                       "Ze vult de XBRU-controle aan: fondsen die in Amsterdam of Parijs "
+                       "noteren maar wél in België aangeboden zijn, staan hier wel in.")
+            st.warning("Belangrijk: deze lijsten bevatten **geen ISIN's**, enkel namen. Koppelen "
+                       "gebeurt dus op naam en is nooit sluitend. Daarom is dit een **advies met "
+                       "een score** dat jij bevestigt — de app zet hier niets automatisch om.")
+            fi = st.session_state.get("fsma_index")
+            fc1, fc2 = st.columns([1, 2])
+            if fc1.button("📥 Lijsten ophalen", key="fsma_fetch", width="stretch"):
+                with st.spinner("FSMA-lijsten ophalen en verwerken (PDF's, kan even duren)..."):
+                    fi = md.fsma_build_index(force=True)
+                st.session_state["fsma_index"] = fi
+            if fi:
+                fc2.caption(f"{len(fi.get('names', []))} namen · bijgewerkt "
+                            f"{_short_ts(fi.get('built'))}"
+                            + (" · " + ", ".join(f"{k}: {v}" for k, v in
+                                                 (fi.get("sources") or {}).items())
+                               if fi.get("sources") else ""))
+                for err in (fi.get("errors") or []):
+                    st.warning("⚠️ " + err)
+            else:
+                fc2.caption("Nog niet opgehaald. De lijsten worden lokaal gecachet en "
+                            "wekelijks ververst.")
+
+            if fi and fi.get("names"):
+                funds = [a for a in assets if a.get("asset_type") in ("etf", "fund")]
+                if not funds:
+                    st.info("Je hebt geen fondsen/ETF's — voor gewone aandelen speelt dit niet "
+                            "(die zijn altijd 0,35% TOB).")
+                else:
+                    frows, opts = [], {}
+                    for a in funds:
+                        hits = md.fsma_lookup(a.get("name") or a["ticker"], index=fi)
+                        best = hits[0] if hits else None
+                        frows.append({
+                            "Activum": asset_label(a["ticker"]),
+                            "BE nu": "✅" if a.get("belgian_registered") else "—",
+                            "Beste FSMA-match": best["naam"] if best else "geen match",
+                            "Score": best["score"] if best else 0,
+                            "Alternatieven": ", ".join(h["naam"] for h in hits[1:]) or "—",
+                        })
+                        if best and not a.get("belgian_registered"):
+                            opts[f"{asset_label(a['ticker'])} → {best['naam']} "
+                                 f"({best['score']})"] = a["ticker"]
+                    show_df(pd.DataFrame(frows), width="stretch", hide_index=True,
+                            column_config={"Score": st.column_config.NumberColumn(
+                                format="%d", help="Naamgelijkenis 0-100. Alles onder ~85 zelf "
+                                                  "nakijken: een hoge score is geen bewijs.")})
+                    if opts:
+                        chosen = st.multiselect(
+                            "Bevestig welke fondsen in België worden aangeboden "
+                            "(zet het BE-vinkje aan):", list(opts.keys()), key="fsma_confirm")
+                        if st.button("✅ Bevestigde fondsen op 'in België aangeboden' zetten",
+                                     key="fsma_apply", type="primary"):
+                            for lbl in chosen:
+                                db.update_asset(opts[lbl], belgian_registered=1)
+                            if chosen:
+                                clear_cache()
+                                st.success(f"{len(chosen)} fonds(en) bijgewerkt.")
+                                st.rerun()
+                            else:
+                                st.info("Niets geselecteerd.")
+                    else:
+                        st.caption("Geen openstaande voorstellen: al je fondsen met een match "
+                                   "staan al op 'in België aangeboden'.")
+
         fmc1, fmc2 = st.columns([3, 1])
         fmc1.caption("📸 Fotomoment = slotkoers 31/12/2025 (native munt), gebruikt voor de "
                      "meerwaardebelasting op stukken gekocht vóór 2026. Je kunt de waarde in de "

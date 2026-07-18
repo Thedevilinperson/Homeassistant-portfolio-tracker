@@ -1352,6 +1352,147 @@ def _euronext_chart_last(isin: str, mic: str, period: str) -> float | None:
     return None
 
 
+# ── FSMA-lijsten: in België openbaar aangeboden ICB's (punt 9, tweede bron) ──
+# De FSMA publiceert de officiële lijsten van openbare ICB's (fondsen) en hun
+# compartimenten, naar Belgisch én buitenlands recht. Dat is DE bron voor "wordt dit
+# fonds in België openbaar aangeboden?" — precies wat de TOB bepaalt.
+# Belangrijke beperking: die lijsten bevatten GEEN ISIN's, enkel NAMEN. Koppelen kan dus
+# alleen op naam, en dat is per definitie onzeker. Daarom levert deze bron een
+# ADVIES met een score, dat jij bevestigt — ze zet nooit zelf een fiscale vlag om.
+_FSMA_LISTS = {
+    "buitenlandse compartimenten":
+        "https://www.fsma.be/sites/default/files/media/files/replacement_files/ccp2_li_NL.pdf",
+    "buitenlandse ICB's":
+        "https://www.fsma.be/sites/default/files/media/files/replacement_files/icb2_li_NL.pdf",
+    "Belgische compartimenten":
+        "https://www.fsma.be/sites/default/files/media/files/replacement_files/ccp1_li_NL.pdf",
+    "Belgische ICB's":
+        "https://www.fsma.be/sites/default/files/media/files/replacement_files/icb1_li_NL.pdf",
+}
+
+_FSMA_SKIP = ("compartimenten", "geen compartiment", "beheerd door", "toestand op",
+              "lijst van", "artikel", "wijzigingen in de lijst", "i.1.", "i.2.",
+              "ii.1.", "ii.2.", "beleggingsfondsen", "beleggingsvennootschappen")
+
+
+def _fsma_cache_path() -> str:
+    import os
+    return os.path.join(os.environ.get("DATA_DIR", "/app/data"), "fsma_index.json")
+
+
+def _fsma_parse_names(text: str) -> list[str]:
+    """Haal fonds- en compartimentsnamen uit de tekst van een FSMA-lijst. De lijsten
+    gebruiken '■' voor een instelling en '•' voor een compartiment; kop-, voetnoot- en
+    adresregels worden overgeslagen."""
+    import re
+    out = []
+    for raw in (text or "").splitlines():
+        line = raw.strip()
+        if not line or line[0] not in "■•":
+            continue
+        name = line[1:].strip(" .\t")
+        # 'X, afgekort Y' -> beide namen bruikbaar maken
+        parts = [name]
+        m = re.match(r"(.+?),\s*afgekort\s+(.+)$", name, re.I)
+        if m:
+            parts = [m.group(1).strip(), m.group(2).strip()]
+        for p in parts:
+            low = p.lower()
+            if len(p) < 3 or any(s in low for s in _FSMA_SKIP):
+                continue
+            out.append(p)
+    return out
+
+
+def fsma_build_index(force: bool = False, max_age_days: int = 7) -> dict:
+    """Download de FSMA-lijsten, haal de namen eruit en cache ze op schijf.
+    Geeft {'names': [...], 'built': 'JJJJ-MM-DD UU:MM', 'sources': {naam: aantal},
+    'errors': [...]}. Bestaat er een verse cache, dan wordt die hergebruikt."""
+    import json
+    import os
+    path = _fsma_cache_path()
+    if not force and os.path.exists(path):
+        try:
+            with open(path, encoding="utf-8") as f:
+                idx = json.load(f)
+            built = datetime.strptime(idx.get("built", "")[:16], "%Y-%m-%d %H:%M")
+            if (datetime.now() - built).days < max_age_days and idx.get("names"):
+                return idx
+        except Exception:
+            pass
+
+    import io
+    import requests
+    names, sources, errors = [], {}, []
+    for label, url in _FSMA_LISTS.items():
+        try:
+            r = requests.get(url, timeout=30,
+                             headers={"User-Agent": _DBG_BROWSER_HEADERS["User-Agent"]})
+            if not r.ok:
+                errors.append(f"{label}: HTTP {r.status_code}")
+                continue
+            from pypdf import PdfReader
+            reader = PdfReader(io.BytesIO(r.content))
+            text = "\n".join((p.extract_text() or "") for p in reader.pages)
+            got = _fsma_parse_names(text)
+            sources[label] = len(got)
+            names += got
+        except Exception as e:
+            errors.append(f"{label}: {e}")
+            logger.warning(f"fsma_build_index({label}): {e}")
+
+    uniq = sorted(set(names))
+    idx = {"names": uniq, "built": datetime.now().strftime("%Y-%m-%d %H:%M:00"),
+           "sources": sources, "errors": errors}
+    if uniq:
+        try:
+            with open(path, "w", encoding="utf-8") as f:
+                json.dump(idx, f, ensure_ascii=False)
+        except Exception as e:
+            logger.warning(f"FSMA-index niet kunnen bewaren: {e}")
+    return idx
+
+
+def _fsma_norm(s: str) -> str:
+    import re
+    import unicodedata
+    s = unicodedata.normalize("NFKD", (s or "").lower())
+    s = "".join(c for c in s if not unicodedata.combining(c))
+    # ruis die de vergelijking vertroebelt: rechtsvorm, aandelenklasse, munt, type
+    s = re.sub(r"\b(ucits|etf|sicav|bevek|icbe|fcp|plc|nv|sa|ag|dis|dist|distributing|"
+               r"acc|accumulating|inc|cap|eur|usd|gbp|chf|class|klasse|share[s]?|"
+               r"hedged|index|fund|fonds|compartiment)\b", " ", s)
+    s = re.sub(r"[^a-z0-9 ]+", " ", s)
+    return " ".join(s.split())
+
+
+def fsma_lookup(name: str, index: dict | None = None, top: int = 3) -> list[dict]:
+    """Zoek de beste overeenkomsten voor een fondsnaam in de FSMA-lijsten.
+    Geeft [{'naam', 'score'}] gesorteerd (score 0-100). Enkel een ADVIES: door het
+    ontbreken van ISIN's in de lijsten is naamkoppeling nooit sluitend."""
+    from difflib import SequenceMatcher
+    idx = index if index is not None else fsma_build_index()
+    target = _fsma_norm(name)
+    if not target or not idx.get("names"):
+        return []
+    tset = set(target.split())
+    scored = []
+    for cand in idx["names"]:
+        c = _fsma_norm(cand)
+        if not c:
+            continue
+        ratio = SequenceMatcher(None, target, c).ratio()
+        cset = set(c.split())
+        overlap = len(tset & cset) / max(1, len(tset | cset))
+        score = 100 * (0.6 * ratio + 0.4 * overlap)
+        if c == target:
+            score = 100.0
+        if score >= 45:
+            scored.append({"naam": cand, "score": round(score)})
+    scored.sort(key=lambda x: -x["score"])
+    return scored[:top]
+
+
 def belgian_listing_probe(isin: str) -> dict:
     """Punt 9: noteert dit effect op de Belgische gereglementeerde markt (Euronext Brussel,
     MIC XBRU)? Gebruikt de bestaande Euronext-resolutie (gecachet).
