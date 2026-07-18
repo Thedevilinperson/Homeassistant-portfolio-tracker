@@ -1372,7 +1372,12 @@ _FSMA_LISTS = {
 
 _FSMA_SKIP = ("compartimenten", "geen compartiment", "beheerd door", "toestand op",
               "lijst van", "artikel", "wijzigingen in de lijst", "i.1.", "i.2.",
-              "ii.1.", "ii.2.", "beleggingsfondsen", "beleggingsvennootschappen")
+              "ii.1.", "ii.2.", "beleggingsfondsen", "beleggingsvennootschappen",
+              "belegging naar", "buitenlands recht", "belgisch recht",
+              "openbare instelling", "voldoet aan de voorwaarden", "richtlijn",
+              "alternatieve instelling", "financiële instrumenten", "liquide middelen",
+              "deze wijziging", "vastgoedbeleggingsvennootschap", "startersfonds",
+              "niet-genoteerde vennootschappen")
 
 
 def _fsma_cache_path() -> str:
@@ -1380,28 +1385,83 @@ def _fsma_cache_path() -> str:
     return os.path.join(os.environ.get("DATA_DIR", "/app/data"), "fsma_index.json")
 
 
+# Landkoppen in de FSMA-lijsten (die zijn geen fondsnamen).
+_FSMA_COUNTRIES = {
+    "duitsland", "frankrijk", "ierland", "luxemburg", "nederland", "belgie", "belgië",
+    "oostenrijk", "spanje", "italie", "italië", "zwitserland", "verenigd koninkrijk",
+    "denemarken", "zweden", "noorwegen", "finland", "portugal", "liechtenstein",
+    "malta", "jersey", "guernsey", "polen", "tsjechie", "tsjechië", "griekenland",
+}
+
+# Tekens waarmee een lijstitem kan beginnen. pypdf geeft de opsommingstekens niet altijd
+# als '■'/'•' terug (soms een ander glyph, soms helemaal niets) — daarom worden ze enkel
+# afgepeld, niet vereist.
+_FSMA_BULLETS = "\u25a0\u25aa\u25cf\u2022\u25e6\u00b7\u2219\u2023\u2043\uf0a7\uf0b7-*o "
+
+
 def _fsma_parse_names(text: str) -> list[str]:
-    """Haal fonds- en compartimentsnamen uit de tekst van een FSMA-lijst. De lijsten
-    gebruiken '■' voor een instelling en '•' voor een compartiment; kop-, voetnoot- en
-    adresregels worden overgeslagen."""
+    """Haal fonds- en compartimentsnamen uit de tekst van een FSMA-lijst.
+
+    De lijsten gebruiken '\u25a0' voor een instelling en '\u2022' voor een compartiment, maar
+    hoe die tekens uit de PDF komen hangt af van de tekstextractie: soms blijven ze
+    staan, soms worden ze een ander glyph, soms verdwijnen ze. Daarom mag een naam
+    beginnen met of zonder opsommingsteken en filteren we op INHOUD: kop-, voetnoot-,
+    land-, adres- en beheerderregels vallen weg."""
     import re
     out = []
     for raw in (text or "").splitlines():
-        line = raw.strip()
-        if not line or line[0] not in "■•":
+        line = " ".join(raw.split())
+        if not line:
             continue
-        name = line[1:].strip(" .\t")
+        name = line.lstrip(_FSMA_BULLETS).strip(" .\t")
+        if len(name) < 3:
+            continue
+        low = name.lower()
+        if any(sk in low for sk in _FSMA_SKIP):
+            continue
+        if low in _FSMA_COUNTRIES:
+            continue
+        # Sectienummering (I., I.1., II.2., 1., a)) en voetnoten ((1) Artikel ...)
+        if re.match(r"^\(?\d+\)?[.)]?$", name) or re.match(r"^[IVXivx]+\.[\d.]*$", name):
+            continue
+        if re.match(r"^\(\d+\)", name):
+            continue
+        # Adresregels: postcode, huisnummer, postbus, of typische straataanduidingen
+        if re.search(r"\b\d{4,5}\b", name) or re.search(r"\bP\.?O\.? ?Box\b", name, re.I):
+            continue
+        if re.match(r"^(rue|avenue|boulevard|place|square|str(aat|asse)|weg|allee|road|"
+                    r"street|via|calle|kai|ring|quai|chauss)", low):
+            continue
+        if re.search(r"\d", name) and not re.search(r"[A-Za-z]{3}", name):
+            continue
         # 'X, afgekort Y' -> beide namen bruikbaar maken
         parts = [name]
         m = re.match(r"(.+?),\s*afgekort\s+(.+)$", name, re.I)
         if m:
             parts = [m.group(1).strip(), m.group(2).strip()]
-        for p in parts:
-            low = p.lower()
-            if len(p) < 3 or any(s in low for s in _FSMA_SKIP):
-                continue
-            out.append(p)
+        for pnm in parts:
+            if len(pnm) >= 3:
+                out.append(pnm)
     return out
+
+
+def _fsma_pdf_text(content: bytes) -> tuple[str, int]:
+    """Tekst uit een FSMA-PDF halen. Levert de standaardextractie te weinig op, dan wordt
+    de layout-modus geprobeerd (die behoudt de opmaak beter). Geeft (tekst, #paginas)."""
+    import io
+    from pypdf import PdfReader
+    reader = PdfReader(io.BytesIO(content))
+    pages = len(reader.pages)
+    text = "\n".join((p.extract_text() or "") for p in reader.pages)
+    if len(text) < 200 * max(1, pages):
+        try:
+            alt = "\n".join((p.extract_text(extraction_mode="layout") or "")
+                             for p in reader.pages)
+            if len(alt) > len(text):
+                text = alt
+        except Exception:
+            pass
+    return text, pages
 
 
 def fsma_build_index(force: bool = False, max_age_days: int = 7) -> dict:
@@ -1423,7 +1483,7 @@ def fsma_build_index(force: bool = False, max_age_days: int = 7) -> dict:
 
     import io
     import requests
-    names, sources, errors = [], {}, []
+    names, sources, errors, diag = [], {}, [], {}
     for label, url in _FSMA_LISTS.items():
         try:
             r = requests.get(url, timeout=30,
@@ -1431,11 +1491,16 @@ def fsma_build_index(force: bool = False, max_age_days: int = 7) -> dict:
             if not r.ok:
                 errors.append(f"{label}: HTTP {r.status_code}")
                 continue
-            from pypdf import PdfReader
-            reader = PdfReader(io.BytesIO(r.content))
-            text = "\n".join((p.extract_text() or "") for p in reader.pages)
+            text, pages = _fsma_pdf_text(r.content)
             got = _fsma_parse_names(text)
             sources[label] = len(got)
+            diag[label] = {"paginas": pages, "tekens": len(text), "namen": len(got),
+                           "staal": " | ".join(text.split("\n")[:12])[:400]}
+            logger.info(f"FSMA {label}: {pages} pagina's, {len(text)} tekens, "
+                        f"{len(got)} namen")
+            if not got:
+                logger.warning(f"FSMA {label}: GEEN namen herkend uit {len(text)} tekens "
+                               f"- staal: {diag[label]['staal'][:200]}")
             names += got
         except Exception as e:
             errors.append(f"{label}: {e}")
@@ -1443,7 +1508,7 @@ def fsma_build_index(force: bool = False, max_age_days: int = 7) -> dict:
 
     uniq = sorted(set(names))
     idx = {"names": uniq, "built": datetime.now().strftime("%Y-%m-%d %H:%M:00"),
-           "sources": sources, "errors": errors}
+           "sources": sources, "errors": errors, "diag": diag}
     if uniq:
         try:
             with open(path, "w", encoding="utf-8") as f:

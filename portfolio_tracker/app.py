@@ -2106,6 +2106,25 @@ def page_assets():
                                if fi.get("sources") else ""))
                 for err in (fi.get("errors") or []):
                     st.warning("⚠️ " + err)
+                if fi.get("diag"):
+                    with st.expander("🔧 Diagnose van het inlezen"):
+                        st.caption("Per lijst: aantal pagina's, hoeveel tekst eruit kwam, en "
+                                   "hoeveel namen daaruit herkend werden. Staan er pagina's en "
+                                   "tekens maar 0 namen, dan leest de app de PDF wel maar "
+                                   "herkent ze de opmaak niet — stuur me dan het staal "
+                                   "hieronder.")
+                        show_df(pd.DataFrame([
+                            {"Lijst": k, "Pagina's": v.get("paginas"),
+                             "Tekens": v.get("tekens"), "Namen": v.get("namen")}
+                            for k, v in fi["diag"].items()]),
+                            width="stretch", hide_index=True)
+                        for k, v in fi["diag"].items():
+                            if v.get("staal"):
+                                st.caption(f"Staal — {k}:")
+                                st.code(v["staal"])
+                if not fi.get("names"):
+                    st.error("Er werden geen namen herkend. Open 'Diagnose van het inlezen' "
+                             "hierboven en bezorg me het staal, dan pas ik het inlezen aan.")
             else:
                 fc2.caption("Nog niet opgehaald. De lijsten worden lokaal gecachet en "
                             "wekelijks ververst.")

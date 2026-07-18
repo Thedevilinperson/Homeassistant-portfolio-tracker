@@ -2,6 +2,31 @@
 
 Alle noemenswaardige wijzigingen aan de Portfolio Tracker add-on.
 
+## 0.46.0
+Fix: het ophalen van de FSMA-lijsten leverde 0 namen op.
+
+**Oorzaak.** De downloads en het lezen van de PDF's lukten wel (vandaar geen foutmelding en
+niets in de log), maar de naamherkenning niet. De parser vereiste dat elke regel begon met het
+opsommingsteken '\u25a0' of '\u2022'. Hoe die tekens uit een PDF komen hangt echter af van de
+tekstextractie: pypdf geeft ze soms als een ander glyph terug, en soms helemaal niet. Daardoor
+herkende de parser geen enkele regel als naam.
+
+**Opgelost.** De opsommingstekens worden nu enkel nog AFGEPELD, niet vereist. De filtering
+gebeurt op inhoud: kop-, voetnoot-, land-, adres-, beheerder- en sectieregels vallen weg, de
+rest is een fonds- of compartimentsnaam. Bijkomend wordt bij te weinig tekst automatisch de
+layout-modus van pypdf geprobeerd, die de opmaak beter bewaart.
+
+**Zichtbaar gemaakt.** Nieuw blokje '🔧 Diagnose van het inlezen' toont per lijst het aantal
+pagina's, hoeveel tekst eruit kwam, hoeveel namen herkend werden, en een staal van de ruwe
+tekst. Er wordt nu ook naar de log geschreven (aantal pagina's/tekens/namen per lijst, en een
+waarschuwing met staal als er 0 namen uitkomen). Zo is dit nooit meer een zwarte doos.
+
+Getest op echte FSMA-tekst in drie varianten - met opsommingstekens, zonder, en met een
+afwijkend glyph - telkens met hetzelfde resultaat en zonder ruis (landkoppen, adressen en
+kopteksten worden geweerd).
+
+Herbouwen (niet enkel herstarten) via de knop "Herbouwen" in Home Assistant.
+
 ## 0.45.0
 Drie correcties aan de koersdoelen en aan het tijdstip in het dashboard.
 
