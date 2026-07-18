@@ -2,6 +2,38 @@
 
 Alle noemenswaardige wijzigingen aan de Portfolio Tracker add-on.
 
+## 0.45.0
+Drie correcties aan de koersdoelen en aan het tijdstip in het dashboard.
+
+**1. Dashboard toont het GEMIDDELDE van de laatste 9 AI-koersdoelen.** De AI mag nog altijd
+koersdoelen bepalen bij het portefeuilleadvies, maar het dashboard middelt voortaan de laatste
+9 bepalingen (of minder als er minder zijn) in plaats van enkel het allerlaatste te tonen. Dat
+dempt uitschieters van één adviesronde. Een HANDMATIG koersdoel heeft altijd voorrang: eerst
+het doel op het activum, anders dat van de laatste transactie. Pas als er geen handmatig doel
+is, geldt het AI-gemiddelde. De tooltip op de kolom 'Koersdoel' legt dit uit.
+
+**2. Koersdoelen van 0 worden overal geweerd.** Een 0 betekent 'niet bepaald' en vertekende
+zowel de grafiek als het gemiddelde. Voortaan:
+- worden nulwaarden niet meer in de koersdoel-historiek opgeslagen;
+- verdwijnen ze uit de tijdlijn en de grafiek op de pagina Evolutie;
+- tellen ze niet mee in het gemiddelde van de laatste 9;
+- wordt een handmatig koersdoel van 0 behandeld als 'geen handmatig doel' (dan geldt het
+  AI-gemiddelde);
+- worden bestaande nulrijen bij de eerste start eenmalig opgeruimd.
+
+**3. Dashboardkolom toont nu de laatste ECHTE koerswijziging.** De kolom heette 'Laatste update'
+en toonde het moment van de laatste OPHALING - daardoor stond er ook in het weekend een tijdstip
+van vandaag, terwijl de koers al sinds vrijdag niet meer bewoog. De kolom heet nu 'Koers
+gewijzigd' en toont het moment waarop de koers voor het laatst effectief veranderde. Technisch:
+de app zoekt het begin van de huidige reeks identieke koersen in price_history, zodat ophalingen
+bij gesloten markt het tijdstip niet meer verschuiven.
+
+Getest: het gemiddelde over 9 (met nullen ertussen die correct genegeerd worden), de voorrang
+van handmatige doelen, en het weekendscenario - een koers die vrijdag 17:30 laatst bewoog en
+daarna zaterdag drie keer identiek werd opgehaald, toont nu correct vrijdag 17:30.
+
+Herbouwen (niet enkel herstarten) via de knop "Herbouwen" in Home Assistant.
+
 ## 0.44.0
 Punt 9, tweede bron: de officiële FSMA-lijsten van in België openbaar aangeboden fondsen, als
 aanvulling op de XBRU-controle van 0.43.

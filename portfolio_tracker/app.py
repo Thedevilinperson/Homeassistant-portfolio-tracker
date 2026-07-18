@@ -1044,7 +1044,7 @@ def page_dashboard():
         # Tijdstip van de laatst vastgelegde koers per ticker (uit price_history) — dit
         # is wat de achtergrondplanner het recentst wegschreef. Zo zie je meteen of een
         # koers (bv. een US-aandeel) écht recent is of al dagen stilstaat.
-        _last_ts = db.get_latest_prices(list(dpl))
+        _chg = db.get_last_price_changes(list(dpl))
         drows = []
         for t in sorted(dpl, key=lambda x: dpl[x]["pl_eur"], reverse=True):
             d = dpl[t]
@@ -1057,7 +1057,7 @@ def page_dashboard():
                 "Δ vandaag (%)":  d["change_pct"],
                 "Dag-P/L (€)":    d["pl_eur"],
                 "Huidige waarde": pv[t]["current_value"],
-                "Laatste update": _short_ts((_last_ts.get(t.upper()) or {}).get("timestamp")),
+                "Koers gewijzigd": _short_ts((_chg.get(t.upper()) or {}).get("timestamp")),
             })
         show_df(pd.DataFrame(drows), width="stretch", hide_index=True, column_config={
             "Aantal":         st.column_config.NumberColumn(format="%.10g"),
@@ -1066,16 +1066,20 @@ def page_dashboard():
             "Δ vandaag (%)":  st.column_config.NumberColumn(format="%+.10g%%"),
             "Dag-P/L (€)":    st.column_config.NumberColumn(format="€ %+.10g"),
             "Huidige waarde": st.column_config.NumberColumn(format="€ %.10g"),
-            "Laatste update": st.column_config.TextColumn(
-                help="Tijdstip (DD/MM UU:MM, Brusselse tijd) van de laatst vastgelegde koers "
-                     "voor dit activum. Staat dit ver in het verleden, dan is de koers niet "
-                     "meer ververst — bv. een tickerwijziging of een instrument dat geen enkele "
-                     "bron nog terugvindt."),
+            "Koers gewijzigd": st.column_config.TextColumn(
+                help="Tijdstip (DD/MM UU:MM, Brusselse tijd) waarop de koers voor het LAATST "
+                     "VERANDERDE — niet wanneer ze laatst werd opgehaald. De app haalt ook op "
+                     "momenten dat de markt dicht is (weekend, feestdagen); die ophalingen "
+                     "leveren dezelfde koers op en verschuiven dit tijdstip dus niet. Blijft "
+                     "dit ver in het verleden staan terwijl de markt open was, dan is er "
+                     "wellicht een echt probleem (bv. een tickerwijziging) — zie de pagina "
+                     "Status."),
         })
         _missing = [t for t in pv if t not in dpl]
         cap = ("Referentie = de laatste vastgelegde koers van de vorige (beurs)dag. Koersen en "
                "vorige slotkoersen staan in de native munt; de dag-P/L staat in euro. "
-               "'Laatste update' = wanneer de planner de koers het recentst vastlegde.")
+               "'Koers gewijzigd' = wanneer de koers voor het laatst effectief veranderde, "
+               "niet wanneer ze laatst werd opgehaald.")
         if _missing:
             cap += (f"  ·  Geen vorige koers voor: {', '.join(names_dp.get(t, t) for t in _missing)} "
                     "(nog te weinig koershistoriek).")
@@ -1302,21 +1306,24 @@ def page_portfolio():
             n = g - w
         divs_net[d["ticker"]] = divs_net.get(d["ticker"], 0) + n
 
-    # Koersdoelen: activum-niveau (ingesteld bij toevoegen) heeft voorrang — dat is
-    # de meest bewuste, actuele keuze. Anders het laatste transactie-koersdoel, en
-    # als allerlaatste terugval het AI-koersdoel.
-    price_targets = {}
+    # Koersdoelen (punt 1): een HANDMATIG koersdoel heeft altijd voorrang — op het
+    # activum, anders het laatste transactie-koersdoel. Is er geen handmatig doel, dan
+    # tonen we het GEMIDDELDE van de laatste 9 AI-bepalingen (of minder als er minder
+    # zijn). Nulwaarden ('niet bepaald') tellen nooit mee (punt 2).
+    manual_asset, manual_txn = {}, {}
     for a in db.get_assets():
-        if a.get("price_target") is not None:
-            price_targets[a["ticker"]] = a["price_target"]
+        if a.get("price_target"):
+            manual_asset[a["ticker"]] = a["price_target"]
     for t in db.get_transactions():           # ASC op datum -> laatste wint
-        if t.get("price_target") is not None and t["ticker"] not in price_targets:
-            price_targets[t["ticker"]] = t["price_target"]
+        if t.get("price_target"):
+            manual_txn[t["ticker"]] = t["price_target"]
+    price_targets, target_meta = {}, {}
     for tk in pv:
-        if tk not in price_targets:
-            pt = db.get_latest_price_target(tk)
-            if pt:
-                price_targets[tk] = pt["price_target"]
+        eff = db.get_effective_price_target(
+            tk, 9, manual_asset=manual_asset.get(tk), manual_txn=manual_txn.get(tk))
+        if eff.get("value") is not None:
+            price_targets[tk] = eff["value"]
+        target_meta[tk] = eff
 
     accset = set(acct) if acct else None
     nmap = asset_name_map()
@@ -1420,7 +1427,13 @@ def page_portfolio():
             "Aantal":           st.column_config.NumberColumn(format="%.10g"),
             "Gem.kostpr.(€)":   st.column_config.NumberColumn(format="%.10g"),
             "Koers (native)":   st.column_config.NumberColumn(format="%.10g"),
-            "Koersdoel":        st.column_config.NumberColumn(format="%.10g"),
+            "Koersdoel":        st.column_config.NumberColumn(
+                format="%.10g",
+                help="Een HANDMATIG koersdoel (op het activum, anders van de laatste "
+                     "transactie) heeft altijd voorrang. Is er geen handmatig doel, dan is dit "
+                     "het GEMIDDELDE van de laatste 9 AI-bepalingen (of minder als er minder "
+                     "zijn). Koersdoelen van 0 tellen als 'niet bepaald' en worden niet "
+                     "meegerekend. De volledige tijdlijn staat op de pagina Evolutie."),
             "Potentieel":       st.column_config.NumberColumn(format="%+.10g%%"),
             "Huidige waarde":   st.column_config.NumberColumn(format="€ %.10g"),
             "W/V (%)":          st.column_config.NumberColumn(format="%+.10g%%"),
@@ -5022,7 +5035,7 @@ def page_status():
     if not events:
         st.success("✅ Geen openstaande waarschuwingen. Je koersdata ziet er gezond uit.")
         st.caption("Tip: staat een US-aandeel op 0% dagwinst, kijk dan op het Dashboard naar de "
-                   "kolom 'Laatste update'. Is die recent, dan is 0% normaal (markt gesloten); "
+                   "kolom 'Koers gewijzigd'. Is die recent, dan is 0% normaal (markt gesloten); "
                    "staat ze dagen terug, dan verschijnt hier een waarschuwing 'Verouderde koers'.")
         return
 

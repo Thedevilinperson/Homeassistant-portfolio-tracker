@@ -381,6 +381,13 @@ def _migrate(conn):
     _relax_transactions_price_check(conn, cur)
     _relax_dividends_ticker_notnull(conn, cur)
 
+    # Punt 2: koersdoelen 0 (of negatief) betekenen 'niet bepaald' en horen niet in de
+    # historiek of in het gemiddelde. Bestaande rijen eenmalig opruimen.
+    try:
+        cur.execute("DELETE FROM price_target_history WHERE target IS NULL OR target <= 0")
+    except Exception:
+        pass
+
     _backfill_price_targets(conn, cur)
 
     conn.commit()
@@ -430,6 +437,8 @@ def _backfill_price_targets(conn, cur):
             tgt = round(float(target), 6)
         except (TypeError, ValueError):
             continue
+        if tgt <= 0:
+            continue          # 'niet bepaald' hoort niet in de historiek (punt 2)
         key = (ticker.upper(), source)
         prev = last_val.get(key)
         if prev and abs(prev[0] - tgt) < 1e-6 and prev[1] == (currency or "EUR"):
@@ -935,6 +944,8 @@ def log_price_target(ticker: str, target, currency: str = "EUR",
         tgt = round(float(target), 6)
     except (TypeError, ValueError):
         return False
+    if tgt <= 0:
+        return False   # 0/negatief = 'niet bepaald' -> nooit in de historiek (punt 2)
     cur = (currency or "EUR")
     conn = get_connection()
     last = conn.execute(
@@ -960,18 +971,121 @@ def get_price_target_history(ticker: str) -> list[dict]:
     conn = get_connection()
     rows = conn.execute(
         "SELECT target,currency,source,note,set_at FROM price_target_history "
-        "WHERE ticker=? ORDER BY set_at ASC, id ASC",
+        "WHERE ticker=? AND target > 0 ORDER BY set_at ASC, id ASC",
         (ticker.upper(),)
     ).fetchall()
     conn.close()
     return [dict(r) for r in rows]
 
 
+def get_recent_ai_targets(ticker: str, limit: int = 9) -> list[dict]:
+    """De laatste AI-koersdoelbepalingen voor een ticker (nieuwste eerst), zonder
+    nulwaarden — een 0 betekent 'niet bepaald' en telt niet mee (punt 2)."""
+    conn = get_connection()
+    rows = conn.execute(
+        "SELECT price_target,currency,model,created_at FROM ai_ratings "
+        "WHERE ticker=? AND price_target IS NOT NULL AND price_target > 0 "
+        "ORDER BY created_at DESC, id DESC LIMIT ?", (ticker.upper(), int(limit))
+    ).fetchall()
+    conn.close()
+    return [dict(r) for r in rows]
+
+
+def get_effective_price_target(ticker: str, limit: int = 9,
+                               manual_asset=None, manual_txn=None) -> dict:
+    """Het koersdoel zoals het dashboard het moet tonen (punt 1).
+
+    Volgorde:
+      1. een HANDMATIG koersdoel heeft altijd voorrang (op het activum, anders het
+         laatste transactie-koersdoel);
+      2. anders het GEMIDDELDE van de laatste 'limit' AI-bepalingen (of minder als er
+         minder zijn).
+    Nulwaarden tellen nooit mee: 0 betekent 'niet bepaald' (punt 2).
+
+    Geeft {'value', 'source', 'count', 'currency'} met source in
+    'manual' | 'manual_txn' | 'ai_avg' | None.
+    'manual_asset'/'manual_txn' kunnen meegegeven worden om extra queries te vermijden
+    wanneer de oproeper die gegevens al heeft."""
+    def _pos(v):
+        try:
+            f = float(v)
+            return f if f > 0 else None
+        except (TypeError, ValueError):
+            return None
+
+    if manual_asset is None or manual_txn is None:
+        a = get_asset(ticker) or {}
+        if manual_asset is None:
+            manual_asset = a.get("price_target")
+        cur_default = a.get("price_target_currency") or a.get("currency") or "EUR"
+    else:
+        cur_default = "EUR"
+
+    m = _pos(manual_asset)
+    if m is not None:
+        return {"value": m, "source": "manual", "count": 1, "currency": cur_default}
+    m = _pos(manual_txn)
+    if m is not None:
+        return {"value": m, "source": "manual_txn", "count": 1, "currency": cur_default}
+
+    rows = get_recent_ai_targets(ticker, limit)
+    vals = [float(r["price_target"]) for r in rows]
+    if not vals:
+        return {"value": None, "source": None, "count": 0, "currency": cur_default}
+    return {"value": round(sum(vals) / len(vals), 6), "source": "ai_avg",
+            "count": len(vals), "currency": (rows[0].get("currency") or cur_default)}
+
+
+def get_last_price_changes(tickers: list[str]) -> dict:
+    """Punt 3: per ticker het tijdstip waarop de koers VOOR HET LAATST VERANDERDE.
+
+    price_history krijgt bij elke ophaling een rij, ook als de koers identiek blijft
+    (bv. in het weekend). Het laatste rij-tijdstip zegt dus enkel 'wanneer keken we',
+    niet 'wanneer bewoog de koers'. Deze functie zoekt het BEGIN van de huidige reeks
+    identieke koersen: het moment waarop de actuele koers voor het eerst verscheen.
+
+    Geeft {TICKER: {'timestamp', 'price', 'checked'}} — 'checked' is het laatste
+    ophaalmoment, zodat de UI beide kan tonen."""
+    if not tickers:
+        return {}
+    conn = get_connection()
+    out = {}
+    for t in {str(x).upper() for x in tickers}:
+        last = conn.execute(
+            "SELECT price, timestamp FROM price_history WHERE ticker=? "
+            "ORDER BY timestamp DESC, rowid DESC LIMIT 1", (t,)
+        ).fetchone()
+        if not last:
+            continue
+        cur_price, checked = last["price"], last["timestamp"]
+        # Laatste tijdstip met een ANDERE koers dan de huidige...
+        prev = conn.execute(
+            "SELECT MAX(timestamp) ts FROM price_history "
+            "WHERE ticker=? AND ROUND(price, 6) <> ROUND(?, 6)", (t, cur_price)
+        ).fetchone()
+        if prev and prev["ts"]:
+            # ...en dan de eerste rij daarna: toen kreeg de koers haar huidige waarde.
+            row = conn.execute(
+                "SELECT MIN(timestamp) ts FROM price_history "
+                "WHERE ticker=? AND timestamp > ?", (t, prev["ts"])
+            ).fetchone()
+            changed = (row["ts"] if row and row["ts"] else checked)
+        else:
+            # Nooit een andere koers gezien: dan geldt de eerste meting als startpunt.
+            row = conn.execute(
+                "SELECT MIN(timestamp) ts FROM price_history WHERE ticker=?", (t,)
+            ).fetchone()
+            changed = (row["ts"] if row and row["ts"] else checked)
+        out[t] = {"timestamp": changed, "price": cur_price, "checked": checked}
+    conn.close()
+    return out
+
+
 def get_tickers_with_target_history() -> list[str]:
     """Tickers waarvoor minstens één koersdoel is vastgelegd (alfabetisch)."""
     conn = get_connection()
     rows = conn.execute(
-        "SELECT DISTINCT ticker FROM price_target_history ORDER BY ticker"
+        "SELECT DISTINCT ticker FROM price_target_history WHERE target > 0 ORDER BY ticker"
     ).fetchall()
     conn.close()
     return [r["ticker"] for r in rows]
