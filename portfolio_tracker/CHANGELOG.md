@@ -2,6 +2,42 @@
 
 Alle noemenswaardige wijzigingen aan de Portfolio Tracker add-on.
 
+## 0.42.0
+Euronext-ontsleuteling CORRECT gemaakt. In 0.41 zat de aanname fout; met de brondata die je
+bezorgde (ajax_secure + cryptojs-aes-format.js) ligt het schema nu exact vast.
+
+**Wat er fout was in 0.41.** Ik ging uit van een vaste AES-sleutel + vaste IV in de JS-bundel.
+Het is in werkelijkheid de Drupal-module 'ajax_secure' met het CryptoJS-AES-JSON-formaat van
+brainfoolong: per antwoord een WILLEKEURIGE salt en IV, waaruit sleutel (32 B) en IV (16 B)
+worden afgeleid met OpenSSL's EVP_BytesToKey (MD5, 1 iteratie) uit één vast WACHTWOORD. Er valt
+dus geen vaste sleutel te vinden - dat is waarom het automatisch opbouwen niets vond.
+Bijkomend: de diagnose kapte de body af op 2500 tekens, waardoor enkel het veld 'ct' zichtbaar
+was en de velden 'iv' en 's' (die achteraan staan) gemist werden.
+
+**Nu correct geimplementeerd:**
+- envelope {"ct","iv","s"} wordt geparst; sleutel+IV worden per antwoord afgeleid uit het
+  wachtwoord + de meegestuurde salt (EVP_BytesToKey/MD5), daarna AES-256-CBC/PKCS7;
+- de ontsleutelde tekst is JSON.stringify'd en wordt nog één keer door json.loads gehaald;
+- het wachtwoord komt uit drupalSettings.ajax_secure.kye van de live pagina, met de
+  ingebouwde terugval '24ayqVo7yJma' uit hun eigen JS. Zonder instellingen werkt het dus al.
+
+**Wachtwoordwijziging: detectie + zelfherstel.** 'Wachtwoord opnieuw bepalen' op de
+statuspagina leest het wachtwoord uit de live pagina en VALIDEERT het tegen een vers
+versleuteld staal voor het wordt opgeslagen. Werkt het niet meer, dan volgt een duidelijke
+waarschuwing; de dagelijkse statuscontrole (22:45) herstelt een wijziging automatisch en logt
+de nieuwe afdruk. Handmatig instellen kan nog steeds (nu één veld: het wachtwoord, geen
+sleutel/IV meer).
+
+**Diagnose verbeterd.** '🔧 Euronext-respons inspecteren' toont nu ook de envelope-velden, de
+ontsleutelstatus, het begin van de ONTSLEUTELDE inhoud en de staart van de ruwe respons (waar
+iv en s staan) - zodat een volgende wijziging meteen zichtbaar is.
+
+Getest: het volledige schema is lokaal end-to-end gevalideerd tegen een nagebootst Euronext-
+antwoord - ontsleuteling, doorstroming naar de bestaande tabelparser (koers 72,50 EUR correct
+geëxtraheerd), en het zelfherstel na een gewijzigd wachtwoord.
+
+Herbouwen (niet enkel herstarten) via de knop "Herbouwen" in Home Assistant.
+
 ## 0.41.0
 Euronext ontsleuteld (punt 6, optie 3). Euronext Live versleutelt zijn AJAX-antwoorden nu als
 {"ct": "..."} (AES-CBC met een vaste sleutel + IV uit hun JavaScript). De app ontsleutelt dat nu

@@ -920,17 +920,27 @@ def _euronext_headers() -> dict:
 
 
 # ── Euronext-ontsleuteling (punt 6, optie 3) ─────────────────────────────────
-# Euronext Live versleutelt sinds kort zijn AJAX-antwoorden: {"ct": "<base64>"}. Dat is
-# AES-CBC met een VASTE sleutel + IV die in hun (geobfusceerde) JS-bundle staan. We
-# ontsleutelen server-side. De sleutel kan roteren; daarom:
-#   • bewaren we sleutel/IV in de instellingen (handmatig instelbaar én automatisch),
-#   • kan de app de sleutel HERGEBRUIKEN uit de bundle (zelfherstellend), waarbij we het
-#     juiste (sleutel, IV)-paar VALIDEREN tegen een echt versleuteld staal,
-#   • detecteren en loggen we een sleutelwijziging, met een statuswaarschuwing.
+# Euronext Live versleutelt zijn AJAX-antwoorden via de Drupal-module 'ajax_secure',
+# die het CryptoJS-AES-JSON-formaat van brainfoolong gebruikt:
+#     {"ct": "<base64>", "iv": "<hex>", "s": "<hex salt>"}
+# Dat is CryptoJS.AES.encrypt(JSON.stringify(waarde), WACHTWOORD): per antwoord wordt
+# een willekeurige salt gekozen en worden sleutel (32 B) + IV (16 B) daaruit afgeleid
+# met OpenSSL's EVP_BytesToKey (MD5, 1 iteratie). Er is dus GEEN vaste sleutel/IV — enkel
+# een vast WACHTWOORD, dat in de pagina staat als drupalSettings.ajax_secure.kye met
+# '24ayqVo7yJma' als ingebouwde terugval. De ontsleutelde tekst is JSON.stringify'd en
+# moet dus nog één keer door json.loads.
+# Het wachtwoord kan roteren; daarom:
+#   • bewaren we het in de instellingen (handmatig instelbaar én automatisch),
+#   • kan de app het HERGEBRUIKEN uit de live pagina (zelfherstellend), gevalideerd
+#     tegen een echt versleuteld staal,
+#   • detecteren en loggen we een wijziging, met een statuswaarschuwing.
 
 # Referentie-ISIN (liquide Euronext-Brussel-aandeel) om een vers versleuteld staal op te
-# halen waartegen we kandidaat-sleutels valideren.
+# halen waartegen we kandidaat-wachtwoorden valideren.
 _EURONEXT_KEY_REF = ("BE0003796134", "XBRU")   # Colruyt op Euronext Brussel
+
+# Terugval-wachtwoord zoals het in de Euronext-JS staat (ajax_secure).
+_EURONEXT_FALLBACK_PW = "24ayqVo7yJma"
 
 
 def _euronext_is_ct(text: str) -> bool:
@@ -938,68 +948,84 @@ def _euronext_is_ct(text: str) -> bool:
     return b.startswith("{") and '"ct"' in b[:48]
 
 
-def _aes_cbc_decrypt(ct_b64: str, key: bytes, iv: bytes) -> str | None:
-    """AES-CBC ontsleutelen (PKCS7). key = 16/24/32 bytes, iv = 16 bytes. Geeft de
-    plaintext als string, of None bij een ongeldige sleutel/opvulling."""
+def _evp_bytes_to_key(password: bytes, salt: bytes, key_len: int = 32,
+                      iv_len: int = 16) -> tuple[bytes, bytes]:
+    """OpenSSL EVP_BytesToKey (MD5, 1 iteratie) — de sleutelafleiding die CryptoJS
+    gebruikt bij AES.encrypt(data, 'wachtwoord')."""
+    import hashlib
+    d = b""
+    out = b""
+    while len(out) < key_len + iv_len:
+        d = hashlib.md5(d + password + salt).digest()
+        out += d
+    return out[:key_len], out[key_len:key_len + iv_len]
+
+
+def _cryptojs_decrypt(envelope: str, password: str):
+    """Ontsleutel een CryptoJS-AES-JSON-envelope {"ct","iv","s"} met een wachtwoord.
+    Geeft de ontsleutelde (JSON-geparste) waarde terug, of None bij een fout wachtwoord
+    of een onverwachte vorm."""
+    import base64
+    import json
+    from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
     try:
-        import base64
-        from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
-        if len(key) not in (16, 24, 32) or len(iv) != 16:
+        j = json.loads(envelope)
+        ct = base64.b64decode(j["ct"])
+        if not ct or len(ct) % 16:
             return None
-        raw = base64.b64decode(ct_b64 + "=" * (-len(ct_b64) % 4))
-        if not raw or len(raw) % 16:
+        salt = bytes.fromhex(j["s"]) if j.get("s") else b""
+        key, iv_derived = _evp_bytes_to_key(password.encode("utf-8"), salt)
+        iv = bytes.fromhex(j["iv"]) if j.get("iv") else iv_derived
+        if len(iv) != 16:
             return None
         dec = Cipher(algorithms.AES(key), modes.CBC(iv)).decryptor()
-        pt = dec.update(raw) + dec.finalize()
-        pad = pt[-1]
-        if 1 <= pad <= 16 and pt[-pad:] == bytes([pad]) * pad:
-            pt = pt[:-pad]
-        return pt.decode("utf-8", "replace")
+        pt = dec.update(ct) + dec.finalize()
+        pad = pt[-1] if pt else 0
+        if not (1 <= pad <= 16) or pt[-pad:] != bytes([pad]) * pad:
+            return None          # verkeerd wachtwoord -> onzinnige opvulling
+        # De payload is JSON.stringify'd voor het versleutelen.
+        return json.loads(pt[:-pad].decode("utf-8"))
     except Exception:
         return None
 
 
-def _euronext_payload_ok(pt: str) -> bool:
-    """Herkent of een ontsleutelde plaintext een geldige Euronext-payload is (HTML-tabel,
-    JSON, of het ISIN-MIC-DNA). Zo weten we of een kandidaat-sleutel de JUISTE is."""
-    if not pt:
+def _euronext_payload_ok(pt) -> bool:
+    """Herkent of een ontsleutelde payload een geldige Euronext-payload is (HTML-fragment,
+    JSON-structuur, of het ISIN-MIC-DNA). Zo weten we of een kandidaat-wachtwoord klopt."""
+    if pt is None:
         return False
-    s = pt.lstrip()[:400].lower()
-    return ("<tr" in s or "<table" in s or s.startswith("{") or s.startswith("[")
+    if isinstance(pt, (dict, list)):
+        return True
+    s = str(pt).lstrip()[:400].lower()
+    if not s:
+        return False
+    return ("<tr" in s or "<table" in s or "<div" in s or s.startswith("{")
+            or s.startswith("[")
             or bool(__import__("re").search(r"[a-z]{2}[a-z0-9]{9,10}-[a-z0-9]{4}", s)))
 
 
-def _euronext_key_material() -> tuple[bytes | None, bytes | None]:
-    """Huidige (sleutel, IV) uit de instellingen. Beide worden als UTF-8 tekst bewaard
-    (zoals CryptoJS enc.Utf8.parse ze gebruikt)."""
+def _euronext_password() -> str:
+    """Het huidige ajax_secure-wachtwoord: uit de instellingen, anders de terugval."""
     try:
         import database as db
-        k = (db.get_setting("euronext_aes_key", "") or "").encode("utf-8")
-        v = (db.get_setting("euronext_aes_iv", "") or "").encode("utf-8")
-        return (k or None), (v or None)
+        pw = (db.get_setting("euronext_aes_key", "") or "").strip()
+        if pw:
+            return pw
     except Exception:
-        return None, None
+        pass
+    return _EURONEXT_FALLBACK_PW
 
 
 def euronext_decrypt_body(text: str) -> tuple[str | None, str]:
     """Geeft (bruikbare_body, status) voor een Euronext-antwoord.
-    status: 'plain' (niet versleuteld), 'decrypted' (ok), 'no_key' (geen sleutel ingesteld),
-    'failed' (sleutel werkt niet — mogelijk geroteerd)."""
+    status: 'plain' (niet versleuteld), 'decrypted' (ok), 'failed' (wachtwoord werkt niet
+    — mogelijk gewijzigd)."""
     if not _euronext_is_ct(text):
         return text, "plain"
-    try:
+    val = _cryptojs_decrypt(text, _euronext_password())
+    if _euronext_payload_ok(val):
         import json
-        ct = (json.loads(text) or {}).get("ct")
-    except ValueError:
-        return None, "failed"
-    if not ct:
-        return None, "failed"
-    key, iv = _euronext_key_material()
-    if not key or not iv:
-        return None, "no_key"
-    pt = _aes_cbc_decrypt(ct, key, iv)
-    if pt is not None and _euronext_payload_ok(pt):
-        return pt, "decrypted"
+        return (val if isinstance(val, str) else json.dumps(val)), "decrypted"
     return None, "failed"
 
 
@@ -1009,137 +1035,109 @@ def _euronext_fetch(url: str, params: dict | None = None):
 
 
 def _euronext_fetch_sample() -> str | None:
-    """Haal een VERS versleuteld staal ({"ct": ...}) op voor een liquide referentie-ISIN,
-    om kandidaat-sleutels tegen te valideren."""
+    """Haal een VERS versleuteld staal ({"ct","iv","s"}) op voor een liquide referentie-ISIN,
+    om kandidaat-wachtwoorden tegen te valideren."""
     isin, mic = _EURONEXT_KEY_REF
     try:
         r = _euronext_fetch("https://live.euronext.com/en/intraday_chart/"
                             f"getDetailedQuoteAjax/{isin}-{mic}/full")
         if r.ok and _euronext_is_ct(r.text):
-            import json
-            return (json.loads(r.text) or {}).get("ct")
+            return r.text
     except Exception as e:
         logger.info(f"_euronext_fetch_sample: {e}")
     return None
 
 
-def _euronext_bundle_urls() -> list[str]:
-    """Vind de JS-bundels van live.euronext.com waarin de AES-sleutel/IV als tekst staan."""
+def _euronext_password_candidates() -> list[str]:
+    """Kandidaat-wachtwoorden voor ajax_secure, in volgorde van betrouwbaarheid:
+    (1) drupalSettings.ajax_secure.kye uit een live pagina — dat is de bron van waarheid,
+    (2) de hardgecodeerde terugval uit hun JS ('24ayqVo7yJma'),
+    (3) losse 'kye'-achtige toewijzingen elders in de HTML/JS."""
     import re
-    urls = []
-    try:
-        r = _euronext_fetch("https://live.euronext.com/en")
-        if r.ok:
-            for m in re.findall(r'src="([^"]+\.js[^"]*)"', r.text or ""):
-                u = m if m.startswith("http") else ("https://live.euronext.com" + m
-                                                    if m.startswith("/") else None)
-                if u and u not in urls:
-                    urls.append(u)
-    except Exception as e:
-        logger.info(f"_euronext_bundle_urls: {e}")
-    return urls[:12]
+    cands: list[str] = []
 
+    def _add(v):
+        v = (v or "").strip()
+        if v and v not in cands:
+            cands.append(v)
 
-def _euronext_key_candidates(js: str) -> list[str]:
-    """Kandidaat-sleutel/IV-strings uit een JS-bundle: tekstliteralen van 16/24/32 tekens,
-    met voorrang aan die vlak bij CryptoJS/AES/Utf8.parse/decrypt."""
-    import re
-    cands, seen = [], set()
-    near = re.findall(r'(?:Utf8\.parse|CryptoJS|AES|decrypt|secret|\bkey\b|\biv\b)'
-                      r'[^"\']{0,60}["\']([A-Za-z0-9+/=_\-]{16,32})["\']', js, re.I)
-    alllit = re.findall(r'["\']([A-Za-z0-9+/=_\-]{16,32})["\']', js)
-    for s in near + alllit:
-        if len(s) in (16, 24, 32) and s not in seen:
-            seen.add(s)
-            cands.append(s)
-    return cands[:80]
-
-
-def _euronext_find_working_key(sample_ct: str, candidates: list[str]):
-    """Zoek het (sleutel, IV)-paar dat het versleutelde staal correct ontsleutelt.
-    Probeert per kandidaat als sleutel: dezelfde string als IV, elke 16-teken-kandidaat als
-    IV, en een nul-IV. Geeft (key_str, iv_str) of None."""
-    ivs16 = [c for c in candidates if len(c) == 16] + ["0" * 16, "\x00" * 16]
-    for k in candidates:
-        if len(k) not in (16, 24, 32):
-            continue
-        kb = k.encode("utf-8")
-        for iv in ([k] if len(k) == 16 else []) + ivs16:
-            ivb = iv.encode("utf-8") if not iv.startswith("\x00") else b"\x00" * 16
-            if len(ivb) != 16:
+    for url in ("https://live.euronext.com/en",
+                "https://live.euronext.com/en/product/equities/"
+                f"{_EURONEXT_KEY_REF[0]}-{_EURONEXT_KEY_REF[1]}/market-information"):
+        try:
+            r = _euronext_fetch(url)
+            if not r.ok:
                 continue
-            pt = _aes_cbc_decrypt(sample_ct, kb, ivb)
-            if pt is not None and _euronext_payload_ok(pt):
-                iv_str = iv if not iv.startswith("\x00") else ""
-                return k, iv_str
-    return None
+            html = r.text or ""
+            # drupalSettings staat als JSON in de pagina: ..."ajax_secure":{"kye":"XXXX"}...
+            for m in re.finditer(r'"ajax_secure"\s*:\s*\{[^}]*?"kye"\s*:\s*"([^"]+)"', html):
+                _add(m.group(1))
+            for m in re.finditer(r'\bkye\b["\']?\s*[:=]\s*["\']([A-Za-z0-9+/=_\-]{6,64})["\']',
+                                 html):
+                _add(m.group(1))
+        except Exception as e:
+            logger.info(f"_euronext_password_candidates({url}): {e}")
+    _add(_EURONEXT_FALLBACK_PW)
+    return cands
 
 
-def euronext_rebuild_key(sample_ct: str | None = None) -> dict:
-    """Bouw de Euronext-sleutel opnieuw op uit de live JS-bundels en valideer hem tegen een
-    vers versleuteld staal. Bewaart een werkende sleutel in de instellingen, detecteert
-    rotatie en logt/waarschuwt. Geeft een rapport terug voor de UI."""
+def euronext_rebuild_key(sample: str | None = None) -> dict:
+    """Bepaal het werkende ajax_secure-wachtwoord en valideer het tegen een vers versleuteld
+    staal. Bewaart een werkend wachtwoord in de instellingen, detecteert wijziging en
+    logt/waarschuwt. Geeft een rapport terug voor de UI."""
     import hashlib
     import database as db
     rep = {"ok": False, "message": "", "fingerprint": None, "rotated": False,
            "candidates": 0, "bundles": 0}
-    sample = sample_ct or _euronext_fetch_sample()
-    if not sample:
+    env = sample or _euronext_fetch_sample()
+    if not env:
         rep["message"] = ("Geen versleuteld staal kunnen ophalen bij Euronext "
                           "(geen netwerk of endpoint gewijzigd).")
         return rep
-    # Werkt de HUIDIGE sleutel nog?
-    key, iv = _euronext_key_material()
-    if key and iv and _aes_cbc_decrypt(sample, key, iv) and \
-            _euronext_payload_ok(_aes_cbc_decrypt(sample, key, iv)):
-        rep.update(ok=True, message="Huidige sleutel werkt nog.",
-                   fingerprint=hashlib.sha256(key).hexdigest()[:12])
+
+    # Werkt het HUIDIGE wachtwoord nog?
+    cur = _euronext_password()
+    if _euronext_payload_ok(_cryptojs_decrypt(env, cur)):
+        fp = hashlib.sha256(cur.encode("utf-8")).hexdigest()[:12]
+        db.set_setting("euronext_aes_key", cur)
+        db.set_setting("euronext_key_fingerprint", fp)
         db.set_setting("euronext_key_checked", datetime.now().strftime("%Y-%m-%d %H:%M:00"))
+        rep.update(ok=True, fingerprint=fp,
+                   message=f"Huidige wachtwoord werkt (afdruk {fp}).")
         try:
             db.resolve_status_event("EURONEXT", "euronext_key")
         except Exception:
             pass
         return rep
-    # Anders: uit de bundels halen en valideren
-    bundles = _euronext_bundle_urls()
-    rep["bundles"] = len(bundles)
-    cands = []
-    for u in bundles:
-        try:
-            r = _euronext_fetch(u)
-            if r.ok:
-                cands += _euronext_key_candidates(r.text or "")
-        except Exception:
-            continue
-    seen, uniq = set(), []
-    for c in cands:
-        if c not in seen:
-            seen.add(c); uniq.append(c)
-    rep["candidates"] = len(uniq)
-    found = _euronext_find_working_key(sample, uniq)
+
+    # Anders: kandidaten uit de live pagina halen en valideren
+    cands = _euronext_password_candidates()
+    rep["candidates"] = len(cands)
+    found = next((c for c in cands if _euronext_payload_ok(_cryptojs_decrypt(env, c))), None)
     if not found:
-        rep["message"] = (f"Geen werkende sleutel gevonden in {len(bundles)} bundel(s) "
-                          f"({len(uniq)} kandidaten). Stel de sleutel/IV desnoods handmatig in "
-                          "(zie de uitleg op de statuspagina).")
+        rep["message"] = (f"Geen werkend wachtwoord gevonden ({len(cands)} kandidaten "
+                          "geprobeerd). Stel het desnoods handmatig in — zie de uitleg "
+                          "op deze pagina.")
         return rep
-    new_key, new_iv = found
+
     old_fp = db.get_setting("euronext_key_fingerprint", "")
-    new_fp = hashlib.sha256(new_key.encode("utf-8")).hexdigest()[:12]
-    db.set_setting("euronext_aes_key", new_key)
-    db.set_setting("euronext_aes_iv", new_iv)
+    new_fp = hashlib.sha256(found.encode("utf-8")).hexdigest()[:12]
+    db.set_setting("euronext_aes_key", found)
     db.set_setting("euronext_key_fingerprint", new_fp)
     db.set_setting("euronext_key_checked", datetime.now().strftime("%Y-%m-%d %H:%M:00"))
     rotated = bool(old_fp and old_fp != new_fp)
     rep.update(ok=True, fingerprint=new_fp, rotated=rotated,
-               message=(f"Nieuwe Euronext-sleutel gevonden en gevalideerd (afdruk {new_fp})."
-                        + (f" Let op: sleutel GEWIJZIGD (was {old_fp})." if rotated else "")))
-    logger.info(f"Euronext-sleutel opnieuw opgebouwd: {new_fp}"
-                + (f" (rotatie, was {old_fp})" if rotated else ""))
+               message=(f"Werkend Euronext-wachtwoord gevonden en gevalideerd "
+                        f"(afdruk {new_fp})."
+                        + (f" Let op: het wachtwoord is GEWIJZIGD (was {old_fp})."
+                           if rotated else "")))
+    logger.info(f"Euronext-wachtwoord bepaald: {new_fp}"
+                + (f" (wijziging, was {old_fp})" if rotated else ""))
     try:
         if rotated:
             db.record_status_event("EURONEXT", "euronext_key", "info",
-                                   f"Euronext-sleutel is geroteerd en automatisch bijgewerkt "
-                                   f"(afdruk {old_fp} → {new_fp}).",
+                                   f"Het Euronext-wachtwoord is gewijzigd en automatisch "
+                                   f"bijgewerkt (afdruk {old_fp} → {new_fp}).",
                                    {"old": old_fp, "new": new_fp})
         else:
             db.resolve_status_event("EURONEXT", "euronext_key")
@@ -1149,24 +1147,21 @@ def euronext_rebuild_key(sample_ct: str | None = None) -> dict:
 
 
 def euronext_key_status() -> dict:
-    """Beknopte toestand van de Euronext-sleutel voor de statuspagina."""
+    """Beknopte toestand van het Euronext-wachtwoord voor de statuspagina."""
     import database as db
-    key, iv = _euronext_key_material()
+    pw = (db.get_setting("euronext_aes_key", "") or "").strip()
     fp = db.get_setting("euronext_key_fingerprint", "")
-    return {"has_key": bool(key and iv), "fingerprint": fp or None,
-            "checked": db.get_setting("euronext_key_checked", "") or None}
+    return {"has_key": bool(pw), "fingerprint": fp or None,
+            "checked": db.get_setting("euronext_key_checked", "") or None,
+            "using_fallback": (not pw)}
 
 
 def _euronext_note_key_problem(status: str, ctx: str) -> None:
     """Log + statuswaarschuwing wanneer Euronext versleuteld antwoordt en de sleutel
     ontbreekt of niet meer werkt. Eén lopende waarschuwing (deduped)."""
     import database as db
-    if status == "no_key":
-        msg = ("Euronext geeft versleutelde koersen terug, maar er is nog geen sleutel "
-               "ingesteld. Bouw de Euronext-sleutel op via de statuspagina.")
-    else:
-        msg = ("De Euronext-sleutel werkt niet meer (mogelijk geroteerd). Bouw hem opnieuw op "
-               "via de statuspagina — knop 'Euronext-sleutel opnieuw opbouwen'.")
+    msg = ("Het Euronext-wachtwoord werkt niet meer (mogelijk gewijzigd). Bouw het opnieuw "
+           "op via de statuspagina — knop 'Wachtwoord opnieuw bepalen'.")
     logger.warning(f"Euronext [{ctx}]: {msg}")
     try:
         db.record_status_event("EURONEXT", "euronext_key", "warning", msg, {"reason": status})
@@ -1190,7 +1185,7 @@ def _euronext_search_mic(isin: str) -> str | None:
             logger.info(f"_euronext_search_mic({isin}): HTTP {resp.status_code}")
             return None
         body, dstat = euronext_decrypt_body(resp.text or "")
-        if dstat in ("no_key", "failed"):
+        if dstat == "failed":
             _euronext_note_key_problem(dstat, f"search {isin}")
             return None
         m = re.search(rf"{re.escape(isin)}-([A-Z0-9]{{4}})", body or "")
@@ -1312,7 +1307,7 @@ def _euronext_quote_table(isin: str, mic: str):
         if not resp.ok:
             return None, None, resp.status_code, {}
         body, dstat = euronext_decrypt_body(resp.text or "")
-        if dstat in ("no_key", "failed"):
+        if dstat == "failed":
             _euronext_note_key_problem(dstat, f"quote {isin}-{mic}")
             return None, None, resp.status_code, {}
         tbl = _euronext_table(body or "")
@@ -1336,7 +1331,7 @@ def _euronext_chart_last(isin: str, mic: str, period: str) -> float | None:
         if not resp.ok:
             return None
         body, dstat = euronext_decrypt_body(resp.text or "")
-        if dstat in ("no_key", "failed"):
+        if dstat == "failed":
             return None
         try:
             import json as _json
@@ -1453,7 +1448,16 @@ def euronext_raw_probe(isin: str, mic: str | None = None) -> dict:
             rec.update(status=r.status_code,
                        content_type=r.headers.get("Content-Type", ""),
                        length=len(body),
-                       body_head=body[:2500])
+                       body_head=body[:1500],
+                       body_tail=(body[-600:] if len(body) > 2100 else ""),
+                       envelope_fields=(list(__import__("json").loads(body).keys())
+                                        if _euronext_is_ct(body) else []))
+            if _euronext_is_ct(body):
+                dec, dstat = euronext_decrypt_body(body)
+                rec["decrypt_status"] = dstat
+                if dec:
+                    rec["decrypted_head"] = dec[:1200]
+                    body = dec
             if name == "getDetailedQuoteAjax":
                 try:
                     tbl = _euronext_table(body)

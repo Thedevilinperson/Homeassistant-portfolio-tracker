@@ -4809,48 +4809,46 @@ def page_status():
                 + (f" · {summ['errors']} netwerkfout(en)" if summ.get('errors') else "")
                 + ("" if summ.get("online") else " · (offline: enkel koersdata-checks)"))
 
-    with st.expander("🔑 Euronext-sleutel (ontsleuteling)"):
+    with st.expander("🔑 Euronext-wachtwoord (ontsleuteling)"):
         ks = md.euronext_key_status()
         if ks.get("has_key"):
-            st.success(f"Sleutel ingesteld · afdruk `{ks.get('fingerprint') or '—'}`"
+            st.success(f"Wachtwoord ingesteld · afdruk `{ks.get('fingerprint') or '—'}`"
                        + (f" · laatst gecontroleerd {_short_ts(ks['checked'])}"
                           if ks.get("checked") else ""))
         else:
-            st.warning("Nog geen Euronext-sleutel ingesteld. Euronext versleutelt zijn "
-                       "antwoorden ({\"ct\": …}); zonder sleutel levert deze bron geen koers.")
-        st.caption("Euronext versleutelt de koersdata met een vaste AES-sleutel uit hun "
-                   "JavaScript. 'Opnieuw opbouwen' haalt die sleutel uit de live bundel en "
-                   "valideert hem tegen een echt versleuteld staal. De dagelijkse statuscontrole "
-                   "(22:45) doet dit ook automatisch en herstelt een sleutelrotatie zelf.")
-        if st.button("🔁 Sleutel opnieuw opbouwen", key="eur_key_rebuild", type="primary"):
-            with st.spinner("Euronext-sleutel ophalen en valideren..."):
+            st.info("Nog geen wachtwoord opgeslagen — de app gebruikt voorlopig het "
+                    "ingebouwde terugval-wachtwoord uit de Euronext-JS. Klik hieronder op "
+                    "'Wachtwoord opnieuw bepalen' om het te bevestigen en vast te leggen.")
+        st.caption("Euronext versleutelt zijn antwoorden met de Drupal-module 'ajax_secure' "
+                   "(CryptoJS-AES): per antwoord een eigen salt + IV, afgeleid uit één vast "
+                   "WACHTWOORD (drupalSettings.ajax_secure.kye). 'Opnieuw bepalen' leest dat "
+                   "wachtwoord uit de live pagina en valideert het tegen een echt versleuteld "
+                   "staal. De dagelijkse statuscontrole (22:45) doet dit ook automatisch en "
+                   "herstelt een wijziging zelf.")
+        if st.button("🔁 Wachtwoord opnieuw bepalen", key="eur_key_rebuild", type="primary"):
+            with st.spinner("Euronext-wachtwoord ophalen en valideren..."):
                 rep = md.euronext_rebuild_key()
             if rep.get("ok"):
-                st.success(rep.get("message") or "Sleutel in orde.")
+                st.success(rep.get("message") or "Wachtwoord in orde.")
             else:
-                st.error(rep.get("message") or "Geen werkende sleutel gevonden.")
-            st.caption(f"Bundels doorzocht: {rep.get('bundles', 0)} · "
-                       f"kandidaten: {rep.get('candidates', 0)}")
+                st.error(rep.get("message") or "Geen werkend wachtwoord gevonden.")
+            st.caption(f"Kandidaten geprobeerd: {rep.get('candidates', 0)}")
 
-        st.markdown("**Handmatig instellen** (als het automatisch opbouwen niet lukt)")
-        st.caption("Zo vind je de sleutel zelf: open op live.euronext.com F12 → tabblad "
-                   "**Sources** → zoek (Ctrl+Shift+F) in de bundels naar `AES.decrypt` of "
-                   "`Utf8.parse`; de sleutel en IV zijn de tekststrings (16, 24 of 32 tekens) "
-                   "die daar als sleutel/IV worden gebruikt. Plak ze hieronder.")
-        mk1, mk2 = st.columns(2)
-        cur_k = db.get_setting("euronext_aes_key", "") or ""
-        cur_v = db.get_setting("euronext_aes_iv", "") or ""
-        man_k = mk1.text_input("Sleutel (16/24/32 tekens)", value=cur_k, key="eur_man_key")
-        man_v = mk2.text_input("IV (16 tekens)", value=cur_v, key="eur_man_iv")
+        st.markdown("**Handmatig instellen** (als het automatisch bepalen niet lukt)")
+        st.caption("Zo vind je het zelf: open op live.euronext.com F12 → tabblad **Sources** en "
+                   "zoek (Ctrl+Shift+F) naar `ajax_secure`. In de code staat "
+                   "`drupalSettings.ajax_secure.kye`; die waarde is het wachtwoord. Staat ze er "
+                   "niet, dan geldt de terugval die in dezelfde functie staat.")
+        cur_pw = db.get_setting("euronext_aes_key", "") or ""
+        man_pw = st.text_input("Wachtwoord (ajax_secure kye)", value=cur_pw, key="eur_man_key")
         if st.button("Handmatig opslaan & testen", key="eur_man_save"):
-            db.set_setting("euronext_aes_key", man_k.strip())
-            db.set_setting("euronext_aes_iv", man_v.strip())
+            db.set_setting("euronext_aes_key", man_pw.strip())
             with st.spinner("Testen tegen een vers Euronext-staal..."):
                 rep = md.euronext_rebuild_key()
             if rep.get("ok"):
-                st.success("Sleutel werkt: " + (rep.get("message") or ""))
+                st.success("Wachtwoord werkt: " + (rep.get("message") or ""))
             else:
-                st.error("Deze sleutel/IV ontsleutelt het staal niet: " + (rep.get("message") or ""))
+                st.error("Dit wachtwoord ontsleutelt het staal niet: " + (rep.get("message") or ""))
 
     with st.expander("🔧 Euronext-respons inspecteren (diagnose)"):
         st.caption("Haalt de RUWE Euronext-respons op zoals de add-on ze ziet — handig om te "
@@ -4881,8 +4879,17 @@ def page_status():
                                if "parsed_rows" in ep else ""))
                 if ep.get("parsed_labels"):
                     st.caption("Labels: " + ", ".join(ep["parsed_labels"]))
+                if ep.get("envelope_fields"):
+                    st.caption("Envelope-velden: " + ", ".join(ep["envelope_fields"])
+                               + " · ontsleuteling: " + str(ep.get("decrypt_status", "—")))
+                if ep.get("decrypted_head"):
+                    st.caption("Ontsleutelde inhoud (begin):")
+                    st.code(ep["decrypted_head"], language="html")
                 if ep.get("body_head"):
                     st.code(ep["body_head"], language="html")
+                if ep.get("body_tail"):
+                    st.caption("Staart van de ruwe respons (hier staan iv en s):")
+                    st.code(ep["body_tail"], language="json")
                 st.caption(ep["url"])
 
     events = db.get_status_events()
