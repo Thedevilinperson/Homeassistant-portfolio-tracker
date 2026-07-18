@@ -2,6 +2,31 @@
 
 Alle noemenswaardige wijzigingen aan de Portfolio Tracker add-on.
 
+## 1.0.0
+Eerste stabiele versie. De app is functioneel compleet voor het doel waarvoor ze
+gebouwd is, draait op twee platformen, en is nu ook gedocumenteerd.
+
+**Nieuw: HANDLEIDING.md.** Een volledige handleiding in twaalf hoofdstukken: de
+basiswerking (FIFO per rekening, euro als rekeneenheid, fotomoment, cash-afleiding,
+koersbronnen), een stappenplan voor een verse installatie, uitleg per pagina over
+alle twaalf schermen, de mogelijkheden van de Streamlit-schil zelf (sorteren,
+CSV-export, bewerkbare tabellen, grafiekwerkbalk, het menu rechtsboven), de
+achtergrondtaken, de fiscale motor, de AI-luiken, en probleemoplossing.
+
+**Nieuw hoofdstuk: ontwerpkeuzes.** Twaalf keuzes met hun motivering vastgelegd,
+zodat later te beoordelen valt of een wijziging een verbetering is of het ongedaan
+maken van een bewuste beslissing. Onder meer: waarom cash afgeleid wordt in plaats
+van geboekt, waarom detectie en toepassing gescheiden zijn bij splits en
+herberekeningen, waarom de FIFO per rekening loopt terwijl de vrijstelling per
+persoon telt, waarom er nooit stilzwijgend op wisselkoers 1,0 teruggevallen wordt,
+waarom fiscale parameters instellingen zijn en geen code, en waarom de Windows-versie
+geen fork is.
+
+**README.md** vervangen door een echte inhoudsopgave die naar de handleiding en de
+Windows-installatie verwijst.
+
+Geen functionele wijzigingen aan de code in deze versie.
+
 ## 0.47.0
 Nieuw: de app kan nu ook als zelfstandige toepassing op een Windows-PC draaien,
 los van Home Assistant. Er is bewust geen aparte versie van de code gemaakt: het
