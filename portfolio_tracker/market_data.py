@@ -1382,7 +1382,8 @@ _FSMA_SKIP = ("compartimenten", "geen compartiment", "beheerd door", "toestand o
 
 def _fsma_cache_path() -> str:
     import os
-    return os.path.join(os.environ.get("DATA_DIR", "/app/data"), "fsma_index.json")
+    import database as _db
+    return os.path.join(_db.default_data_dir(), "fsma_index.json")
 
 
 # Landkoppen in de FSMA-lijsten (die zijn geen fondsnamen).

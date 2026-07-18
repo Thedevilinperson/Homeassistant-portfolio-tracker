@@ -1,0 +1,9 @@
+# Windows-specifieke pakketlijst voor Portfolio Tracker.
+# Verwijst naar de gedeelde requirements.txt uit de hoofdmap en voegt toe wat
+# alleen op Windows nodig is.
+
+-r ../requirements.txt
+
+# Windows heeft geen systeembrede tijdzonedatabank. Zonder dit pakket faalt
+# zoneinfo.ZoneInfo("Europe/Brussels") in scheduler.py met ZoneInfoNotFoundError.
+tzdata>=2024.1

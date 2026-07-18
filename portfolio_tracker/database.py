@@ -15,7 +15,29 @@ from pathlib import Path
 
 logger = logging.getLogger(__name__)
 
-DATA_DIR = os.environ.get("DATA_DIR", "/app/data")
+def default_data_dir() -> str:
+    """Waar komt de data te staan?
+
+    1. De omgevingsvariabele DATA_DIR wint altijd. Zo zet de Home Assistant add-on
+       (via Dockerfile/run.sh) de map op /share/portfolio_tracker, en het Windows-
+       startscript op een map naar keuze.
+    2. Zonder die variabele hangt de standaard af van het platform. Op Linux blijft
+       dat /app/data (het containerpad). Op Windows bestaat dat pad niet, dus valt
+       de app terug op de gebruikelijke plek voor programmadata van een gebruiker.
+       Zonder deze splitsing zou een directe start op Windows proberen te schrijven
+       naar C:\\app\\data, wat afhankelijk van de rechten stilletjes elders belandt
+       of botweg faalt.
+    """
+    env = os.environ.get("DATA_DIR")
+    if env:
+        return env
+    if os.name == "nt":
+        base = os.environ.get("LOCALAPPDATA") or os.path.expanduser("~")
+        return os.path.join(base, "PortfolioTracker", "data")
+    return "/app/data"
+
+
+DATA_DIR = default_data_dir()
 DB_PATH = os.path.join(DATA_DIR, "portfolio.db")
 
 DEFAULT_ACCOUNT = "Niet toegewezen"

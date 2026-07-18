@@ -1,0 +1,6 @@
+# Lokale afwijkingen op config.bat (per PC verschillend, niet in de repo)
+config.local.bat
+
+# Draaigegevens
+logs/
+scheduler.pid

@@ -2,6 +2,40 @@
 
 Alle noemenswaardige wijzigingen aan de Portfolio Tracker add-on.
 
+## 0.47.0
+Nieuw: de app kan nu ook als zelfstandige toepassing op een Windows-PC draaien,
+los van Home Assistant. Er is bewust geen aparte versie van de code gemaakt: het
+is dezelfde codebase, met een aparte opstartlaag in de nieuwe map `windows/`.
+
+**Waarom dit kon.** In de Python-code zat geen enkele afhankelijkheid van Home
+Assistant: geen Supervisor-API, geen ingress-logica, geen HA-tokens. Ingress is
+enkel een proxy voor de Streamlit-poort, en alle instellingen (ook de OpenAI-sleutel)
+zitten in de database, niet in de add-on-configuratie. De koppeling bestond dus
+alleen uit `run.sh` (bash) en het datapad `/share/portfolio_tracker`.
+
+**Nieuw in `windows/`:** `setup.bat` (virtuele omgeving, pakketten, database),
+`start.bat` (scheduler op de achtergrond, Streamlit op de voorgrond), `stop.bat`,
+`config.bat` met overschrijfbestand `config.local.bat`, `requirements-windows.txt`
+en `INSTALL_WINDOWS.md`.
+
+**Aanpassing in `database.py`.** `DATA_DIR` valt nu terug op een platformafhankelijke
+standaard via de nieuwe functie `default_data_dir()`. De omgevingsvariabele `DATA_DIR`
+wint zoals voorheen, dus voor de add-on verandert er niets: die blijft
+`/share/portfolio_tracker` gebruiken. Zonder deze splitsing zou een start op Windows
+zonder die variabele naar `C:\\app\\data` schrijven.
+
+**Aanpassing in `market_data.py`.** `_fsma_cache_path()` gebruikt dezelfde functie,
+zodat de FSMA-cache altijd bij de rest van de data staat.
+
+**Twee vallen die opgevangen zijn.** Windows heeft geen systeembrede tijdzonedatabank,
+waardoor `ZoneInfo("Europe/Brussels")` in `scheduler.py` zou falen; daarom staat
+`tzdata` in `requirements-windows.txt`. En `setup.bat` weigert Python 3.13 of hoger,
+omdat numpy 1.x daar geen wielen voor heeft en de installatie dan zou proberen te
+compileren.
+
+**Let op bij gebruik.** Laat de Windows-versie en de add-on nooit gelijktijdig op
+dezelfde database werken: SQLite in WAL-modus verwacht een enkele schrijver.
+
 ## 0.46.0
 Fix: het ophalen van de FSMA-lijsten leverde 0 namen op.
 
