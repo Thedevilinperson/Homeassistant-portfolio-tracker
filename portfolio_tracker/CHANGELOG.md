@@ -2,6 +2,96 @@
 
 Alle noemenswaardige wijzigingen aan de Portfolio Tracker add-on.
 
+## 1.1.0
+Vijf verbeteringen die elk een plek raken waar de app iets toonde dat niet
+overeenkwam met de werkelijkheid, plus een nieuwe spreidingsanalyse per sector.
+
+**Dagresultaat houdt rekening met de transacties van vandaag.** De oude formule was
+`(koers nu − vorige slotkoers) × aantal`. Koop je vandaag bij, dan rekent die ook
+voor de nieuwe stukken de beweging aan die vóór jouw aankoop plaatsvond — winst of
+verlies dat je nooit gemaakt hebt. `daily_pl()` werkt nu als een echte
+kasstroomredenering: eindwaarde − beginwaarde − aankopen van vandaag + verkopen van
+vandaag, waarbij het aantal bij opening uit het huidige aantal afgeleid wordt. Dat
+klopt ook bij méérdere transacties op één dag, elk tegen zijn eigen prijs. Een
+positie die je vandaag volledig nieuw opbouwt krijgt nu ook een dagresultaat
+(referentie = je aankoopprijs) in plaats van uit de tabel te verdwijnen. De functie
+volgt voortaan ook de rekeningfilter van de pagina.
+
+**Twee kolommen bij in de dagresultaattabel.** *Gem. waarde (€)* toont de
+gemiddelde aankoopwaarde per stuk (FIFO-kostbasis in euro), zodat je de dagbeweging
+naast je totale instappositie ziet. *Referentie* toont de koers waartegen de
+dagwinst effectief gemeten wordt: zonder transacties de vorige slotkoers, en anders
+het gewogen gemiddelde van die slotkoers en de prijs van elke transactie van vandaag.
+Een extra kolom *Vandaag* markeert met 📥/📤/🔁 welke posities verhandeld zijn.
+
+**Portefeuillepagina: open posities staan nu bovenaan**, gevolgd door de nieuwe
+sectorspreiding en pas daarna het totaal per activum.
+
+**Nieuw: spreiding per domein/sector.** Een taartdiagram met de verdeling van de
+portefeuille over sectoren, op huidige waarde of op geïnvesteerd kapitaal, met een
+tabel met de gewichten ernaast en een waarschuwing zodra één sector 40% of meer
+weegt. De toewijzing gebeurt via een uitbreidbare keuzelijst: dertien
+GICS-hoofdsectoren in het Nederlands worden standaard meegeleverd, en je kan er zelf
+rubrieken aan toevoegen (`sector_list` in de instellingen). Nieuw in de database:
+`assets.sector` en `assets.sector_source`. Bij het aanmaken van een activum wordt de
+sector automatisch opgehaald bij Yahoo Finance en vertaald naar de Nederlandstalige
+lijst; op de pagina Activa staat een kolom *Sector*, een blok om de lijst te beheren,
+en een knop om sectoren voor alle activa in één keer online op te halen. Een
+handmatige toewijzing wordt nooit door een automatische overschreven.
+
+**Dividenden volgen nu de rekeningfilter in de tabel met open posities.** Had je
+hetzelfde aandeel op twee rekeningen en is er één gesloten, dan bleven de dividenden
+van die gesloten rekening meetellen in de kolom *Dividend*. Ze horen bij een positie
+die er niet meer is en verdwijnen nu mee met de filter.
+
+**TOB wordt herberekend bij een eigen wisselkoers.** `_recompute_tob_preview()` sloeg
+lijnen met `fx_manual` volledig over. Bedoeling was jouw koers te beschermen, maar
+daardoor werd ook de TOB nooit meer nagekeken — terwijl de beurstaks een percentage
+van de EUR-tegenwaarde is en dus per definitie meebeweegt met de koers. Zulke lijnen
+worden nu wél gecontroleerd, mét behoud van jouw koers: enkel de EUR-tegenwaarde en
+de TOB worden erop hertekend. Ze zijn in het overzicht gemarkeerd met 💱. Lijnen met
+een handmatige TOB en toekenningen blijven zoals voorheen ongemoeid. In het
+transactieformulier verschijnt bovendien een melding wanneer een handmatig ingevulde
+TOB niet meer overeenkomt met de berekende waarde.
+
+**AI-marktopportuniteiten: minstens één niet-Amerikaanse naam per categorie.** De
+prompt stelt dit nu als harde voorwaarde, met de reden erbij: een portefeuille die
+enkel Amerikaanse namen voorgeschoteld krijgt, bouwt ongemerkt een dollar- en
+concentratierisico op. Wordt er in een categorie tóch enkel Amerikaans voorgesteld,
+dan wordt dat gemeld in plaats van stilgezwegen — weggooien zou een lege categorie
+opleveren. Niet-Amerikaanse noteringen zijn met 🌍 gemarkeerd.
+
+**Aandelen die je al bezit verdwijnen uit de suggesties.** Een koopidee voor een
+positie die al in de portefeuille zit, is geen idee maar ruis, en het verdringt een
+suggestie die je wél iets bijbrengt. Ideeën worden nu geweerd bij het opslaan én bij
+het weergeven — dus ook een aandeel dat je pas ná het advies gekocht hebt, verdwijnt
+uit de lijst en uit de opvolgingstabel. De vergelijking gebeurt op ticker, ISIN en
+basissymbool, zodat BMW.DE en BMW.F als hetzelfde bedrijf gelden.
+
+**Statuspagina: archief voor afgevinkte meldingen.** Alles wat je met '✓ Gezien'
+markeert — een split die je bewust niet registreert, bijvoorbeeld — verhuist naar
+een archiefsectie die standaard dichtgeklapt staat. De melding blijft bestaan (de
+toestand is immers niet opgelost), maar verdringt de openstaande punten niet meer.
+
+**Sluitingsdagen geven geen valse waarschuwingen meer.** De planner haalt élke vijf
+minuten koersen op, ook in het weekend en op feestdagen; die leveren dan allemaal
+dezelfde slotkoers op, en dat werd als 'geen koersbeweging' gemeld. Nieuw in
+`database.py` is een volledig offline berekende beurskalender: de Paasformule plus de
+Euronext-sluitingsdagen (Nieuwjaar, Goede Vrijdag, Paasmaandag, 1 mei, Kerstmis,
+tweede kerstdag) en de NYSE-kalender met de 'observed'-regel voor vaste feestdagen in
+het weekend. `detect_flat_prices()` kijkt enkel nog naar dagen waarop de beurs voor
+dát activum open was, en `detect_stale_prices()` telt de leeftijd van een koers in
+béúrsdagen in plaats van kalenderdagen — zo geeft een lang kerstweekend geen golf
+waarschuwingen. Bovenop de kalender staat een marktbrede terugval: staan álle activa
+van eenzelfde markt (vanaf drie) op dezelfde dag stil, dan lag de handel stil en is
+dat een marktfeit, geen datafout. Die vangt ook lokale sluitingen op die de kalender
+niet kent, zoals 21 juli of een halve handelsdag op kerstavond.
+
+**Waarom een kalender en geen online bron.** Een beurskalender-API zou een extra
+afhankelijkheid, een extra faalpunt en een extra netwerkcall per controle betekenen,
+voor gegevens die jaren vooruit exact berekenbaar zijn. De feestdagen liggen vast en
+Pasen volgt uit een formule van drie regels.
+
 ## 1.0.0
 Eerste stabiele versie. De app is functioneel compleet voor het doel waarvoor ze
 gebouwd is, draait op twee platformen, en is nu ook gedocumenteerd.

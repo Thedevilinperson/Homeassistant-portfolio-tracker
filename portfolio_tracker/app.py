@@ -201,40 +201,99 @@ def clear_cache():
     get_overview.clear()
 
 
-def daily_pl(pv: dict) -> dict:
-    """Dagelijkse winst/verlies per positie.
+def daily_pl(pv: dict, accounts=None) -> dict:
+    """Dagelijkse winst/verlies per positie — inclusief de transacties van vandaag.
 
     Referentie is de laatste koers die vóór vandaag in price_history staat (de
     scheduler schrijft elke 5 minuten weg, dus dat is in de praktijk de slotkoers
     van de vorige beursdag). Alles komt uit de database: geen netwerkcalls.
 
-    Per ticker: {prev, price, change_pct, pl_eur, quantity}. De omrekening naar EUR
-    gebeurt met de wisselkoers die al in de positie zit (huidige waarde gedeeld door
-    aantal x koers), zodat er geen aparte FX-call nodig is. Tickers zonder koers van
-    een vorige dag ontbreken in het resultaat (bv. net toegevoegd, of de scheduler
-    draait nog geen volledige dag)."""
+    WAAROM DE TRANSACTIES VAN VANDAAG MEETELLEN
+    Koop je vandaag 10 stuks bij, dan is de eenvoudige formule
+    (koers_nu − vorige_slot) × aantal_nu fout: ze rekent voor die 10 nieuwe stuks
+    ook de beweging aan die vóór jouw aankoop plaatsvond, terwijl je die nooit
+    gemaakt hebt. Hetzelfde geldt omgekeerd bij een verkoop van vandaag. Daarom
+    wordt het dagresultaat opgebouwd als een echte kasstroomredenering:
+
+        dag-P/L = eindwaarde − beginwaarde − aankopen vandaag + verkopen vandaag
+
+    met beginwaarde = (aantal bij opening × vorige slotkoers). Het aantal bij
+    opening volgt uit het huidige aantal, gecorrigeerd voor wat er vandaag bij kwam
+    of wegging. Zo klopt het resultaat ook bij MEERDERE transacties op één dag: elke
+    aankoop telt aan zijn eigen prijs, elke verkoop aan de zijne.
+
+    De 'referentie' die teruggegeven wordt, is de gewogen gemiddelde instapkoers van
+    de dag: het bedrag dat je vandaag effectief 'in' de positie had, gedeeld door het
+    huidige aantal. Bij een dag zonder transacties valt die samen met de vorige
+    slotkoers, precies zoals vroeger.
+
+    Per ticker: {prev, ref, price, change_pct, pl_eur, quantity, qty_open,
+    bought_today, sold_today, n_txn}. De omrekening naar EUR gebeurt met de
+    wisselkoers die al in de positie zit (huidige waarde ÷ (aantal × koers)), zodat
+    er geen aparte FX-call nodig is. accounts = set/lijst rekeningen (None = alle),
+    zodat het dagresultaat de rekeningfilter van de pagina volgt."""
     if not pv:
         return {}
     today = datetime.now().strftime("%Y-%m-%d")
     prev_map = db.get_previous_closes(list(pv.keys()), today)
+
+    # Transacties van vandaag, per ticker (split-gecorrigeerd zoals overal elders).
+    todays: dict[str, list[dict]] = {}
+    try:
+        for t in db.get_transactions():
+            if (t.get("date") or "")[:10] != today:
+                continue
+            if accounts is not None and (t.get("account") or db.DEFAULT_ACCOUNT) not in accounts:
+                continue
+            if t.get("is_performance_share"):
+                continue      # toekenning: geen aan- of verkoop op de markt
+            todays.setdefault(t["ticker"].upper(), []).append(t)
+    except Exception as exc:
+        logger.warning(f"daily_pl: transacties van vandaag niet opgehaald ({exc})")
+
     out = {}
     for ticker, pos in pv.items():
-        prev_row = prev_map.get(ticker.upper())
         price = pos.get("current_price")
         qty = pos.get("quantity") or 0
-        if not prev_row or not price or not qty:
+        if not price or not qty:
             continue
-        prev = prev_row["price"]
+        prev_row = prev_map.get(ticker.upper())
+        prev = prev_row["price"] if prev_row else None
+
+        txns = todays.get(ticker.upper(), [])
+        bought = sum(t["quantity"] for t in txns if t["transaction_type"] == "buy")
+        sold   = sum(t["quantity"] for t in txns if t["transaction_type"] == "sell")
+        buy_amt  = sum(t["quantity"] * (t["price_per_unit"] or 0)
+                       for t in txns if t["transaction_type"] == "buy")
+        sell_amt = sum(t["quantity"] * (t["price_per_unit"] or 0)
+                       for t in txns if t["transaction_type"] == "sell")
+        qty_open = qty - bought + sold
+
+        # Zonder vorige slotkoers is er enkel een dagresultaat als de hele positie
+        # vandaag gekocht is — dan is de aankoopprijs zelf de referentie.
         if not prev:
+            if abs(qty_open) > 1e-9 or not bought:
+                continue
+            basis = buy_amt - sell_amt
+        else:
+            basis = qty_open * prev + buy_amt - sell_amt
+        if basis <= 0:
             continue
+
+        ref = basis / qty
         cur_val = pos.get("current_value")
         fx = (cur_val / (qty * price)) if (cur_val and qty and price) else 1.0
         out[ticker] = {
-            "prev":       prev,
-            "price":      price,
-            "quantity":   qty,
-            "change_pct": (price - prev) / prev * 100,
-            "pl_eur":     (price - prev) * qty * fx,
+            "prev":         prev,
+            "ref":          ref,
+            "price":        price,
+            "quantity":     qty,
+            "qty_open":     qty_open,
+            "bought_today": bought,
+            "sold_today":   sold,
+            "n_txn":        len(txns),
+            "change_pct":   (price - ref) / ref * 100,
+            "pl_eur":       (qty * price - basis) * fx,
         }
     return out
 
@@ -742,10 +801,21 @@ def _recompute_dividend_chain(divs, rv_rate: float, include_manual: bool = False
 def _recompute_tob_preview(txns: list[dict], ainfo: dict) -> tuple[list[dict], int]:
     """Welke transacties hebben een verkeerde EUR-tegenwaarde en/of TOB?
 
-    Herberekent per transactie de wisselkoers (historisch), de EUR-tegenwaarde en de TOB
-    daarop, en vergelijkt met wat er opgeslagen staat. Lijnen met een EIGEN wisselkoers
-    (fx_manual) of een HANDMATIGE TOB (tob_manual) worden overgeslagen — die heb je
-    bewust zo gezet.
+    Per transactie wordt de EUR-tegenwaarde en de TOB daarop herberekend en
+    vergeleken met wat er opgeslagen staat.
+
+    WELKE WISSELKOERS?
+      • Lijnen met een EIGEN wisselkoers (fx_manual) behouden JOUW koers — die heb je
+        bewust ingegeven omdat je broker ze zo afgerekend heeft, en ze wordt hier dus
+        nooit door de marktkoers vervangen. Maar de TOB wordt er wél opnieuw op
+        berekend: de beurstaks is een percentage van de EUR-tegenwaarde, dus een
+        andere koers betekent per definitie een andere TOB. Werd de koers achteraf
+        aangepast (of stond de EUR-tegenwaarde nog op de oude koers), dan bleef die
+        TOB vroeger op het oude bedrag staan — precies wat hier rechtgezet wordt.
+      • Alle andere lijnen krijgen de historische marktkoers van de transactiedatum.
+
+    Lijnen met een HANDMATIGE TOB (tob_manual) en toekenningen (performance shares,
+    geen TOB) blijven altijd ongemoeid.
 
     'verdacht' markeert de oude fout expliciet: de opgeslagen TOB komt (bijna) exact
     overeen met het tarief toegepast op het bedrag in VREEMDE MUNT i.p.v. op de
@@ -753,14 +823,22 @@ def _recompute_tob_preview(txns: list[dict], ainfo: dict) -> tuple[list[dict], i
     Geeft (wijzigingen, aantal_verdacht) terug; schrijft niets weg."""
     changes, suspect = [], 0
     for t in txns:
-        if t.get("fx_manual") or t.get("tob_manual") or t.get("is_performance_share"):
+        if t.get("tob_manual") or t.get("is_performance_share"):
             continue
         cur = t.get("currency") or "EUR"
         if cur == "EUR":
             continue   # zonder vreemde munt kan de FX-fout niet optreden
-        new_fx, _src = fx_lookup(cur, t["date"])
-        if not new_fx:
-            continue   # geen koers beschikbaar: niets om mee te herberekenen
+
+        eigen_fx = bool(t.get("fx_manual"))
+        if eigen_fx:
+            new_fx = float(t.get("fx_rate") or 0) or None
+            if not new_fx or new_fx <= 0:
+                continue   # 'eigen koers' aangevinkt maar geen bruikbare koers: niets te doen
+        else:
+            new_fx, _src = fx_lookup(cur, t["date"])
+            if not new_fx:
+                continue   # geen koers beschikbaar: niets om mee te herberekenen
+
         native = float(t["total_amount"])
         new_eur = round(native * new_fx, 2)
         info = ainfo.get(t["ticker"], {})
@@ -787,7 +865,7 @@ def _recompute_tob_preview(txns: list[dict], ainfo: dict) -> tuple[list[dict], i
             "oud_fx": old_fx, "nieuw_fx": round(new_fx, 6),
             "oud_eur": old_eur, "nieuw_eur": new_eur,
             "oud_tob": old_tob, "nieuw_tob": new_tob,
-            "verdacht": verdacht,
+            "verdacht": verdacht, "eigen_fx": eigen_fx,
         })
     return changes, suspect
 
@@ -1015,7 +1093,7 @@ def page_dashboard():
 
     # ── Dagresultaat per positie ─────────────────────────────────────────────
     st.subheader("📆 Dagresultaat vandaag")
-    dpl = daily_pl(pv)
+    dpl = daily_pl(pv, accset)
     if not dpl:
         st.info("Nog geen dagresultaat: daarvoor is minstens één koers van een vorige dag nodig. "
                 "De achtergrondplanner legt elke 5 minuten koersen vast — morgen staat dit hier.")
@@ -1048,24 +1126,55 @@ def page_dashboard():
         drows = []
         for t in sorted(dpl, key=lambda x: dpl[x]["pl_eur"], reverse=True):
             d = dpl[t]
+            _mark = ""
+            if d["bought_today"] and d["sold_today"]:
+                _mark = f"🔁 {num(d['bought_today'], 4)} bij / {num(d['sold_today'], 4)} af"
+            elif d["bought_today"]:
+                _mark = f"📥 {num(d['bought_today'], 4)}"
+            elif d["sold_today"]:
+                _mark = f"📤 {num(d['sold_today'], 4)}"
             drows.append({
                 "": sign_icon(d["pl_eur"]),
                 "Activum":        asset_label(t, names_dp),
                 "Aantal":         d["quantity"],
+                "Gem. waarde (€)": pv[t]["avg_cost"],
                 "Vorige slot":    d["prev"],
+                "Referentie":     d["ref"],
                 "Koers nu":       d["price"],
                 "Δ vandaag (%)":  d["change_pct"],
                 "Dag-P/L (€)":    d["pl_eur"],
                 "Huidige waarde": pv[t]["current_value"],
+                "Vandaag":        _mark,
                 "Koers gewijzigd": _short_ts((_chg.get(t.upper()) or {}).get("timestamp")),
             })
         show_df(pd.DataFrame(drows), width="stretch", hide_index=True, column_config={
             "Aantal":         st.column_config.NumberColumn(format="%.10g"),
-            "Vorige slot":    st.column_config.NumberColumn(format="%.10g"),
+            "Gem. waarde (€)": st.column_config.NumberColumn(
+                format="€ %.10g",
+                help="Gemiddelde aankoopwaarde per stuk (kostbasis in euro, FIFO). Dit is "
+                     "wat je gemiddeld voor één stuk betaald hebt — koersen en de vorige "
+                     "slotkoers hiernaast staan in de NATIVE munt, dit bedrag in euro. "
+                     "Vergelijk het met 'Koers nu' om te zien hoe ver de positie in het "
+                     "totaal boven of onder water staat, los van de beweging van vandaag."),
+            "Vorige slot":    st.column_config.NumberColumn(
+                format="%.10g",
+                help="Laatste vastgelegde koers van de vorige beursdag (native munt)."),
+            "Referentie":     st.column_config.NumberColumn(
+                format="%.10g",
+                help="De koers waartegen de dagwinst gemeten wordt (native munt). Zonder "
+                     "transacties vandaag is dat gewoon de vorige slotkoers. Kocht of "
+                     "verkocht je vandaag, dan is dit het GEWOGEN GEMIDDELDE van de vorige "
+                     "slotkoers (voor de stukken die je al had) en de effectieve prijs van "
+                     "elke transactie van vandaag — zo krijg je geen winst of verlies "
+                     "toegerekend van vóór je aankoop."),
             "Koers nu":       st.column_config.NumberColumn(format="%.10g"),
             "Δ vandaag (%)":  st.column_config.NumberColumn(format="%+.10g%%"),
             "Dag-P/L (€)":    st.column_config.NumberColumn(format="€ %+.10g"),
             "Huidige waarde": st.column_config.NumberColumn(format="€ %.10g"),
+            "Vandaag":        st.column_config.TextColumn(
+                help="Transacties van vandaag op de geselecteerde rekeningen: 📥 bijgekocht, "
+                     "📤 verkocht, 🔁 allebei. Die worden in de dag-P/L verrekend tegen hun "
+                     "eigen aankoop- of verkoopprijs."),
             "Koers gewijzigd": st.column_config.TextColumn(
                 help="Tijdstip (DD/MM UU:MM, Brusselse tijd) waarop de koers voor het LAATST "
                      "VERANDERDE — niet wanneer ze laatst werd opgehaald. De app haalt ook op "
@@ -1076,10 +1185,17 @@ def page_dashboard():
                      "Status."),
         })
         _missing = [t for t in pv if t not in dpl]
-        cap = ("Referentie = de laatste vastgelegde koers van de vorige (beurs)dag. Koersen en "
-               "vorige slotkoersen staan in de native munt; de dag-P/L staat in euro. "
-               "'Koers gewijzigd' = wanneer de koers voor het laatst effectief veranderde, "
-               "niet wanneer ze laatst werd opgehaald.")
+        _traded = [t for t in dpl if dpl[t]["n_txn"]]
+        cap = ("Referentie = de laatste vastgelegde koers van de vorige (beurs)dag, gewogen "
+               "met de prijs van je transacties van vandaag. Koersen, vorige slotkoersen en "
+               "de referentie staan in de native munt; de gemiddelde waarde en de dag-P/L "
+               "staan in euro. 'Koers gewijzigd' = wanneer de koers voor het laatst "
+               "effectief veranderde, niet wanneer ze laatst werd opgehaald.")
+        if _traded:
+            cap += ("  ·  📥/📤 Vandaag verhandeld: "
+                    + ", ".join(names_dp.get(t, t) for t in _traded)
+                    + ". Voor die posities telt enkel de beweging ná jouw aankoop "
+                      "(of vóór je verkoop) mee — niet de volledige dagbeweging.")
         if _missing:
             cap += (f"  ·  Geen vorige koers voor: {', '.join(names_dp.get(t, t) for t in _missing)} "
                     "(nog te weinig koershistoriek).")
@@ -1296,15 +1412,18 @@ def page_portfolio():
         return
 
     assets_map = {a["ticker"]: a for a in assets}
+    accset = set(acct) if acct else None
+
+    # Dividenden per activum, MET de rekeningfilter. Zonder die filter zou een
+    # dividend blijven meetellen van een rekening waarop de positie intussen
+    # gesloten is (bv. hetzelfde aandeel op twee rekeningen, waarvan er één
+    # verkocht is) — dan toont de tabel met open posities dividenden die niets met
+    # de getoonde positie te maken hebben.
     divs_net = {}
     for d in db.get_dividends():
-        if d.get("net_eur") is not None:
-            n = d["net_eur"]
-        else:
-            g = d.get("gross_eur") if d.get("gross_eur") is not None else d["gross_amount"]
-            w = d.get("withholding_eur") if d.get("withholding_eur") is not None else d["withholding_tax"]
-            n = g - w
-        divs_net[d["ticker"]] = divs_net.get(d["ticker"], 0) + n
+        if accset is not None and (d.get("account") or db.DEFAULT_ACCOUNT) not in accset:
+            continue
+        divs_net[d["ticker"]] = divs_net.get(d["ticker"], 0) + dividend_net_eur(d)
 
     # Koersdoelen (punt 1): een HANDMATIG koersdoel heeft altijd voorrang — op het
     # activum, anders het laatste transactie-koersdoel. Is er geen handmatig doel, dan
@@ -1325,8 +1444,8 @@ def page_portfolio():
             price_targets[tk] = eff["value"]
         target_meta[tk] = eff
 
-    accset = set(acct) if acct else None
     nmap = asset_name_map()
+    sec_map = db.get_asset_sectors()
 
     # AI-ratingsynthese + wijzigingen t.o.v. de vorige ronde
     synth   = ai_advisor.rating_synthesis(list(pv.keys()), n_batches=9)
@@ -1397,6 +1516,10 @@ def page_portfolio():
 
     def render_positions():
         st.subheader("📋 Open posities")
+        if acct:
+            st.caption(f"📂 Gefilterd op **{', '.join(acct)}** — ook de kolom *Dividend* volgt "
+                       "die filter. Heb je hetzelfde aandeel op meerdere rekeningen gehad, dan "
+                       "tellen enkel de dividenden van de geselecteerde rekening(en) mee.")
         rows = []
         for ticker, pos in pv.items():
             asset = assets_map.get(ticker, {})
@@ -1411,6 +1534,7 @@ def page_portfolio():
                 "":             sign_icon(pos["unrealized_gain_loss"]),
                 "Ticker":       ticker,
                 "Naam":         (asset.get("name") or ticker)[:20],
+                "Sector":       sec_map.get(ticker) or "—",
                 "Munt":         pos["current_price_currency"] or "EUR",
                 "Aantal":       pos["quantity"],
                 "Gem.kostpr.(€)":  pos["avg_cost"],
@@ -1424,6 +1548,9 @@ def page_portfolio():
                 "AI-advies":    ai_badge(rec, changes.get(ticker)),
             })
         show_df(pd.DataFrame(rows), width="stretch", hide_index=True, height=420, column_config={
+            "Sector":           st.column_config.TextColumn(
+                help="Domein/sector van dit activum. Toewijzen doe je op de pagina "
+                     "🏢 Activa (kolom Sector); '—' betekent nog niet toegewezen."),
             "Aantal":           st.column_config.NumberColumn(format="%.10g"),
             "Gem.kostpr.(€)":   st.column_config.NumberColumn(format="%.10g"),
             "Koers (native)":   st.column_config.NumberColumn(format="%.10g"),
@@ -1565,10 +1692,94 @@ def page_portfolio():
         else:
             st.info("Nog geen prijsgeschiedenis. De scheduler slaat elke 5 minuten koersen op.")
 
-    # Volgorde: totaal per activum → open posities → gerealiseerde historiek → AI-synthese → prijsgeschiedenis
-    render_per_asset()
-    st.divider()
+    def render_sectors():
+        st.subheader("🥧 Spreiding per domein / sector")
+        rows, unknown = {}, []
+        for ticker, pos in pv.items():
+            val = pos.get("current_value") or 0.0
+            if val <= 0:
+                continue
+            s = sec_map.get(ticker)
+            if not s:
+                unknown.append(ticker)
+                s = db.SECTOR_UNKNOWN
+            rows[s] = rows.get(s, 0.0) + val
+        if not rows:
+            st.info("Geen posities met een waarde om te verdelen.")
+            return
+
+        SEC_VALUE, SEC_COST = "💰 Huidige waarde", "📥 Geïnvesteerd kapitaal"
+        sticky("port_sec_basis", SEC_VALUE, [SEC_VALUE, SEC_COST])
+        basis = st.radio("Verdeling volgens", [SEC_VALUE, SEC_COST], horizontal=True,
+                         key="port_sec_basis", label_visibility="collapsed",
+                         help="Huidige waarde toont het gewicht van elke sector vandaag. "
+                              "Geïnvesteerd kapitaal toont hoe je je geld oorspronkelijk "
+                              "verdeeld hebt — het verschil tussen beide laat zien welke "
+                              "sectoren zwaarder of lichter zijn gaan wegen.")
+        sticky_save("port_sec_basis")
+        if basis == SEC_COST:
+            rows = {}
+            for ticker, pos in pv.items():
+                val = pos.get("total_cost") or 0.0
+                if val <= 0:
+                    continue
+                rows[sec_map.get(ticker) or db.SECTOR_UNKNOWN] = \
+                    rows.get(sec_map.get(ticker) or db.SECTOR_UNKNOWN, 0.0) + val
+
+        labels = sorted(rows, key=lambda s: -rows[s])
+        values = [rows[s] for s in labels]
+        total = sum(values) or 1.0
+        fig = go.Figure(go.Pie(
+            labels=labels, values=values, hole=0.45,
+            textinfo="label+percent", sort=False,
+            hovertemplate="<b>%{label}</b><br>€%{value:,.2f} (%{percent})<extra></extra>",
+        ))
+        fig.update_layout(
+            title=("Spreiding per sector — " + ("huidige waarde" if basis == SEC_VALUE
+                                                else "geïnvesteerd kapitaal")),
+            height=380, margin=dict(t=45, b=0, l=0, r=0),
+            paper_bgcolor="rgba(0,0,0,0)", showlegend=True,
+        )
+        pc1, pc2 = st.columns([3, 2])
+        with pc1:
+            st.plotly_chart(fig, width="stretch")
+        with pc2:
+            st.markdown("**Gewicht per sector**")
+            show_df(pd.DataFrame([{
+                "Sector": s,
+                "Bedrag": rows[s],
+                "Aandeel": rows[s] / total * 100,
+            } for s in labels]), width="stretch", hide_index=True, column_config={
+                "Bedrag":  st.column_config.NumberColumn(format="€ %.10g"),
+                "Aandeel": st.column_config.NumberColumn(format="%.10g%%"),
+            })
+            _top = labels[0]
+            _share = rows[_top] / total * 100
+            if _share >= 40:
+                st.warning(f"⚠️ **{_share:.0f}%** van deze selectie zit in één sector "
+                           f"(*{_top}*). Dat is een concentratierisico: gaat die sector "
+                           "onderuit, dan volgt je hele portefeuille mee. Geen advies — "
+                           "wel iets om bewust te kiezen.")
+
+        if unknown:
+            st.caption(f"ℹ️ **{len(unknown)} activum/activa zonder sector** — "
+                       + ", ".join(asset_label(t, nmap) for t in unknown[:12])
+                       + ("…" if len(unknown) > 12 else "")
+                       + ".  Ze staan samen onder *Niet toegewezen*. Ken ze een domein toe "
+                         "via **🏢 Activa → 📋 Overzicht** (kolom *Sector*), of laat ze daar "
+                         "in één keer online ophalen met de knop *Sectoren ophalen*.")
+        st.caption("De sectorindeling volgt de gangbare GICS-hoofdsectoren. Een brede "
+                   "indextracker hoort per definitie in geen enkele sector thuis — die zet "
+                   "je best op *Gediversifieerd (index/fonds)*, anders lijkt je portefeuille "
+                   "geconcentreerder dan ze is.")
+
+    # Volgorde: open posities → sectorspreiding → totaal per activum →
+    # gerealiseerde historiek → AI-synthese → prijsgeschiedenis
     render_positions()
+    st.divider()
+    render_sectors()
+    st.divider()
+    render_per_asset()
     st.divider()
     render_realized()
     st.divider()
@@ -1618,6 +1829,13 @@ def page_assets():
                             st.session_state[k("type")] = _meta["type"]
                         if _meta.get("exchange"):
                             st.session_state[k("exch")] = _meta["exchange"]
+                        _si = md.get_sector_info(_tk, _tk)
+                        if _si.get("sector"):
+                            _sn = db.normalize_sector(_si["sector"])
+                            if _sn:
+                                db.add_sector(_sn)
+                                st.session_state[k("sector_stage")] = _sn
+                                st.session_state[k("sector_src")] = _si.get("bron") or "online"
                         st.session_state[k("fetched")] = True
                         st.rerun()
                     elif not info.get("found"):
@@ -1636,6 +1854,17 @@ def page_assets():
                         _isin = (info.get("isin") or "").strip().upper()
                         if len(_isin) >= 2 and _isin[:2].isalpha():
                             st.session_state[k("country")] = _isin[:2]
+                        # Domein/sector: Yahoo geeft die mee voor aandelen. Fondsen en
+                        # trackers hebben er meestal geen — dat is geen fout, een brede
+                        # tracker zit nu eenmaal in alle sectoren tegelijk.
+                        _sn = db.normalize_sector(info.get("sector"))
+                        if _sn:
+                            db.add_sector(_sn)
+                            st.session_state[k("sector_stage")] = _sn
+                            st.session_state[k("sector_src")] = "Yahoo Finance"
+                        elif info.get("type") == "etf":
+                            st.session_state[k("sector_stage")] = "Gediversifieerd (index/fonds)"
+                            st.session_state[k("sector_src")] = "afgeleid (fonds/tracker)"
                         st.session_state[k("fetched")] = True
                         if not (info.get("isin") or "").strip():
                             st.session_state[k("isin_missing")] = True
@@ -1683,6 +1912,54 @@ def page_assets():
         # TOB-indicatie tonen
         _tob_rate = tax_mod.calculate_tob(asset_type, etf_subtype, 10000, belg_reg) / 10000 * 100
         st.caption(f"➡️ TOB-tarief voor dit activum: **{_tob_rate:.2f}%**".replace(".", ","))
+
+        # ── Domein / sector ──────────────────────────────────────────────────
+        # Keuzelijst uit de database, met de mogelijkheid om er ter plekke een
+        # rubriek aan toe te voegen. Zo hoeft er niets in de code te veranderen als
+        # je een eigen indeling wil (bv. 'Defensie' of 'Waterstof').
+        #
+        # Let op de staging + nonce: Streamlit verbiedt het overschrijven van een
+        # widget-key nadat de widget is aangemaakt (StreamlitAPIException). De
+        # gewenste waarde gaat daarom naar een GEWONE sessiesleutel (sector_stage),
+        # en de selectbox krijgt een nonce in zijn key — bij de volgende run is dat
+        # een nieuwe widget, die netjes met de nieuwe waarde start.
+        SEC_NONE = "— nog niet toegewezen —"
+        SEC_NEW  = "➕ nieuwe sector toevoegen…"
+        st.session_state.setdefault(k("sector_stage"), SEC_NONE)
+        st.session_state.setdefault("as_sec_nonce", 0)
+        secn = st.session_state["as_sec_nonce"]
+        _staged = st.session_state[k("sector_stage")]
+        _opts = [SEC_NONE] + db.get_sectors() + [SEC_NEW]
+        if _staged not in _opts:
+            _opts.insert(1, _staged)
+        sc1, sc2 = st.columns([2, 3])
+        with sc1:
+            sector_pick = st.selectbox(
+                "🏭 Domein / sector", _opts, index=_opts.index(_staged),
+                key=f"as_sector_{n}_{secn}",
+                help="Bepaalt in welk taartpunt dit activum belandt op de "
+                     "portefeuillepagina. Voor een brede indextracker kies je best "
+                     "'Gediversifieerd (index/fonds)': die zit in alle sectoren tegelijk "
+                     "en zou de spreiding anders vertekenen.")
+        sector = None if sector_pick in (SEC_NONE, SEC_NEW) else sector_pick
+        with sc2:
+            if sector_pick == SEC_NEW:
+                nc1, nc2 = st.columns([3, 1])
+                new_sec = nc1.text_input("Naam van de nieuwe sector", key=k("sector_new"),
+                                         placeholder="bv. Defensie")
+                nc2.write(""); nc2.write("")
+                if nc2.button("Toevoegen", key=k("sector_add")):
+                    if not new_sec.strip():
+                        st.warning("Geef eerst een naam in.")
+                    else:
+                        db.add_sector(new_sec.strip())
+                        st.session_state[k("sector_stage")] = new_sec.strip()
+                        st.session_state["as_sec_nonce"] = secn + 1
+                        st.rerun()
+            elif st.session_state.get(k("sector_src")) and sector:
+                st.write(""); st.write("")
+                st.caption(f"✨ Automatisch ingevuld via **{st.session_state[k('sector_src')]}** "
+                           "— pas gerust aan, jouw keuze heeft altijd voorrang.")
 
         # Fotomoment (slotkoers 31/12/2025) — voor de meerwaardebelasting op vóór-2026 stukken
         st.session_state.setdefault(k("snap_stage"), None)
@@ -1794,7 +2071,10 @@ def page_assets():
                              currency, exchange.strip() or None, isin.strip() or None,
                              belgian_registered=int(belg_reg), country=country,
                              price_target=(price_target or None),
-                             price_target_currency=(currency if price_target else None))
+                             price_target_currency=(currency if price_target else None),
+                             sector=sector,
+                             sector_source=("auto" if st.session_state.get(k("sector_src"))
+                                            else "manual"))
                 if snap_val and snap_val > 0:
                     _fx, snap_eur = compute_eur(snap_val, currency, tax_mod.SNAPSHOT_DATE)
                     db.set_asset_snapshot(t, float(snap_val), snap_eur)
@@ -1829,6 +2109,8 @@ def page_assets():
         SUB_KEY  = {v: k for k, v in SUB_LBL.items()}
         ACUR = ["EUR", "USD", "GBP", "CHF"]
         clist = list(tax_mod.COUNTRY_NAMES.keys())
+        SEC_EMPTY = "—"
+        sec_opts = [SEC_EMPTY] + db.get_sectors()
         rows = []
         for a in assets:
             lp = db.get_latest_price(a["ticker"])
@@ -1836,9 +2118,13 @@ def page_assets():
             sub = a.get("etf_subtype") if a["asset_type"] == "etf" else ""
             cur = a["currency"] if a["currency"] in ACUR else "EUR"
             ctry = (a.get("country") or "BE").upper()
+            _sec = (a.get("sector") or "").strip() or SEC_EMPTY
+            if _sec not in sec_opts:
+                sec_opts.append(_sec)
             rows.append({
                 "Ticker":     a["ticker"],
                 "Naam":       a.get("name") or "",
+                "Sector":     _sec,
                 "Type":       TYPE_LBL.get(a["asset_type"], a["asset_type"]),
                 "ETF-type":   SUB_LBL.get(sub, "—"),
                 "BE":         bool(a.get("belgian_registered")),
@@ -1862,6 +2148,14 @@ def page_assets():
                 "Ticker":     cc.TextColumn(disabled=True,
                                             help="Ticker corrigeren doe je onderaan (verhuist transacties mee)."),
                 "Naam":       cc.TextColumn(),
+                "Sector":     cc.SelectboxColumn(
+                    options=sec_opts,
+                    help="Domein/sector — bepaalt het taartdiagram 'Spreiding per domein' "
+                         "op de portefeuillepagina. '—' = nog niet toegewezen. Staat de "
+                         "rubriek die je zoekt er niet bij, voeg ze dan toe met "
+                         "'Sectoren beheren' onder de tabel; ze verschijnt dan meteen in "
+                         "deze keuzelijst. Voor brede indextrackers kies je best "
+                         "'Gediversifieerd (index/fonds)'."),
                 "Type":       cc.SelectboxColumn(options=list(TYPE_LBL.values())),
                 "ETF-type":   cc.SelectboxColumn(options=list(SUB_LBL.values()),
                                                  help="Enkel relevant voor ETF's (bepaalt mee de TOB)."),
@@ -1996,7 +2290,8 @@ def page_assets():
                     orig = rows[i]
                     if all(_cell_eq(r[k], orig[k]) for k in
                            ("Naam", "Type", "ETF-type", "BE", "Munt", "Land", "Beurs", "ISIN",
-                            "Koersdoel", "Fotomoment", "Handmatige koers", "Enkel handm.")):
+                            "Koersdoel", "Fotomoment", "Handmatige koers", "Enkel handm.",
+                            "Sector")):
                         continue
                     atype = TYPE_KEY.get(str(r["Type"]), a["asset_type"])
                     asub  = SUB_KEY.get(str(r["ETF-type"]), a.get("etf_subtype") or "distributing") or "distributing"
@@ -2004,6 +2299,8 @@ def page_assets():
                     ctry  = str(r["Land"]) if r["Land"] in clist else "BE"
                     tgt = r["Koersdoel"]
                     has_tgt = not (tgt is None or pd.isna(tgt) or float(tgt) <= 0)
+                    _newsec = str(r["Sector"]).strip()
+                    _has_sec = bool(_newsec) and _newsec != SEC_EMPTY
                     db.update_asset(a["ticker"], name=(str(r["Naam"]).strip() or a["ticker"]),
                                     asset_type=atype, etf_subtype=asub, currency=ncur,
                                     exchange=(str(r["Beurs"]).strip() or ""),
@@ -2011,7 +2308,10 @@ def page_assets():
                                     belgian_registered=int(bool(r["BE"])), country=ctry,
                                     price_target=(float(tgt) if has_tgt else None),
                                     price_target_currency=(ncur if has_tgt else None),
-                                    clear_price_target=(not has_tgt))
+                                    clear_price_target=(not has_tgt),
+                                    sector=(_newsec if _has_sec else None),
+                                    sector_source=("manual" if _has_sec else None),
+                                    clear_sector=(not _has_sec))
                     snap = r["Fotomoment"]
                     if snap is None or pd.isna(snap) or float(snap) <= 0:
                         db.set_asset_snapshot(a["ticker"], None, None)
@@ -2035,6 +2335,114 @@ def page_assets():
                 st.rerun()
             elif not problems:
                 st.info("Geen wijzigingen gevonden.")
+
+        st.divider()
+        with st.expander("🏭 Sectoren beheren en in één keer ophalen"):
+            st.caption(
+                "Het domein/sector van een activum bepaalt het taartdiagram **Spreiding per "
+                "domein** op de portefeuillepagina. De lijst hieronder is de keuzelijst die "
+                "in de tabel verschijnt — je kan er zelf rubrieken aan toevoegen.")
+
+            _cur_secs = db.get_sectors()
+            _in_use = {}
+            for _a in db.get_assets():
+                _s = (_a.get("sector") or "").strip()
+                if _s:
+                    _in_use[_s] = _in_use.get(_s, 0) + 1
+
+            gc1, gc2 = st.columns([2, 1])
+            with gc1:
+                _new = st.text_input("Nieuwe sector", key="sec_new_name",
+                                     placeholder="bv. Defensie, Waterstof, Infrastructuur")
+            with gc2:
+                st.write(""); st.write("")
+                if st.button("➕ Toevoegen", key="sec_add_btn", width="stretch"):
+                    if not _new.strip():
+                        st.warning("Geef eerst een naam in.")
+                    elif db.add_sector(_new.strip()):
+                        st.success(f"✅ '{_new.strip()}' toegevoegd aan de keuzelijst.")
+                        st.rerun()
+                    else:
+                        st.info("Die sector staat al in de lijst.")
+
+            show_df(pd.DataFrame([{
+                "Sector": s,
+                "Activa": _in_use.get(s, 0),
+                "Standaard": "ja" if s in db.DEFAULT_SECTORS else "eigen",
+            } for s in _cur_secs]), width="stretch", hide_index=True, column_config={
+                "Activa": st.column_config.NumberColumn(
+                    format="%d", help="Hoeveel activa deze sector nu gebruiken."),
+                "Standaard": st.column_config.TextColumn(
+                    help="'ja' = een van de GICS-hoofdsectoren die de app standaard "
+                         "meelevert, 'eigen' = door jou toegevoegd."),
+            })
+
+            _unused = [s for s in _cur_secs if not _in_use.get(s)]
+            if _unused:
+                dc1, dc2 = st.columns([3, 1])
+                _del = dc1.multiselect("Uit de lijst halen (enkel ongebruikte rubrieken)",
+                                       _unused, key="sec_del_sel")
+                dc2.write(""); dc2.write("")
+                if dc2.button("🗑️ Verwijderen", key="sec_del_btn", width="stretch") and _del:
+                    for s in _del:
+                        db.remove_sector(s)
+                    st.success(f"✅ {len(_del)} rubriek(en) uit de keuzelijst gehaald.")
+                    st.rerun()
+                st.caption("Enkel rubrieken die aan géén enkel activum hangen kunnen weg. "
+                           "Zo kan een toewijzing nooit stilzwijgend verdwijnen doordat de "
+                           "lijst ingekort wordt.")
+
+            st.markdown("**Sectoren online ophalen**")
+            st.caption(
+                "Vraagt per activum de sector op bij Yahoo Finance (via het ticker, en anders "
+                "via de ISIN) en vertaalt die naar de rubrieken hierboven. **Bestaande "
+                "toewijzingen blijven staan**: enkel activa zónder sector worden ingevuld, "
+                "tenzij je hieronder uitdrukkelijk anders kiest. Fondsen en trackers krijgen "
+                "bij Yahoo meestal geen sector — die zet je zelf op *Gediversifieerd*.")
+            oc1, oc2 = st.columns([3, 1])
+            _overwrite = oc1.checkbox(
+                "Ook automatisch toegekende sectoren vernieuwen", key="sec_fetch_over",
+                help="Sectoren die JIJ handmatig hebt gezet blijven hoe dan ook ongemoeid — "
+                     "die overschrijven zou je eigen werk stilzwijgend ongedaan maken.")
+            oc2.write(""); oc2.write("")
+            if oc2.button("🔎 Sectoren ophalen", key="sec_fetch_btn", width="stretch"):
+                res_rows, n_set = [], 0
+                _targets = [a for a in db.get_assets()
+                            if not (a.get("sector") or "").strip()
+                            or (_overwrite and (a.get("sector_source") or "") == "auto")]
+                with st.spinner(f"Sector opzoeken voor {len(_targets)} activum/activa..."):
+                    for a in _targets:
+                        try:
+                            si = md.get_sector_info(a["ticker"], a.get("isin"))
+                        except Exception as exc:
+                            res_rows.append({"Activum": asset_label(a["ticker"]),
+                                             "Gevonden": "—", "Uitslag": f"Fout: {exc}"})
+                            continue
+                        sn = db.normalize_sector(si.get("sector"))
+                        if sn:
+                            db.set_asset_sector(a["ticker"], sn, source="auto")
+                            n_set += 1
+                            uit = f"✅ Toegekend via {si.get('bron') or 'online'}"
+                        elif a["asset_type"] == "etf":
+                            uit = ("Geen sector bij de bron — normaal voor een tracker. "
+                                   "Zet ze zelf op 'Gediversifieerd (index/fonds)'.")
+                        else:
+                            uit = "Geen sector gevonden — zelf toe te kennen in de tabel."
+                        res_rows.append({"Activum": asset_label(a["ticker"]),
+                                         "Gevonden": si.get("sector") or "—", "Uitslag": uit})
+                st.session_state["sec_fetch_result"] = res_rows
+                st.session_state["sec_fetch_msg"] = (
+                    f"Klaar — {n_set} activum/activa kregen een sector."
+                    + ("" if n_set else "  Niets gevonden: fondsen en trackers hebben bij "
+                                        "de bron meestal geen sector, die ken je zelf toe."))
+                if n_set:
+                    clear_cache()
+                st.rerun()
+            if st.session_state.get("sec_fetch_msg"):
+                st.success(st.session_state.pop("sec_fetch_msg"))
+            if st.session_state.get("sec_fetch_result"):
+                show_df(pd.DataFrame(st.session_state["sec_fetch_result"]),
+                        width="stretch", hide_index=True)
 
         st.divider()
         bec1, bec2 = st.columns([3, 1])
@@ -2522,8 +2930,16 @@ def page_transactions():
             eur_hint = "" if currency == "EUR" else f" ≈ **€{_eur_prev:,.2f}** (koers {_fx_prev:.4f})"
             st.info(f"**Totaalwaarde:** {currency} {num(total_amount, 2)}{eur_hint} | **TOB:** €{tob_amount:,.2f}")
             if st.checkbox("TOB manueel aanpassen", key=kk("tob_man")):
+                _auto_tob = tob_amount
                 tob_amount = st.number_input("TOB (€)", min_value=0.0, value=tob_amount,
                                              step=0.01, format="%.10g", key=kk("tob_val"))
+                if abs(tob_amount - _auto_tob) >= 0.01:
+                    st.caption(f"ℹ️ Automatisch berekend op de huidige EUR-tegenwaarde: "
+                               f"**€{_auto_tob:,.2f}** (verschil {eur(tob_amount - _auto_tob)}). "
+                               "Wijzig je hierboven nog de wisselkoers, dan volgt dit veld niet "
+                               "mee — het is nu jouw waarde. Klopt je broker's afrekening met "
+                               "dit bedrag, dan is dat prima; anders zet je het vinkje even uit "
+                               "en weer aan om de berekende waarde over te nemen.")
         notes = st.text_area("Notities (optioneel)", height=60, key=kk("notes"))
 
         if st.button("✅ Transactie toevoegen", type="primary", key=kk("submit")):
@@ -2778,24 +3194,32 @@ def page_transactions():
         st.divider()
         with st.expander("🔄 TOB en EUR-tegenwaarde controleren/herberekenen"):
             st.caption(
-                "De TOB is een Belgische heffing op de **EUR-tegenwaarde**. In oudere versies kon "
-                "de wisselkoers stilzwijgend op 1,0 blijven staan wanneer de historische koers "
-                "niet opgehaald raakte — dan werd het tarief (bv. 0,35%) op het bedrag in **vreemde "
-                "munt** toegepast, en was de TOB fout. Deze controle herberekent de EUR-tegenwaarde "
-                "met de juiste koers en de TOB daarop. Lijnen met een **eigen wisselkoers** of een "
-                "**handmatige TOB** blijven ongemoeid.")
+                "De TOB is een Belgische heffing op de **EUR-tegenwaarde**. Verandert die "
+                "tegenwaarde, dan verandert de TOB mee — of je nu de marktkoers gebruikt of "
+                "je eigen brokerkoers. Deze controle herberekent beide en toont het verschil.\n\n"
+                "• Lijnen met een **eigen wisselkoers** behouden **jouw** koers; enkel de "
+                "EUR-tegenwaarde en de TOB worden erop hertekend. Zo blijft de koers die je "
+                "broker echt gebruikt heeft bewaard, terwijl de beurstaks wél klopt.\n"
+                "• Alle andere lijnen krijgen de historische marktkoers van hun "
+                "transactiedatum. In oudere versies kon die stilzwijgend op 1,0 blijven "
+                "staan wanneer ze niet opgehaald raakte — dan werd het tarief op het bedrag "
+                "in **vreemde munt** toegepast, en was de TOB fout.\n"
+                "• Lijnen met een **handmatige TOB** en toekenningen blijven ongemoeid.")
             rt_changes, rt_suspect = _recompute_tob_preview(txns, ainfo)
             if not rt_changes:
                 st.success("✅ Alle transacties in deze selectie kloppen — niets te herberekenen.")
             else:
                 _dtob = sum(c["nieuw_tob"] - c["oud_tob"] for c in rt_changes)
+                _neigen = sum(1 for c in rt_changes if c.get("eigen_fx"))
                 st.warning(
                     f"**{len(rt_changes)} transactie(s)** zouden wijzigen"
                     + (f", waarvan **{rt_suspect}** met een TOB die duidelijk op de vréémde munt "
                        "berekend lijkt" if rt_suspect else "")
+                    + (f" en **{_neigen}** met een eigen wisselkoers (die koers blijft behouden)"
+                       if _neigen else "")
                     + f". Verschil in totale TOB: **{eur(_dtob)}**.")
                 show_df(pd.DataFrame([{
-                    "": "🚩" if c["verdacht"] else "",
+                    "": "🚩" if c["verdacht"] else ("💱" if c.get("eigen_fx") else ""),
                     "ID": c["id"], "Datum": c["datum"],
                     "Activum": asset_label(c["ticker"], names),
                     "Munt": c["munt"],
@@ -2814,7 +3238,9 @@ def page_transactions():
                     "Δ TOB": st.column_config.NumberColumn(format="€ %+.10g"),
                 })
                 st.caption("🚩 = de opgeslagen TOB komt overeen met het tarief toegepast op het "
-                           "bedrag in vréémde munt — dat is precies de oude fout.")
+                           "bedrag in vréémde munt — dat is precies de oude fout.  "
+                           "💱 = eigen wisselkoers; die blijft ongewijzigd, enkel de "
+                           "EUR-tegenwaarde en de TOB worden bijgewerkt.")
                 # Nonce in de key: Streamlit verbiedt het overschrijven van een widget-key
                 # nadat de widget is aangemaakt (StreamlitAPIException). Door de key te
                 # veranderen is het een NIEUWE checkbox, die vanzelf leeg begint — zo
@@ -3668,7 +4094,9 @@ def render_market_opportunities():
                "**nieuwe** koopideeën op basis van bedrijfsprestaties, vooruitzichten, "
                "macro-economie, geopolitiek en financiële berichtgeving: **2 defensieve** "
                "(groei + eventueel dividend), **2 matig speculatieve** en **2 sterk speculatieve** "
-               "aandelen — elk met onderbouwing, katalysatoren en risico's.")
+               "aandelen — elk met onderbouwing, katalysatoren en risico's. Per categorie zit er "
+               "altijd minstens één **niet-Amerikaanse** naam bij, en aandelen die je al in "
+               "portefeuille hebt vallen automatisch weg uit de lijst.")
 
     if not ai_advisor.ai_function_enabled("market"):
         st.warning("Deze functie staat uit. Schakel ze in via ⚙️ Instellingen → AI.")
@@ -3685,6 +4113,13 @@ def render_market_opportunities():
             src = "met live websearch" if res.get("websearch") else \
                   "zonder websearch (enkel trainingskennis)"
             st.success(f"✅ {res['stored']} koopidee(ën) gegenereerd {src}.")
+            if res.get("skipped_held"):
+                st.info("ℹ️ Weggelaten omdat je ze al bezit: "
+                        + ", ".join(sorted(set(res["skipped_held"]))))
+            if res.get("us_only"):
+                st.warning("⚠️ Enkel Amerikaanse namen in: " + ", ".join(res["us_only"])
+                           + ". Er werd wél om minstens één niet-Amerikaans aandeel per "
+                             "categorie gevraagd — genereer eventueel opnieuw.")
         st.rerun()
 
     # ── De ideeën van de laatste ronde ───────────────────────────────────────
@@ -3693,9 +4128,23 @@ def render_market_opportunities():
         st.info("Nog geen marktopportuniteiten. Klik hierboven of wacht op de dagelijkse run.")
         return
 
-    ideas = db.get_market_ideas(batch_id=batch)
+    all_ideas = db.get_market_ideas(batch_id=batch)
+    _held = ai_advisor.held_keys()
+    ideas, _now_held = [], []
+    for i in all_ideas:
+        if ai_advisor.is_held(i["ticker"], i.get("isin") or "", _held):
+            _now_held.append(i["ticker"])
+        else:
+            ideas.append(i)
+    if not ideas:
+        st.info("Alle ideeën van deze ronde zitten intussen als open positie in je "
+                "portefeuille — er blijft dus niets over om nog voor te stellen.")
+        return
     note = db.get_ai_evaluations("market_ideas", limit=1)
     st.markdown(f"#### 📅 Ideeën van {ideas[0]['idea_date']}")
+    if _now_held:
+        st.caption("✅ Intussen gekocht (en dus uit de lijst gehaald): "
+                   + ", ".join(sorted(set(_now_held))))
     if note and (note[0].get("content") or "").strip():
         st.markdown("**🌐 Marktbeeld**")
         st.markdown(note[0]["content"])
@@ -3710,13 +4159,22 @@ def render_market_opportunities():
         if not rows:
             st.caption("Geen idee in deze klasse voor deze ronde.")
             continue
+        if not any(not ai_advisor.is_us_listing(r["ticker"], r.get("exchange") or "",
+                                                r.get("currency") or "", r.get("isin") or "")
+                   for r in rows):
+            st.caption("⚠️ Enkel Amerikaanse noteringen in deze categorie — er is nochtans "
+                       "om minstens één niet-Amerikaanse naam gevraagd.")
         cols = st.columns(len(rows))
         for col, it in zip(cols, rows):
             with col:
                 with st.container(border=True):
-                    st.markdown(f"**{it.get('name') or it['ticker']}** · `{it['ticker']}`")
+                    _us = ai_advisor.is_us_listing(it["ticker"], it.get("exchange") or "",
+                                                   it.get("currency") or "", it.get("isin") or "")
+                    st.markdown(f"**{it.get('name') or it['ticker']}** · `{it['ticker']}`"
+                                + ("" if _us else " 🌍"))
                     meta = [it.get("exchange") or "", it.get("currency") or ""]
-                    st.caption(" · ".join(m for m in meta if m))
+                    st.caption(" · ".join(m for m in meta if m)
+                               + ("" if _us else "  ·  niet-Amerikaanse notering"))
                     m1, m2 = st.columns(2)
                     m1.metric("Advies", ai_advisor.RATING_LABELS.get(it.get("rating"), "—"))
                     if it.get("price_target"):
@@ -5064,13 +5522,26 @@ def page_status():
             "ticker_change": "Tickerwijziging", "split": "Aandelensplit",
             "name_change": "Naamsafwijking"}
 
-    n_warn = sum(1 for e in events if e["severity"] in ("warning", "error"))
-    n_info = sum(1 for e in events if e["severity"] == "info")
-    st.markdown(f"**{len(events)} openstaande waarschuwing(en)** — {n_warn} ter opvolging, "
-                f"{n_info} informatief.")
+    # Afgevinkte meldingen ('✓ Gezien') verhuizen naar een archief dat standaard
+    # dichtgeklapt staat. Ze blijven bestaan — je hebt ze immers niet opgelost maar
+    # enkel gezien — maar ze mogen de openstaande punten niet meer verdringen. Een
+    # geregistreerde split die je bewust laat staan, hoort niet elke dag opnieuw
+    # bovenaan je statuspagina.
+    live = [e for e in events if not e.get("acknowledged")]
+    archived = [e for e in events if e.get("acknowledged")]
+
+    n_warn = sum(1 for e in live if e["severity"] in ("warning", "error"))
+    n_info = sum(1 for e in live if e["severity"] == "info")
+    if live:
+        st.markdown(f"**{len(live)} openstaande waarschuwing(en)** — {n_warn} ter opvolging, "
+                    f"{n_info} informatief."
+                    + (f"  ·  {len(archived)} gearchiveerd (onderaan)." if archived else ""))
+    else:
+        st.success("✅ Geen openstaande waarschuwingen — alles staat op 'gezien'. "
+                   "Het archief onderaan bewaart ze.")
     st.divider()
 
-    for e in events:
+    def _render_event(e, prefix=""):
         icon = SEV.get(e["severity"], "⚪")
         nm = names.get(e["ticker"], e["ticker"])
         d = e.get("detail") or {}
@@ -5089,28 +5560,56 @@ def page_status():
                     meta += f" · bron: '{d['yahoo']}'"
                 if e["kind"] == "ticker_change" and d.get("new"):
                     meta += " · 'Gevonden ticker' is automatisch bijgewerkt"
+                if e["kind"] == "flat_price" and d.get("market"):
+                    meta += f" · beurskalender: {d['market']}"
                 st.caption(meta)
             with right:
                 if e["kind"] == "split" and d.get("splits"):
-                    if st.button("Split registreren", key=f"sp_{e['id']}", width="stretch"):
+                    if st.button("Split registreren", key=f"{prefix}sp_{e['id']}", width="stretch"):
                         for d_, r_ in d["splits"]:
                             db.add_split(e["ticker"], d_, float(r_))
                         db.resolve_status_event_by_id(e["id"])
                         clear_cache()
                         st.rerun()
                 if not e.get("acknowledged"):
-                    if st.button("✓ Gezien", key=f"ack_{e['id']}", width="stretch"):
+                    if st.button("✓ Gezien", key=f"{prefix}ack_{e['id']}", width="stretch"):
                         db.acknowledge_status_event(e["id"])
                         st.rerun()
-                if st.button("Sluiten", key=f"cl_{e['id']}", width="stretch"):
+                if st.button("Sluiten", key=f"{prefix}cl_{e['id']}", width="stretch"):
                     db.resolve_status_event_by_id(e["id"])
                     st.rerun()
 
+    for e in live:
+        _render_event(e)
+
+    if archived:
+        _n_split = sum(1 for e in archived if e["kind"] == "split")
+        with st.expander(f"🗄️ Archief — {len(archived)} melding(en) op 'gezien'"
+                         + (f", waarvan {_n_split} split(s)" if _n_split else ""),
+                         expanded=False):
+            st.caption(
+                "Meldingen die je met '✓ Gezien' hebt afgevinkt. Ze zijn niet opgelost — "
+                "de toestand bestaat nog — maar je hebt ze beoordeeld, en dan hoeven ze niet "
+                "meer bij de openstaande punten te staan. Een aandelensplit die je bewust "
+                "níét registreert (bv. omdat je broker de stukken al aangepast heeft) blijft "
+                "hier gewoon staan. Met 'Sluiten' verdwijnt een melding helemaal; blijft de "
+                "toestand bestaan, dan komt ze bij de volgende controle terug.")
+            for e in archived:
+                _render_event(e, prefix="arch_")
+
     st.caption("'Sluiten' verbergt een waarschuwing; blijft de toestand bestaan, dan verschijnt "
-               "ze bij de volgende controle opnieuw. Een aandelensplit wordt NIET automatisch "
-               "toegepast — pas na 'Split registreren' worden je transacties en kostbasis "
-               "aangepast (FIFO). Een gedetecteerde tickerwijziging werkt de kolom 'Gevonden "
-               "ticker' meteen bij en selecteert voortaan het actieve symbool.")
+               "ze bij de volgende controle opnieuw. '✓ Gezien' verplaatst ze naar het archief "
+               "hierboven. Een aandelensplit wordt NIET automatisch toegepast — pas na 'Split "
+               "registreren' worden je transacties en kostbasis aangepast (FIFO). Een "
+               "gedetecteerde tickerwijziging werkt de kolom 'Gevonden ticker' meteen bij en "
+               "selecteert voortaan het actieve symbool.  \n"
+               "🗓️ **Sluitingsdagen tellen niet mee:** weekends en beursfeestdagen (Nieuwjaar, "
+               "Goede Vrijdag, Paasmaandag, 1 mei, Kerstmis en tweede kerstdag voor Euronext; "
+               "de NYSE-kalender voor Amerikaanse noteringen) worden overgeslagen bij de "
+               "controle op 'geen koersbeweging', en de leeftijd van een koers wordt in "
+               "béúrsdagen geteld. Staat een hele markt op dezelfde dag stil, dan wordt dat "
+               "ook als sluitingsdag herkend — zo geeft bijvoorbeeld 21 juli geen valse "
+               "waarschuwingen.")
 
 
 PAGES = {

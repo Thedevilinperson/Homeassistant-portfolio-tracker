@@ -95,6 +95,8 @@ def get_stock_info(ticker: str) -> dict:
                     "type":     "etf" if qt == "etf" else "stock",
                     "isin":     cand,
                     "symbol":   sym,
+                    "sector":   info.get("sector") or "",
+                    "industry": info.get("industry") or "",
                 }
         except Exception as e:
             logger.warning(f"get_stock_info({ticker}) via ISIN-symbool {sym}: {e}")
@@ -121,11 +123,47 @@ def get_stock_info(ticker: str) -> dict:
             "exchange": info.get("exchange", ""),
             "type":     "etf" if qt == "etf" else "stock",
             "isin":     _lookup_isin(tkr, info, ticker),
+            # Domein/sector zoals Yahoo Finance het classificeert (GICS-achtig).
+            # Wordt in de app vertaald naar de Nederlandstalige rubriekenlijst.
+            "sector":   info.get("sector") or "",
+            "industry": info.get("industry") or "",
         }
     except Exception as e:
         logger.warning(f"get_stock_info({ticker}): {e}")
         return {"found": False, "name": ticker, "currency": "EUR",
                 "exchange": "", "type": "stock", "isin": ""}
+
+
+def get_sector_info(ticker: str, isin: str | None = None) -> dict:
+    """Domein/sector van één effect opzoeken bij Yahoo Finance.
+
+    Geeft {'found': bool, 'sector': str, 'industry': str, 'bron': str}. Lukt het via
+    het ticker niet, dan wordt de ISIN geprobeerd (die lost vaak wél op naar een
+    verhandelbaar symbool, bv. bij .BR-noteringen). Fondsen en trackers hebben bij
+    Yahoo meestal géén sector — dat is geen fout, een brede indextracker zit nu
+    eenmaal in alle sectoren tegelijk."""
+    out = {"found": False, "sector": "", "industry": "", "bron": ""}
+    cands = []
+    tk = (ticker or "").strip().upper()
+    if tk and not _isin_valid(tk):
+        cands.append((tk, "Yahoo (ticker)"))
+    for cand in ([isin] if isin else []) + ([tk] if _isin_valid(tk) else []):
+        sym = _yahoo_symbol_for_isin(str(cand).strip().upper())
+        if sym:
+            cands.append((sym, f"Yahoo (via ISIN {str(cand).strip().upper()})"))
+    for sym, bron in cands:
+        try:
+            info = yf.Ticker(sym).info or {}
+        except Exception as e:
+            logger.info(f"get_sector_info({sym}): {e}")
+            continue
+        sec = (info.get("sector") or "").strip()
+        if sec:
+            return {"found": True, "sector": sec,
+                    "industry": (info.get("industry") or "").strip(), "bron": bron}
+        if info.get("quoteType", "").lower() in ("etf", "mutualfund"):
+            out["bron"] = bron
+    return out
 
 
 # ── Koersbronnen (ticker → ISIN-symbool → externe bronnen → handmatig) ──────────

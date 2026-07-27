@@ -9,8 +9,9 @@ Uitbreidingen:
 """
 import sqlite3
 import os
+import json
 import logging
-from datetime import datetime
+from datetime import datetime, date as _date, timedelta
 from pathlib import Path
 
 logger = logging.getLogger(__name__)
@@ -253,6 +254,7 @@ def init_db():
             ('investment_volume_year',      '0'),
             ('openai_price_target_model',   ''),
             ('status_stale_days',           '4'),
+            ('sector_list',                 ''),
             ('euronext_aes_key',            ''),
             ('euronext_aes_iv',             ''),
             ('euronext_key_fingerprint',    ''),
@@ -331,6 +333,18 @@ def _migrate(conn):
     # Assets: land van herkomst (voor buitenlandse bronbelasting op dividenden)
     if not _column_exists(cur, "assets", "country"):
         cur.execute("ALTER TABLE assets ADD COLUMN country TEXT DEFAULT 'BE'")
+
+    # Assets: domein/sector — voor de spreidingsanalyse op de portefeuillepagina.
+    # Bewust een VRIJE TEKST met een keuzelijst ernaast (setting 'sector_list') i.p.v.
+    # een aparte tabel met vreemde sleutel: zo kan een sector hernoemd of toegevoegd
+    # worden zonder migratie, en blijft een activum met een (nog) onbekende sector
+    # gewoon bewaard i.p.v. te breken op een ontbrekende verwijzing.
+    if not _column_exists(cur, "assets", "sector"):
+        cur.execute("ALTER TABLE assets ADD COLUMN sector TEXT")
+    # Herkomst van de sector: 'auto' (online bron, bv. Yahoo) of 'manual' (jij).
+    # Een handmatige toewijzing wordt nooit door een automatische overschreven.
+    if not _column_exists(cur, "assets", "sector_source"):
+        cur.execute("ALTER TABLE assets ADD COLUMN sector_source TEXT")
 
     # Assets: TOB — in België aangeboden/geregistreerd (FSMA)? (1=ja, default ja)
     if not _column_exists(cur, "assets", "belgian_registered"):
@@ -1208,59 +1222,213 @@ def get_status_events(include_resolved: bool = False) -> list[dict]:
     return out
 
 
-def detect_stale_prices(tickers: list[str], max_days: float) -> list[dict]:
-    """Tickers waarvan de laatst vastgelegde koers ouder is dan max_days. Puur op basis
-    van price_history — geen netwerk. Tickers zonder enige koers worden overgeslagen."""
+# ── Beurskalender (sluitingsdagen) ────────────────────────────────────────────
+# Waarom dit bestaat: de achtergrondplanner haalt élke 5 minuten koersen op, óók in
+# het weekend en op feestdagen. Op zo'n dag levert elke bron netjes dezelfde
+# slotkoers terug, en dan lijkt het alsof de koers 'niet beweegt'. Dat is geen
+# probleem maar de normale gang van zaken, en het hoort dus geen waarschuwing te
+# geven. Deze kalender is bewust OFFLINE berekend (geen netwerk, geen extra
+# afhankelijkheid): de vaste feestdagen zijn eenvoudig, en Pasen volgt uit de
+# klassieke anonieme Gregoriaanse formule.
+
+def _easter_sunday(year: int) -> _date:
+    """Paaszondag volgens de anonieme Gregoriaanse berekening."""
+    a = year % 19
+    b, c = divmod(year, 100)
+    d, e = divmod(b, 4)
+    f = (b + 8) // 25
+    g = (b - f + 1) // 3
+    h = (19 * a + b - d - g + 15) % 30
+    i, k = divmod(c, 4)
+    l = (32 + 2 * e + 2 * i - h - k) % 7
+    m = (a + 11 * h + 22 * l) // 451
+    month, day = divmod(h + l - 7 * m + 114, 31)
+    return _date(year, month, day + 1)
+
+
+def _nth_weekday(year: int, month: int, weekday: int, n: int) -> _date:
+    """n-de 'weekday' (0=maandag) van een maand; n=-1 = de laatste."""
+    if n > 0:
+        d = _date(year, month, 1)
+        d += timedelta(days=(weekday - d.weekday()) % 7)
+        return d + timedelta(days=7 * (n - 1))
+    nxt = _date(year + (month == 12), (month % 12) + 1, 1)
+    d = nxt - timedelta(days=1)
+    return d - timedelta(days=(d.weekday() - weekday) % 7)
+
+
+def _observed_us(d: _date) -> _date:
+    """NYSE-regel: valt een vaste feestdag op zaterdag, dan sluit de beurs de
+    vrijdag ervoor; op zondag de maandag erna."""
+    if d.weekday() == 5:
+        return d - timedelta(days=1)
+    if d.weekday() == 6:
+        return d + timedelta(days=1)
+    return d
+
+
+def _euronext_holidays(year: int) -> set:
+    """Euronext (Brussel/Amsterdam/Parijs/Lissabon) en Xetra sluiten op dezelfde
+    zes dagen. Valt zo'n dag in het weekend, dan is de beurs sowieso dicht."""
+    easter = _easter_sunday(year)
+    return {
+        _date(year, 1, 1),                    # Nieuwjaar
+        easter - timedelta(days=2),           # Goede Vrijdag
+        easter + timedelta(days=1),           # Paasmaandag
+        _date(year, 5, 1),                    # Dag van de Arbeid
+        _date(year, 12, 25),                  # Kerstmis
+        _date(year, 12, 26),                  # Tweede kerstdag
+    }
+
+
+def _us_holidays(year: int) -> set:
+    """NYSE/Nasdaq-sluitingsdagen."""
+    easter = _easter_sunday(year)
+    return {
+        _observed_us(_date(year, 1, 1)),          # Nieuwjaar
+        _nth_weekday(year, 1, 0, 3),              # Martin Luther King Jr. Day
+        _nth_weekday(year, 2, 0, 3),              # Washington's Birthday
+        easter - timedelta(days=2),               # Goede Vrijdag
+        _nth_weekday(year, 5, 0, -1),             # Memorial Day
+        _observed_us(_date(year, 6, 19)),         # Juneteenth
+        _observed_us(_date(year, 7, 4)),          # Independence Day
+        _nth_weekday(year, 9, 0, 1),              # Labor Day
+        _nth_weekday(year, 11, 3, 4),             # Thanksgiving
+        _observed_us(_date(year, 12, 25)),        # Kerstmis
+    }
+
+
+_US_EXCHANGES = {"NMS", "NYQ", "NGM", "NCM", "NIM", "PCX", "ASE", "BTS", "PNK",
+                 "NASDAQ", "NYSE", "AMEX", "BATS", "ARCA"}
+
+
+def market_of(asset: dict | None, ticker: str = "") -> str:
+    """'US' of 'EU' — welke beurskalender geldt voor dit activum?
+
+    Een fijnere indeling (Londen, Zürich, Milaan, ...) zou tientallen extra
+    feestdagen vergen voor bijzonder weinig winst: de grote breuklijn zit tussen
+    de Amerikaanse kalender (Thanksgiving, Labor Day, ...) en de continentaal-
+    Europese (Paasmaandag, 1 mei, tweede kerstdag). Bij twijfel geldt EU, want
+    dan wordt er hooguit één dag te weinig als sluitingsdag gezien."""
+    a = asset or {}
+    tk = (ticker or a.get("ticker") or "").upper()
+    exch = (a.get("exchange") or "").strip().upper()
+    if exch in _US_EXCHANGES:
+        return "US"
+    if "." in tk:
+        return "EU"                       # .AS/.BR/.PA/.DE/.L/... = Europese notering
+    if (a.get("currency") or "").upper() == "USD":
+        return "US"
+    return "US" if tk and "." not in tk and not exch else "EU"
+
+
+def market_closed_reason(d, market: str = "EU") -> str | None:
+    """Waarom was de beurs op die dag dicht? None = gewone handelsdag."""
+    if isinstance(d, str):
+        try:
+            d = datetime.strptime(str(d)[:10], "%Y-%m-%d").date()
+        except (ValueError, TypeError):
+            return None
+    if d.weekday() >= 5:
+        return "weekend"
+    hol = _us_holidays(d.year) if market == "US" else _euronext_holidays(d.year)
+    return "feestdag" if d in hol else None
+
+
+def is_trading_day(d, market: str = "EU") -> bool:
+    """True als de beurs op die dag open was (geen weekend, geen feestdag)."""
+    return market_closed_reason(d, market) is None
+
+
+def _trading_days_between(start, end, market: str) -> int:
+    """Aantal beursdagen (weekend en feestdagen niet meegeteld) na 'start' tot en
+    met 'end'. Zo telt een lang kerstweekend niet mee als 'de koers is verouderd'."""
+    if isinstance(start, datetime):
+        start = start.date()
+    if isinstance(end, datetime):
+        end = end.date()
+    if end <= start:
+        return 0
+    n, d = 0, start + timedelta(days=1)
+    while d <= end and n < 400:
+        if is_trading_day(d, market):
+            n += 1
+        d += timedelta(days=1)
+    return n
+
+
+def detect_stale_prices(tickers: list[str], max_days: float,
+                        assets: dict | None = None) -> list[dict]:
+    """Tickers waarvan de laatst vastgelegde koers meer dan max_days BEURSDAGEN oud
+    is. Puur op basis van price_history — geen netwerk. Tickers zonder enige koers
+    worden overgeslagen.
+
+    Beursdagen, niet kalenderdagen: anders zou elk verlengd weekend (Pasen, Kerst,
+    1 mei) een golf valse waarschuwingen geven terwijl er gewoon niet gehandeld werd."""
     if not tickers:
         return []
     latest = get_latest_prices(tickers)
+    assets = assets or {}
     now = datetime.now()
     out = []
     for t in tickers:
-        row = latest.get(t.upper())
+        tk = t.upper()
+        row = latest.get(tk)
         if not row or not row.get("timestamp"):
             continue
         try:
             ts = datetime.strptime(str(row["timestamp"])[:19], "%Y-%m-%d %H:%M:%S")
         except (ValueError, TypeError):
             continue
+        mkt = market_of(assets.get(tk), tk)
         age_days = (now - ts).total_seconds() / 86400.0
-        if age_days > max_days:
+        trading_gap = _trading_days_between(ts, now, mkt)
+        if trading_gap > max_days:
             out.append({
-                "ticker": t.upper(),
+                "ticker": tk,
                 "message": (f"Geen nieuwe koers sinds {ts.strftime('%d/%m %H:%M')} "
-                            f"({age_days:.0f} dagen geleden)."),
-                "detail": {"last": row["timestamp"], "age_days": round(age_days, 1)},
+                            f"({trading_gap} beursdag(en) geleden, {age_days:.0f} kalenderdagen)."),
+                "detail": {"last": row["timestamp"], "age_days": round(age_days, 1),
+                           "trading_days": trading_gap, "market": mkt},
             })
     return out
 
 
-def detect_flat_prices(tickers: list[str], min_measurements: int = 3) -> list[dict]:
-    """Tickers die op hun recentste koersdag GEEN ENKELE koersbeweging vertoonden
+def detect_flat_prices(tickers: list[str], min_measurements: int = 3,
+                       assets: dict | None = None) -> list[dict]:
+    """Tickers die op hun recentste BEURSDAG geen enkele koersbeweging vertoonden
     (min == max over minstens 'min_measurements' metingen die dag). Puur uit
-    price_history — geen netwerk. Signaleert o.a. een effect waarvan de koers de hele
-    dag identiek blijft (bv. omdat de bron telkens dezelfde slotkoers teruggeeft)."""
+    price_history — geen netwerk.
+
+    Sluitingsdagen worden overgeslagen. De planner haalt ook in het weekend en op
+    feestdagen elke 5 minuten koersen op; die leveren dan uiteraard allemaal
+    dezelfde slotkoers op. Dat als 'geen koersbeweging' melden zou elke maandag een
+    lijst valse waarschuwingen geven en de échte gevallen (een bron die vastzit op
+    een oude koers) onzichtbaar maken. Daarom kijken we enkel naar dagen waarop de
+    beurs voor dat activum effectief open was."""
     if not tickers:
         return []
-    keys = [t.upper() for t in tickers]
-    placeholders = ",".join("?" * len(keys))
+    assets = assets or {}
     conn = get_connection()
     out = []
-    for t in keys:
-        row = conn.execute(
+    for t in [x.upper() for x in tickers]:
+        mkt = market_of(assets.get(t), t)
+        rows = conn.execute(
             """SELECT date(timestamp) d, COUNT(*) n, MIN(price) mn, MAX(price) mx
                FROM price_history WHERE ticker=?
-               GROUP BY date(timestamp) ORDER BY d DESC LIMIT 1""", (t,)
-        ).fetchone()
-        if not row or not row["d"]:
+               GROUP BY date(timestamp) ORDER BY d DESC LIMIT 14""", (t,)
+        ).fetchall()
+        row = next((r for r in rows if r["d"] and is_trading_day(r["d"], mkt)), None)
+        if not row:
             continue
         if (row["n"] or 0) >= min_measurements and row["mn"] is not None \
                 and abs((row["mn"] or 0) - (row["mx"] or 0)) < 1e-9:
             out.append({
                 "ticker": t,
-                "message": (f"Koers bewoog niet op {row['d']} — {row['n']} metingen, "
-                            f"allemaal dezelfde waarde."),
-                "detail": {"date": row["d"], "n": row["n"], "price": row["mn"]},
+                "message": (f"Koers bewoog niet op beursdag {row['d']} — {row['n']} "
+                            "metingen, allemaal dezelfde waarde."),
+                "detail": {"date": row["d"], "n": row["n"], "price": row["mn"],
+                           "market": mkt},
             })
     conn.close()
     return out
@@ -1291,8 +1459,30 @@ def run_status_checks(online: bool = True, tickers: list[str] | None = None) -> 
     except (ValueError, TypeError):
         stale_days = 4.0
 
-    stale = {f["ticker"]: f for f in detect_stale_prices(tickers, stale_days)}
-    flat = {f["ticker"]: f for f in detect_flat_prices(tickers)}
+    stale = {f["ticker"]: f for f in detect_stale_prices(tickers, stale_days, assets)}
+    flat = {f["ticker"]: f for f in detect_flat_prices(tickers, assets=assets)}
+
+    # Marktbrede terugval. De kalender hierboven vangt weekends en de klassieke
+    # feestdagen op, maar niet elke lokale sluitingsdag (bv. 21 juli in Brussel, een
+    # halve handelsdag op kerstavond, of een onverwachte sluiting). Bewegen ALLE
+    # activa van eenzelfde markt op dezelfde dag niet, dan lag de handel stil — dat
+    # is een marktfeit, geen datafout. Vanaf drie activa is dat betekenisvol; bij
+    # één of twee posities kan het net zo goed toeval zijn.
+    by_market: dict[str, list[str]] = {}
+    for t in tickers:
+        by_market.setdefault(market_of(assets.get(t), t), []).append(t)
+    for mkt, mtickers in by_market.items():
+        if len(mtickers) < 3:
+            continue
+        flat_here = [t for t in mtickers if t in flat]
+        if len(flat_here) == len(mtickers):
+            dates = {flat[t]["detail"].get("date") for t in flat_here}
+            if len(dates) == 1:
+                logger.info(f"Statuscontrole: alle {len(mtickers)} activa op markt {mkt} "
+                            f"stonden stil op {dates.pop()} — beschouwd als sluitingsdag, "
+                            "geen waarschuwing.")
+                for t in flat_here:
+                    flat.pop(t, None)
 
     md = None
     if online:
@@ -1437,23 +1627,182 @@ def get_ai_usage_summary() -> dict:
     }
 
 
+# ── Domeinen / sectoren ──────────────────────────────────────────────────────
+# De sectorindeling volgt de gangbare GICS-hoofdsectoren (dezelfde die Yahoo,
+# Morningstar en de meeste fondsbeheerders gebruiken), aangevuld met twee rubrieken
+# die een particuliere portefeuille nodig heeft maar GICS niet kent: een brede
+# indextracker hoort in geen enkele sector thuis, en er moet altijd een restcategorie
+# zijn. De lijst is bewust UITBREIDBAAR: je kan er zelf rubrieken aan toevoegen
+# (bv. 'Defensie' of 'Waterstof') zonder dat er iets in de code moet veranderen.
+DEFAULT_SECTORS = [
+    "Informatietechnologie",
+    "Communicatiediensten",
+    "Gezondheidszorg",
+    "Financiële diensten",
+    "Consument cyclisch",
+    "Consument defensief",
+    "Industrie",
+    "Energie",
+    "Basismaterialen",
+    "Nutsbedrijven",
+    "Vastgoed",
+    "Gediversifieerd (index/fonds)",
+    "Overige",
+]
+
+# Vertaaltabel van de sectornaam zoals onlinebronnen (Yahoo Finance) ze teruggeven
+# naar de Nederlandstalige rubrieken hierboven. Sleutels in kleine letters.
+SECTOR_ALIASES = {
+    "technology": "Informatietechnologie",
+    "information technology": "Informatietechnologie",
+    "communication services": "Communicatiediensten",
+    "communication": "Communicatiediensten",
+    "healthcare": "Gezondheidszorg",
+    "health care": "Gezondheidszorg",
+    "financial services": "Financiële diensten",
+    "financial": "Financiële diensten",
+    "financials": "Financiële diensten",
+    "consumer cyclical": "Consument cyclisch",
+    "consumer discretionary": "Consument cyclisch",
+    "consumer defensive": "Consument defensief",
+    "consumer staples": "Consument defensief",
+    "industrials": "Industrie",
+    "industrial": "Industrie",
+    "energy": "Energie",
+    "basic materials": "Basismaterialen",
+    "materials": "Basismaterialen",
+    "utilities": "Nutsbedrijven",
+    "real estate": "Vastgoed",
+    "realestate": "Vastgoed",
+}
+
+SECTOR_UNKNOWN = "Niet toegewezen"
+
+
+def get_sectors() -> list[str]:
+    """De beschikbare domeinen/sectoren voor de keuzelijst. Leeg opgeslagen = de
+    standaardlijst. Sectoren die al aan een activum hangen maar (nog) niet in de
+    lijst staan, worden er automatisch bij gezet: zo verdwijnt een toewijzing nooit
+    uit beeld doordat iemand de lijst inkort."""
+    raw = get_setting("sector_list", "") or ""
+    try:
+        lst = json.loads(raw) if raw.strip() else []
+    except (ValueError, TypeError):
+        lst = []
+    if not isinstance(lst, list) or not lst:
+        lst = list(DEFAULT_SECTORS)
+    out = [str(s).strip() for s in lst if str(s).strip()]
+    conn = get_connection()
+    try:
+        used = [r["sector"] for r in conn.execute(
+            "SELECT DISTINCT sector FROM assets WHERE sector IS NOT NULL AND sector<>''"
+        ).fetchall()]
+    except sqlite3.Error:
+        used = []
+    conn.close()
+    for s in used:
+        if s not in out:
+            out.append(s)
+    return out
+
+
+def set_sectors(sectors: list[str]):
+    """Vervang de volledige keuzelijst. Bestaande toewijzingen op activa blijven
+    staan (get_sectors vult ze automatisch weer aan)."""
+    clean, seen = [], set()
+    for s in sectors or []:
+        s = str(s).strip()
+        if s and s.lower() not in seen:
+            seen.add(s.lower())
+            clean.append(s)
+    set_setting("sector_list", json.dumps(clean, ensure_ascii=False))
+
+
+def add_sector(name: str) -> bool:
+    """Voeg één rubriek toe aan de keuzelijst. False = bestond al (of leeg)."""
+    name = (name or "").strip()
+    if not name:
+        return False
+    cur = get_sectors()
+    if any(name.lower() == s.lower() for s in cur):
+        return False
+    set_sectors(cur + [name])
+    return True
+
+
+def remove_sector(name: str) -> int:
+    """Haal een rubriek uit de keuzelijst. Activa die ze gebruiken behouden hun
+    toewijzing — die zou anders stilzwijgend verdwijnen. Geeft terug hoeveel activa
+    de rubriek nog gebruiken (0 = veilig verwijderd)."""
+    name = (name or "").strip()
+    set_sectors([s for s in get_sectors() if s.lower() != name.lower()])
+    conn = get_connection()
+    n = conn.execute("SELECT COUNT(*) c FROM assets WHERE sector=?", (name,)).fetchone()["c"]
+    conn.close()
+    return int(n or 0)
+
+
+def normalize_sector(raw) -> str | None:
+    """Zet een sectornaam uit een onlinebron om naar een rubriek uit de keuzelijst.
+    Onbekend maar niet leeg -> de naam zelf (die belandt dan als nieuwe rubriek in
+    de lijst); leeg -> None."""
+    s = str(raw or "").strip()
+    if not s:
+        return None
+    mapped = SECTOR_ALIASES.get(s.lower())
+    if mapped:
+        return mapped
+    for known in get_sectors():
+        if known.lower() == s.lower():
+            return known
+    return s
+
+
+def set_asset_sector(ticker: str, sector: str | None, source: str = "manual") -> None:
+    """Ken een domein/sector toe aan een activum. sector=None wist de toewijzing.
+    Een nieuwe rubriek wordt meteen aan de keuzelijst toegevoegd."""
+    s = (sector or "").strip() or None
+    if s:
+        add_sector(s)
+    conn = get_connection()
+    conn.execute("UPDATE assets SET sector=?, sector_source=? WHERE ticker=?",
+                 (s, (source if s else None), ticker.upper()))
+    conn.commit()
+    conn.close()
+
+
+def get_asset_sectors() -> dict:
+    """{ticker: sector} voor alle activa met een toewijzing."""
+    conn = get_connection()
+    rows = conn.execute(
+        "SELECT ticker, sector FROM assets WHERE sector IS NOT NULL AND sector<>''"
+    ).fetchall()
+    conn.close()
+    return {r["ticker"]: r["sector"] for r in rows}
+
+
 # ── Assets ──────────────────────────────────────────────────────────────────
 
 def add_asset(ticker, name, asset_type="stock", etf_subtype="distributing",
               currency="EUR", exchange=None, isin=None, belgian_registered=1,
-              country="BE", price_target=None, price_target_currency=None):
+              country="BE", price_target=None, price_target_currency=None,
+              sector=None, sector_source=None):
     conn = get_connection()
     conn.execute(
         """INSERT OR IGNORE INTO assets
            (ticker,name,asset_type,etf_subtype,currency,exchange,isin,belgian_registered,country,
-            price_target,price_target_currency)
-           VALUES (?,?,?,?,?,?,?,?,?,?,?)""",
+            price_target,price_target_currency,sector,sector_source)
+           VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)""",
         (ticker.upper(), name, asset_type, etf_subtype, currency, exchange, isin,
          int(belgian_registered), (country or "BE").upper(),
-         price_target, price_target_currency)
+         price_target, price_target_currency,
+         (sector or "").strip() or None,
+         (sector_source or ("manual" if sector else None)))
     )
     conn.commit()
     conn.close()
+    if sector:
+        add_sector(sector)
     if price_target is not None:
         log_price_target(ticker, price_target,
                          price_target_currency or currency or "EUR", "manual")
@@ -1462,9 +1811,15 @@ def add_asset(ticker, name, asset_type="stock", etf_subtype="distributing",
 def update_asset(ticker, name=None, asset_type=None, etf_subtype=None,
                  currency=None, exchange=None, isin=None, belgian_registered=None,
                  country=None, resolved_symbol=None, price_target=None,
-                 price_target_currency=None, clear_price_target=False):
+                 price_target_currency=None, clear_price_target=False,
+                 sector=None, sector_source=None, clear_sector=False):
     conn = get_connection()
     fields, vals = [], []
+    if clear_sector:
+        fields.append("sector=NULL"); fields.append("sector_source=NULL")
+    elif sector is not None:
+        fields.append("sector=?");        vals.append(str(sector).strip() or None)
+        fields.append("sector_source=?"); vals.append(sector_source or "manual")
     if name        is not None: fields.append("name=?");        vals.append(name)
     if asset_type  is not None: fields.append("asset_type=?");  vals.append(asset_type)
     if etf_subtype is not None: fields.append("etf_subtype=?"); vals.append(etf_subtype)
@@ -1488,6 +1843,8 @@ def update_asset(ticker, name=None, asset_type=None, etf_subtype=None,
         conn.execute(f"UPDATE assets SET {','.join(fields)} WHERE ticker=?", vals)
         conn.commit()
     conn.close()
+    if sector and not clear_sector:
+        add_sector(str(sector).strip())
     # Koersdoel-historiek: een handmatige wijziging van het koersdoel loggen (punt 8).
     if price_target is not None and not clear_price_target:
         cur = price_target_currency

@@ -1,6 +1,6 @@
 # Portfolio Tracker - Handleiding
 
-Versie 1.0.0
+Versie 1.1.0
 
 ---
 
@@ -342,7 +342,55 @@ gerealiseerde winst of verlies, dividenden en kosten.
 
 **Dagresultaat vandaag.** Wat je positie sinds de vorige beursdag gedaan heeft. De
 referentie is de laatste koers uit de database van voor vandaag, dus in de praktijk de
-slotkoers van gisteren. Nieuwe posities verschijnen hier pas na een dag.
+slotkoers van gisteren.
+
+De tabel bevat per positie:
+
+| Kolom | Wat het is |
+|---|---|
+| Aantal | Het aantal stuks dat je nu aanhoudt |
+| Gem. waarde (€) | Je gemiddelde aankoopwaarde per stuk (FIFO-kostbasis, in euro) |
+| Vorige slot | De laatst vastgelegde koers van de vorige beursdag (native munt) |
+| Referentie | De koers waartegen de dagwinst effectief gemeten wordt (native munt) |
+| Koers nu | De actuele koers (native munt) |
+| Δ vandaag (%) | Het verschil tussen 'Koers nu' en 'Referentie' |
+| Dag-P/L (€) | De winst of het verlies van vandaag, in euro |
+| Vandaag | 📥 bijgekocht, 📤 verkocht, 🔁 allebei — met de aantallen |
+| Koers gewijzigd | Wanneer de koers voor het laatst *effectief veranderde* |
+
+Let op het verschil tussen **Gem. waarde** en **Referentie**. De eerste is je
+kostprijs over de hele looptijd van de positie en staat in euro; ze zegt hoe ver je
+in het totaal boven of onder water staat. De tweede is enkel het startpunt van
+vandaag en staat in de native munt.
+
+**Transacties van vandaag tellen correct mee.** Koop je vandaag bij, dan mag de app
+je voor die nieuwe stukken niet de beweging aanrekenen die vóór jouw aankoop
+plaatsvond — die heb je nooit gemaakt. Daarom wordt het dagresultaat opgebouwd als
+een kasstroomredenering:
+
+```
+dag-P/L = eindwaarde − beginwaarde − aankopen vandaag + verkopen vandaag
+```
+
+waarbij de beginwaarde het aantal stuks bij opening is, tegen de vorige slotkoers.
+De kolom *Referentie* is het resultaat daarvan, herrekend naar één stuk: zonder
+transacties valt ze samen met de vorige slotkoers, en anders is ze het gewogen
+gemiddelde van die slotkoers en de prijs van elke transactie van vandaag. Dat werkt
+ook bij **meerdere transacties op één dag**: elke aankoop telt aan zijn eigen prijs,
+elke verkoop aan de zijne.
+
+*Voorbeeld.* Je had 10 stuks, de vorige slotkoers was 100. Vandaag koop je er 5 bij
+aan 110, en de koers staat nu op 120. Het dagresultaat is 250: de 10 oude stuks
+deden 10 × 20 = 200, de 5 nieuwe deden 5 × 10 = 50. De referentie is
+(10 × 100 + 5 × 110) ÷ 15 = 103,33.
+
+Posities die je **vandaag volledig nieuw** opgebouwd hebt, verschijnen meteen in de
+tabel: er is dan geen vorige slotkoers, dus je aankoopprijs is de referentie.
+Posities zonder koershistoriek én zonder transactie van vandaag verschijnen pas na
+een dag; ze worden onder de tabel opgesomd.
+
+Het dagresultaat volgt de **rekeningfilter** bovenaan de pagina: filter je op één
+rekening, dan tellen enkel de transacties van die rekening mee.
 
 **Samenstelling.** Een taartdiagram dat je kunt omschakelen tussen huidige waarde en
 geïnvesteerd kapitaal. Het verschil tussen beide vertelt welke posities zwaarder zijn
@@ -355,10 +403,27 @@ verbruikt hebt en wat er eventueel verschuldigd is.
 
 ### 5.2 💼 Portefeuille
 
-De detailweergave van je posities.
+De detailweergave van je posities, in deze volgorde: open posities, spreiding per
+sector, totaal per activum, gerealiseerde historiek, AI-synthese en prijsgeschiedenis.
 
-**Open posities** toont per effect het aantal, de gemiddelde aankoopprijs, de huidige
-koers, de waarde en het resultaat, met de bron en het tijdstip van de koers.
+**Open posities** staat bovenaan en toont per effect het aantal, de gemiddelde
+aankoopprijs, de huidige koers, de waarde, het resultaat, de sector en de ontvangen
+dividenden.
+
+> De kolom *Dividend* volgt de rekeningfilter. Had je hetzelfde aandeel op twee
+> rekeningen en heb je er één verkocht, dan tellen enkel nog de dividenden van de
+> rekening(en) die je geselecteerd hebt. Anders zou een gesloten positie dividenden
+> blijven aanbrengen bij een positie waar ze niet bij horen.
+
+**Spreiding per domein / sector** is een taartdiagram van de verdeling over sectoren,
+met een tabel met de gewichten ernaast. Je kunt schakelen tussen huidige waarde en
+geïnvesteerd kapitaal; het verschil laat zien welke sectoren zwaarder zijn gaan wegen
+dan je oorspronkelijke inleg. Weegt één sector 40% of meer, dan verschijnt er een
+opmerking over concentratierisico — dat is een vaststelling, geen advies.
+
+Activa zonder toegewezen sector belanden samen onder *Niet toegewezen*, met een lijst
+eronder zodat je weet welke dat zijn. Toewijzen doe je op de pagina Activa; zie
+[5.5](#55--activa).
 
 **Totaal resultaat per activum** telt alles samen: ongerealiseerd, gerealiseerd,
 dividenden en kosten. Dit is de eerlijkste maatstaf per effect, want ze bevat ook
@@ -400,9 +465,17 @@ bepaald, in de tijd geëvolueerd zijn.
 `🤖 Bepaal via AI` kan een koersdoel voorstellen. Bij een ISIN die Yahoo niet kent,
 probeert de app de externe bronnen en zegt ze welke bron werkt.
 
+Bij het ophalen van de info wordt ook het **domein/sector** meegenomen. Yahoo
+classificeert aandelen volgens een GICS-achtige indeling; de app vertaalt die naar de
+Nederlandstalige rubriek en vult het veld alvast in. Je kunt de keuze altijd
+overschrijven — jouw toewijzing heeft voorrang en wordt nooit door een automatische
+overschreven.
+
 **Overzicht.** Alle activa in een bewerkbare tabel, met een filter op naam of ticker.
 Hier zitten ook de gereedschappen:
 
+- De kolom **Sector** met een keuzelijst. `—` betekent nog niet toegewezen.
+- `🏭 Sectoren beheren en in één keer ophalen`, zie hieronder.
 - `📸 Fotomoment ophalen` voor de slotkoers van 31/12/2025.
 - `🔬 Bronnen diagnose` als een koers niet gevonden wordt: dit test elke bron apart en
   toont wat er precies terugkomt.
@@ -412,6 +485,26 @@ Hier zitten ook de gereedschappen:
 - `🔧 Ticker corrigeren` verhuist alle transacties, dividenden en koersen mee.
 - Koersophaling opnieuw activeren voor effecten waarvoor de app het opgegeven had.
 
+**Sectoren beheren.** Het blok `🏭 Sectoren beheren en in één keer ophalen` doet drie
+dingen:
+
+1. **De keuzelijst uitbreiden.** De app levert dertien rubrieken mee: de elf
+   GICS-hoofdsectoren in het Nederlands, plus *Gediversifieerd (index/fonds)* en
+   *Overige*. Je kunt er zelf rubrieken aan toevoegen, bijvoorbeeld *Defensie* of
+   *Waterstof*, zonder dat er iets in de code moet veranderen.
+2. **Rubrieken verwijderen.** Alleen rubrieken die aan géén enkel activum hangen
+   kunnen weg. Zo kan een toewijzing nooit stilzwijgend verdwijnen doordat de lijst
+   ingekort wordt. De tabel toont per rubriek hoeveel activa ze gebruiken.
+3. **Sectoren online ophalen.** Vraagt per activum de sector op bij Yahoo Finance —
+   eerst via het ticker, en anders via de ISIN, wat vaak wél lukt bij .BR-noteringen.
+   Standaard worden enkel activa zónder sector ingevuld. Wil je ook eerder automatisch
+   toegekende sectoren vernieuwen, dan vink je dat apart aan; sectoren die jíj gezet
+   hebt blijven hoe dan ook ongemoeid.
+
+Fondsen en trackers krijgen bij Yahoo meestal **geen** sector. Dat is geen fout: een
+brede indextracker zit in alle sectoren tegelijk. Zet die op *Gediversifieerd
+(index/fonds)*, anders lijkt je portefeuille geconcentreerder dan ze is.
+
 **Splitsingen.** Een aandelensplitsing registreer je hier. De app past die niet
 automatisch toe, ook al detecteert ze er een: dat zou je kostbasis wijzigen zonder je
 medeweten. Pas na je bevestiging worden de transacties en de kostbasis aangepast.
@@ -420,10 +513,14 @@ medeweten. Pas na je bevestiging worden de transacties en de kostbasis aangepast
 
 **Nieuwe transactie.** Het belangrijkste formulier van de app. Naast de gewone velden:
 
-- **Eigen wisselkoers**: gebruik die van je brokerafschrift als je hem hebt.
+- **Eigen wisselkoers**: gebruik die van je brokerafschrift als je hem hebt. De TOB
+  wordt meteen op die koers herberekend — de beurstaks is immers een percentage van
+  de EUR-tegenwaarde, dus een andere koers betekent per definitie een ander bedrag.
 - **TOB manueel aanpassen**: als je broker een ander bedrag aanrekende dan de
   berekening geeft. Een handmatig ingestelde TOB wordt door latere herberekeningen
-  met rust gelaten.
+  met rust gelaten. Wijzig je daarna nog de wisselkoers, dan volgt het TOB-veld niet
+  meer mee — het is dan jouw waarde. De app toont in dat geval wat de berekening zou
+  geven, zodat je bewust kunt kiezen.
 - **Performance share**: voor toegekende in plaats van gekochte stukken.
 - **Koersdoel**: optioneel, handmatig of via AI.
 
@@ -432,8 +529,25 @@ transactie als er helemaal geen koers beschikbaar is.
 
 **Overzicht.** Bewerkbare tabel van alles wat je ingaf. Het blok
 `🔄 TOB en EUR-tegenwaarde controleren` zoekt transacties waarvan de berekening niet
-meer klopt met je huidige instellingen, toont eerst wat er zou wijzigen, en voert pas
-uit na je expliciete bevestiging. Handmatige aanpassingen blijven daarbij gespaard.
+meer klopt, toont eerst wat er zou wijzigen, en voert pas uit na je expliciete
+bevestiging.
+
+Welke koers gebruikt de herberekening?
+
+| Situatie | Wisselkoers | TOB |
+|---|---|---|
+| Gewone lijn | De historische marktkoers van de transactiedatum | Herberekend |
+| Eigen wisselkoers (`FX eigen`) | **Jouw** koers blijft behouden | Herberekend op jouw koers, met 💱 gemarkeerd |
+| Handmatige TOB (`TOB eigen`) | Ongemoeid | Ongemoeid |
+| Toekenning (performance share) | Ongemoeid | Geen TOB van toepassing |
+
+Lijnen met een eigen wisselkoers werden vroeger volledig overgeslagen. De bedoeling
+was jouw koers te beschermen, maar daardoor werd ook de TOB nooit meer nagekeken.
+Nu blijft de koers even goed beschermd, maar wordt de beurstaks er wél op hertekend.
+
+Een 🚩 in de tabel betekent dat de opgeslagen TOB exact overeenkomt met het tarief
+toegepast op het bedrag in **vreemde munt**. Dat is de oude fout uit versies waarin
+de wisselkoers stilzwijgend op 1,0 kon blijven staan.
 
 **Rekeningkosten.** Kosten die niet aan één transactie hangen: bewaarloon,
 abonnementen, jaarlijkse kosten. Ze verlagen je cash en tellen mee in je nettoresultaat.
@@ -501,8 +615,54 @@ kan hier met een knop meteen uitgevoerd worden. Ze meldt:
 - niet-geregistreerde aandelensplitsingen,
 - naamsafwijkingen die op een fusie of rebranding kunnen wijzen.
 
-Elke melding kun je afvinken. Splitsingen worden gemeld maar nooit automatisch
-toegepast. Verder staan hier twee diagnosegereedschappen voor de Euronext-bron.
+**Twee knoppen per melding.**
+
+- `✓ Gezien` verplaatst de melding naar het **archief** onderaan de pagina, een blok
+  dat standaard dichtgeklapt staat. De melding blijft bestaan — de toestand is
+  immers niet opgelost — maar ze verdringt de openstaande punten niet meer. Dat is
+  vooral nuttig voor een gedetecteerde splitsing die je bewust *niet* registreert,
+  bijvoorbeeld omdat je broker de stukken al aangepast heeft. Zonder archief zou die
+  melding elke dag opnieuw bovenaan staan.
+- `Sluiten` laat de melding helemaal verdwijnen. Blijft de toestand bestaan, dan
+  komt ze bij de volgende controle terug.
+
+Splitsingen worden gemeld maar nooit automatisch toegepast. Verder staan hier twee
+diagnosegereedschappen voor de Euronext-bron.
+
+**Sluitingsdagen geven geen valse waarschuwingen.** De achtergrondplanner haalt élke
+vijf minuten koersen op, ook in het weekend en op feestdagen. Op zo'n dag levert
+iedere bron netjes dezelfde slotkoers terug — en dan lijkt het alsof de koers "niet
+beweegt", terwijl er gewoon niet gehandeld werd. De app houdt daarom een beurskalender
+bij:
+
+| Markt | Sluitingsdagen |
+|---|---|
+| Euronext en Xetra | Nieuwjaar, Goede Vrijdag, Paasmaandag, 1 mei, Kerstmis, tweede kerstdag |
+| NYSE en Nasdaq | Nieuwjaar, MLK Day, Washington's Birthday, Goede Vrijdag, Memorial Day, Juneteenth, 4 juli, Labor Day, Thanksgiving, Kerstmis |
+
+Voor Amerikaanse feestdagen geldt de *observed*-regel: valt een vaste feestdag op
+zaterdag, dan sluit de beurs de vrijdag ervoor; valt ze op zondag, dan de maandag
+erna. Welke kalender voor een activum geldt, leidt de app af uit de beurs, het
+beurssuffix in het ticker en de munt. Bij twijfel geldt de Europese kalender, want
+dan wordt er hooguit één dag te weinig als sluitingsdag gezien.
+
+Dat werkt op twee plaatsen door:
+
+- **Geen koersbeweging** wordt enkel nog gemeld voor dagen waarop de beurs voor dát
+  activum effectief open was.
+- **Verouderde koers** telt de leeftijd in *beursdagen* in plaats van kalenderdagen.
+  Een lang kerstweekend levert dus geen golf waarschuwingen meer op.
+
+Daarbovenop staat een marktbrede terugval. Staan **alle** activa van eenzelfde markt
+(vanaf drie stuks) op dezelfde dag stil, dan lag de handel stil: dat is een
+marktfeit, geen datafout, en de melding wordt onderdrukt. Zo vangt de app ook
+sluitingen op die de kalender niet kent — 21 juli in Brussel, of een halve
+handelsdag op kerstavond.
+
+De kalender wordt volledig **offline** berekend. Een beurskalender-API zou een extra
+afhankelijkheid, een extra faalpunt en een netwerkcall per controle betekenen, voor
+gegevens die jaren vooruit exact berekenbaar zijn: de feestdagen liggen vast en
+Pasen volgt uit een formule van een paar regels.
 
 ### 5.12 ⚙️ Instellingen
 
@@ -609,8 +769,25 @@ speculatieve. Staat live websearch aan, dan zoekt het model actuele koersen en
 berichtgeving op. Staat die uit, dan put het enkel uit zijn trainingskennis en kent
 het het nieuws van vandaag niet.
 
+Twee regels bewaken de bruikbaarheid van die ideeën:
+
+- **Minstens één niet-Amerikaanse naam per categorie.** Dat staat als harde
+  voorwaarde in de opdracht aan het model, met de reden erbij: een portefeuille die
+  enkel Amerikaanse namen voorgeschoteld krijgt, bouwt ongemerkt een dollar- en
+  concentratierisico op. Niet-Amerikaanse noteringen zijn met 🌍 gemarkeerd. Houdt
+  het model zich er in een categorie tóch niet aan, dan wordt dat gemeld in plaats
+  van stilgezwegen — de ideeën weggooien zou een lege categorie opleveren, en dat is
+  erger dan een eerlijke waarschuwing.
+- **Aandelen die je al bezit vallen weg.** Een koopidee voor een positie die al in de
+  portefeuille zit, is geen idee maar ruis, en het verdringt een suggestie die je wél
+  iets bijbrengt. Ze worden geweerd bij het opslaan én bij het weergeven — dus ook een
+  aandeel dat je pas *na* het advies gekocht hebt, verdwijnt uit de lijst en uit de
+  opvolgingstabel. De vergelijking gebeurt op ticker, ISIN en basissymbool (het stuk
+  vóór het beurssuffix), zodat BMW.DE en BMW.F als hetzelfde bedrijf gelden.
+
 De koers van elk voorgesteld aandeel wordt daarna ongeveer honderd dagen opgevolgd, zodat
-je achteraf kunt zien of de suggesties iets waard waren.
+je achteraf kunt zien of de suggesties iets waard waren. De historiek blijft altijd in
+de database staan; het wegfilteren gebeurt enkel in de weergave.
 
 **Belastingoptimalisatie.** Maandelijks: waar zit ruimte in je vrijstelling, welke
 posities zouden fiscaal interessant zijn om te bewegen.
@@ -801,6 +978,70 @@ Home Assistant, en de verschillen zitten volledig in de opstartlaag en één
 omgevingsvariabele voor de datamap. Een fork zou betekenen dat elke correctie twee keer
 gemaakt moet worden, en dat er na een halfjaar twee verschillende apps bestaan.
 
+### 10.13 Het dagresultaat is een kasstroom, geen koersverschil
+
+De voor de hand liggende formule voor een dagresultaat is
+`(koers nu − vorige slotkoers) × aantal`. Die is fout zodra je op dezelfde dag koopt
+of verkoopt: voor de stukken die je vandaag pas verworven hebt, rekent ze ook de
+beweging aan die vóór jouw aankoop plaatsvond. Bij een aandeel dat 's ochtends 3%
+steeg en dat je 's middags kocht, zou de app je die 3% cadeau doen.
+
+Daarom wordt het dagresultaat opgebouwd als een kasstroomredenering: eindwaarde min
+beginwaarde, gecorrigeerd voor alles wat er die dag in of uit ging. Die vorm heeft
+een eigenschap die de eenvoudige formule mist — ze klopt automatisch bij een
+willekeurig aantal transacties op één dag, elk tegen zijn eigen prijs, zonder dat er
+een speciaal geval bijgeschreven moet worden.
+
+De prijs is dat de kolom *Referentie* geen echte koers meer is maar een gewogen
+gemiddelde. Dat is bewust zichtbaar gemaakt in een aparte kolom naast *Vorige slot*,
+in plaats van stilzwijgend een ander getal onder dezelfde kolomtitel te zetten.
+
+### 10.14 De sectorlijst staat in de database, niet in de code
+
+Sectoren hadden een aparte tabel met een vreemde sleutel kunnen zijn. In plaats
+daarvan is het een tekstveld op het activum, met een keuzelijst ernaast die als
+instelling bewaard wordt. Dat is dezelfde redenering als bij de fiscale parameters
+(zie 10.8): je kunt een rubriek toevoegen of hernoemen zonder migratie en zonder
+nieuwe versie.
+
+Het heeft ook een praktisch voordeel. Een activum met een rubriek die niet meer in de
+lijst staat, blijft gewoon bestaan met zijn toewijzing intact — bij een vreemde
+sleutel zou dat een gebroken verwijzing zijn. De keuzelijst vult zichzelf zelfs weer
+aan met rubrieken die nog in gebruik zijn, zodat een toewijzing nooit uit beeld
+verdwijnt. Om diezelfde reden kan een rubriek die nog gebruikt wordt niet verwijderd
+worden.
+
+De automatische toewijzing en de jouwe worden apart bijgehouden (`sector_source`),
+zodat een online ophaalronde nooit jouw keuze overschrijft. Hetzelfde principe als
+bij de eigen wisselkoers en de handmatige TOB: wat jij expliciet gezet hebt, wint.
+
+### 10.15 Beschermen mag niet betekenen: niet meer nakijken
+
+De TOB-controle sloeg transacties met een eigen wisselkoers volledig over. De
+bedoeling was goed — die koers komt van je brokerafschrift en mag nooit door een
+marktkoers vervangen worden — maar het gevolg was dat de beurstaks op die lijnen ook
+nooit meer nagekeken werd. En de TOB is een percentage van de EUR-tegenwaarde, dus
+ze beweegt per definitie mee met de koers.
+
+De les die hier vastligt: "beschermd tegen overschrijven" en "uitgesloten van
+controle" zijn twee verschillende dingen, en ze mogen niet met één vinkje geregeld
+worden. De koers blijft nu beschermd, de afgeleide berekening wordt wél hertekend.
+Dezelfde vraag is het waard om te stellen bij elke andere plek waar iets als
+"handmatig" gemarkeerd staat.
+
+### 10.16 De beurskalender wordt berekend, niet opgehaald
+
+Weekends en feestdagen zijn de reden dat koersen stilstaan, en dat mag geen
+waarschuwing geven. De voor de hand liggende oplossing is een beurskalender-API, maar
+dat betekent een extra afhankelijkheid, een extra faalpunt en een netwerkcall bij elke
+controle — voor gegevens die jaren vooruit exact berekenbaar zijn.
+
+De vaste feestdagen liggen vast, en Pasen volgt uit de anonieme Gregoriaanse formule
+van een paar regels. Het enige wat niet berekenbaar is, zijn lokale of onverwachte
+sluitingen. Daarvoor is er een tweede, empirische controle: staan álle activa van
+eenzelfde markt op dezelfde dag stil, dan lag de handel stil. Die redenering heeft
+geen kalender nodig en dekt automatisch elke sluiting die niemand voorzien had.
+
 ---
 
 ## 11. Onderhoud, back-up en probleemoplossing
@@ -838,9 +1079,42 @@ netwerkschijf.
 handmatige koers het juiste antwoord. Gaf de app het op na tien pogingen, dan
 heractiveer je het ophalen op dezelfde pagina.
 
-**De TOB klopt niet met mijn afschrift.** Controleer eerst het type en het
-ETF-subtype van het activum, en of het in België aangeboden wordt. Klopt dat, pas dan
-de TOB handmatig aan; die aanpassing blijft daarna behouden.
+**De TOB klopt niet met mijn afschrift.** Controleer in deze volgorde:
+
+1. Het **type** en het **ETF-subtype** van het activum, en of het in België aangeboden
+   wordt (het BE-vinkje). Die drie bepalen samen het tarief.
+2. De **EUR-tegenwaarde**. De TOB is een percentage daarvan, dus een verkeerde
+   wisselkoers geeft altijd een verkeerde TOB. Draai `🔄 TOB en EUR-tegenwaarde
+   controleren` op de Transacties-pagina: die toont eerst wat er zou wijzigen.
+3. Klopt alles en rekende je broker toch iets anders aan, pas de TOB dan handmatig
+   aan. Die aanpassing blijft daarna behouden.
+
+**Ik heb mijn eigen wisselkoers aangepast, maar de TOB bleef gelijk.** Dat gebeurde in
+versies vóór 1.1.0: lijnen met een eigen koers werden bij de herberekening volledig
+overgeslagen. Draai de TOB-controle nu opnieuw — lijnen met een eigen koers zijn er
+met 💱 gemarkeerd, en hun TOB wordt herrekend terwijl jouw koers behouden blijft.
+Staat er ook `TOB eigen` aan, dan blijft de lijn wél ongemoeid: zet dat vinkje eerst
+uit als je de berekende waarde wil.
+
+**Mijn dividenden kloppen niet bij een gefilterde rekening.** Sinds 1.1.0 volgt de
+kolom *Dividend* in de tabel met open posities de rekeningfilter. Zie je nog oude
+cijfers, ververs dan de pagina; er zit zestig seconden cache op.
+
+**Een aandeel staat op 0% dagwinst.** Kijk naar de kolom *Koers gewijzigd*. Is die
+recent, dan is 0% normaal — de markt was gesloten of de koers bewoog echt niet. Staat
+ze dagen terug terwijl de beurs open was, dan verschijnt er een waarschuwing op de
+statuspagina.
+
+**De statuspagina meldt 'geen koersbeweging' op een feestdag.** Dat hoort niet meer te
+gebeuren sinds 1.1.0. Gaat het om een lokale sluitingsdag die de kalender niet kent
+(21 juli bijvoorbeeld) en heb je minder dan drie activa op die markt, dan kan de
+marktbrede terugval niet werken — vink de melding dan af met `✓ Gezien`, zodat ze in
+het archief belandt.
+
+**Mijn sectordiagram zit vol 'Niet toegewezen'.** Ga naar `🏢 Activa → 📋 Overzicht`
+en gebruik `🏭 Sectoren beheren → 🔎 Sectoren ophalen`. Wat daarna nog leeg blijft, zijn
+meestal fondsen en trackers: die krijgen bij Yahoo geen sector. Zet die zelf op
+*Gediversifieerd (index/fonds)*.
 
 **Mijn cash staat negatief.** Er ontbreken stortingen. Vul ze aan op de Cash-pagina.
 
@@ -877,6 +1151,12 @@ Windows: de nieuwe bestanden overschrijven en `start.bat` opnieuw draaien. Wijzi
 | Vesting | het moment waarop een toegekend aandeel je toekomt |
 | Ongerealiseerd | winst of verlies op een positie die je nog hebt |
 | Gerealiseerd | winst of verlies op een positie die je verkocht hebt |
+| Referentiekoers | het startpunt van het dagresultaat: de vorige slotkoers, gewogen met je transacties van vandaag |
+| GICS | de internationale sectorindeling die Yahoo en de meeste fondsbeheerders gebruiken |
+| Sector | het domein waarin een activum actief is, bepalend voor de spreidingsanalyse |
+| Beursdag | een dag waarop de betrokken beurs open was: geen weekend, geen feestdag |
+| Observed | de Amerikaanse regel die een feestdag in het weekend naar de vrijdag of maandag verschuift |
+| Basissymbool | het deel van een ticker vóór het beurssuffix (BMW.DE → BMW) |
 
 ### 12.2 Bestandsindeling
 

@@ -1080,6 +1080,17 @@ Geef bij elk idee ook een rating op deze schaal: {valid}.
 Kies liquide, voor een Belgische particulier vlot verhandelbare effecten (Euronext, Xetra,
 LSE, US-beurzen). Geef het EXACTE Yahoo-Finance-ticker met beurssuffix.
 
+HARDE VOORWAARDEN — een antwoord dat hieraan niet voldoet is onbruikbaar:
+1. In ELKE bucket staat MINSTENS ÉÉN NIET-AMERIKAANS aandeel (geen US-notering, geen
+   ISIN die met 'US' begint). Concreet: per bucket minstens één effect dat op
+   Euronext (Amsterdam/Brussel/Parijs/Lissabon), Xetra/Frankfurt, de LSE, SIX Zürich,
+   Borsa Italiana, Madrid, Stockholm, Kopenhagen, Oslo, Tokio of Hongkong noteert.
+   Reden: een portefeuille die enkel Amerikaanse namen krijgt voorgeschoteld, bouwt
+   ongemerkt een dollar- en concentratierisico op.
+2. Stel GEEN enkel effect voor dat al in de portefeuille zit (zie de lijst hierboven),
+   ook niet via een andere notering van hetzelfde bedrijf.
+3. Vul het veld "isin" altijd in — daarmee wordt voorwaarde 1 en 2 gecontroleerd.
+
 Antwoord UITSLUITEND met geldige JSON (geen markdown errond), in exact dit formaat:
 {{
   "marktbeeld": "3-5 zinnen: het macro-, geopolitieke en nieuwskader van vandaag waarbinnen deze ideeën passen",
@@ -1115,6 +1126,10 @@ Exact 6 ideeën, exact 2 per bucket.
         batch_id = datetime.now().strftime("%Y%m%d%H%M%S")
         idea_date = datetime.now().strftime("%Y-%m-%d")
         stored, per_bucket = 0, {b: 0 for b in MARKET_BUCKETS}
+        non_us = {b: 0 for b in MARKET_BUCKETS}
+        skipped_held = []
+
+        held = held_keys()
 
         for it in ideas:
             if not isinstance(it, dict):
@@ -1126,6 +1141,15 @@ Exact 6 ideeën, exact 2 per bucket.
                 str(it.get("bucket") or "").strip().lower().replace(" ", "_"))
             if bucket not in MARKET_BUCKETS:
                 continue
+            isin = (str(it.get("isin") or "").strip().upper()) or ""
+
+            # Al in portefeuille? Dan is dit geen koopIDEE maar een herhaling van wat
+            # je al bezit — dat hoort niet bij 'opportuniteiten buiten je portefeuille'.
+            if is_held(ticker, isin, held):
+                skipped_held.append(ticker)
+                logger.info(f"Marktidee {ticker} overgeslagen: al een open positie.")
+                continue
+
             rating = str(it.get("advies") or it.get("rating") or "").lower().replace(" ", "_")
             if rating not in RATING_LABELS:
                 rating = "buy"   # luik 2 stelt koopideeën voor; val terug op 'kopen'
@@ -1140,12 +1164,17 @@ Exact 6 ideeën, exact 2 per bucket.
                 logger.info(f"generate_market_opportunities: geen koers gevonden voor {ticker} "
                             "— idee wordt opgeslagen zonder startkoers (rendement niet meetbaar)")
 
+            exch = str(it.get("beurs") or it.get("exchange") or "")
+            cur = currency or it.get("munt") or it.get("currency") or "EUR"
+            if not is_us_listing(ticker, exch, cur, isin):
+                non_us[bucket] += 1
+
             db.save_market_idea(
                 batch_id, idea_date, bucket, ticker,
                 name=it.get("naam") or it.get("name"),
-                exchange=it.get("beurs") or it.get("exchange"),
-                isin=(it.get("isin") or "").upper() or None,
-                currency=currency or it.get("munt") or it.get("currency") or "EUR",
+                exchange=exch or None,
+                isin=isin or None,
+                currency=cur,
                 rating=rating,
                 price_at_advice=price,
                 price_target=_num(it.get("koersdoel_12m") or it.get("price_target")),
@@ -1159,8 +1188,24 @@ Exact 6 ideeën, exact 2 per bucket.
             stored += 1
             per_bucket[bucket] += 1
 
+        # Buckets zonder één niet-Amerikaans idee worden gemeld, niet stilgezwegen.
+        # Weggooien zou erger zijn dan melden: dan hield je een lege categorie over.
+        us_only = [BUCKET_SHORT[b] for b in MARKET_BUCKETS
+                   if per_bucket[b] and not non_us[b]]
+        if us_only:
+            logger.warning("Marktopportuniteiten: enkel Amerikaanse namen in bucket(s) "
+                           + ", ".join(us_only))
+
         # Het marktbeeld bewaren we als tekstevaluatie (aparte soort dan luik 1).
         marktbeeld = data.get("marktbeeld", "") or ""
+        if skipped_held:
+            marktbeeld += ("\n\n_ℹ️ Weggelaten omdat je ze al in portefeuille hebt: "
+                           + ", ".join(sorted(set(skipped_held))) + "._")
+        if us_only:
+            marktbeeld += ("\n\n_⚠️ In deze categorie(ën) stelde het model enkel Amerikaanse "
+                           "aandelen voor: " + ", ".join(us_only) + ". Er is uitdrukkelijk om "
+                           "minstens één niet-Amerikaanse naam per categorie gevraagd; "
+                           "hou daar rekening mee bij het lezen._")
         if not used_web:
             marktbeeld += ("\n\n_⚠️ Zonder live websearch gegenereerd — gebaseerd op de "
                            "trainingskennis van het model, niet op de berichtgeving van vandaag._")
@@ -1170,8 +1215,11 @@ Exact 6 ideeën, exact 2 per bucket.
 
         logger.info(f"Marktopportuniteiten: {stored} idee(ën) opgeslagen "
                     f"(defensief {per_bucket['defensive']}, matig {per_bucket['moderate']}, "
-                    f"speculatief {per_bucket['speculative']}), websearch={used_web}")
+                    f"speculatief {per_bucket['speculative']}), niet-VS per bucket "
+                    f"{non_us}, {len(skipped_held)} overgeslagen (al in bezit), "
+                    f"websearch={used_web}")
         return {"batch_id": batch_id, "stored": stored, "per_bucket": per_bucket,
+                "non_us": non_us, "us_only": us_only, "skipped_held": skipped_held,
                 "marktbeeld": marktbeeld, "websearch": used_web}
     except OpenAIError as exc:
         logger.error(f"generate_market_opportunities: {exc}")
@@ -1202,6 +1250,76 @@ def _num(v):
 MARKET_PERIODS = [("7d", "7 dagen", 7), ("1m", "1 maand", 30), ("3m", "3 maanden", 90)]
 
 
+# ── Filters op de marktideeën ────────────────────────────────────────────────
+
+_US_EXCHANGE_HINTS = ("NASDAQ", "NYSE", "AMEX", "NMS", "NYQ", "NGM", "ARCA", "BATS",
+                      "NEW YORK", "US ", "UNITED STATES")
+
+
+def is_us_listing(ticker: str = "", exchange: str = "", currency: str = "",
+                  isin: str = "") -> bool:
+    """Is dit een Amerikaanse notering?
+
+    De ISIN is de betrouwbaarste aanwijzing (US… of een ADR-reeks), daarna de beurs,
+    daarna het ticker: Yahoo geeft Amerikaanse aandelen géén beurssuffix, terwijl
+    élke Europese notering er wel een heeft (.AS, .BR, .PA, .DE, .L, .MI, .SW …).
+    De munt alleen is niet doorslaggevend — er noteren ook Europese effecten in
+    dollar — en telt hier dus enkel mee als er verder niets bekend is."""
+    isin = (isin or "").strip().upper()
+    if len(isin) >= 2:
+        return isin[:2] == "US"
+    exch = (exchange or "").strip().upper()
+    if exch:
+        if any(h in exch for h in _US_EXCHANGE_HINTS):
+            return True
+        return False
+    tk = (ticker or "").strip().upper()
+    if "." in tk:
+        return False
+    return bool(tk) or (currency or "").upper() == "USD"
+
+
+def _base_symbol(ticker: str) -> str:
+    """'BMW.DE' -> 'BMW'. Zo herkennen we hetzelfde bedrijf op een andere beurs."""
+    return (ticker or "").strip().upper().split(".")[0]
+
+
+def held_keys() -> tuple[set, set]:
+    """(tickers, ISIN's) van de posities die je NU aanhoudt.
+
+    Wordt gebruikt om koopideeën te onderdrukken voor aandelen die je al bezit: een
+    'nieuw idee' voor een positie die al in de portefeuille zit is geen idee maar
+    ruis, en het verdringt een suggestie die je wél iets bijbrengt. De vergelijking
+    gebeurt ook op het BASISSYMBOOL (het stuk vóór de beurssuffix), zodat BMW.DE en
+    BMW.F als hetzelfde bedrijf gelden."""
+    try:
+        import belgian_tax as _bt
+        open_t, _closed = _bt.open_position_tickers()
+    except Exception as exc:
+        logger.warning(f"held_keys: open posities niet bepaald ({exc})")
+        return set(), set()
+    tickers, isins = set(), set()
+    assets = {a["ticker"].upper(): a for a in db.get_assets()}
+    for t in open_t:
+        tk = t.upper()
+        tickers.add(tk)
+        tickers.add(_base_symbol(tk))
+        _isin = (assets.get(tk, {}).get("isin") or "").strip().upper()
+        if _isin:
+            isins.add(_isin)
+    return tickers, isins
+
+
+def is_held(ticker: str, isin: str = "", held: tuple | None = None) -> bool:
+    """Zit dit idee al als open positie in de portefeuille?"""
+    tickers, isins = held if held is not None else held_keys()
+    tk = (ticker or "").strip().upper()
+    ii = (isin or "").strip().upper()
+    if ii and ii in isins:
+        return True
+    return bool(tk) and (tk in tickers or _base_symbol(tk) in tickers)
+
+
 def market_idea_synthesis(days: int) -> list[dict]:
     """Vat de koopideeën van de afgelopen 'days' dagen samen PER TICKER, met het
     GEMIDDELDE advies over die periode.
@@ -1218,9 +1336,17 @@ def market_idea_synthesis(days: int) -> list[dict]:
     if not ideas:
         return []
 
+    # Ideeën voor aandelen die je intussen gekocht hebt, verdwijnen uit de
+    # suggestielijst: die zijn geen 'opportuniteit buiten de portefeuille' meer.
+    # De historiek zelf blijft in de database staan — enkel de weergave filtert.
+    held = held_keys()
     by_ticker: dict[str, list[dict]] = {}
     for it in ideas:
+        if is_held(it["ticker"], it.get("isin") or "", held):
+            continue
         by_ticker.setdefault(it["ticker"], []).append(it)
+    if not by_ticker:
+        return []
 
     latest = db.get_latest_prices(list(by_ticker.keys()))
 
