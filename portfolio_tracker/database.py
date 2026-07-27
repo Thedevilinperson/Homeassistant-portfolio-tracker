@@ -315,6 +315,10 @@ def _migrate(conn):
         ("cash_basis",           "TEXT DEFAULT 'net'"),  # welk veld naar de cashbalans gaat: net/gross_after/gross_before
         ("cash_eur",             "REAL"),                # het gekozen cashbedrag in EUR
         ("kind",                 "TEXT DEFAULT 'dividend'"),  # dividend / interest / securities_lending
+        # Eigen wisselkoers: net als bij transacties rekent je broker vaak met zijn
+        # eigen koers (soms met auto-FX-marge). Staat dit op 1, dan is fx_rate JOUW
+        # koers en mag geen enkele herberekening ze door de marktkoers vervangen.
+        ("fx_manual",            "INTEGER DEFAULT 0"),
     ]
     new_div_cols = []
     for col, ddl in div_cols:
@@ -1742,6 +1746,25 @@ def remove_sector(name: str) -> int:
     return int(n or 0)
 
 
+def rename_sector(old: str, new: str) -> int:
+    """Hernoem een rubriek overal: in de keuzelijst én op elk activum dat ze gebruikt.
+
+    Zonder deze functie zou hernoemen betekenen: nieuwe rubriek toevoegen, elk
+    activum apart omzetten, oude rubriek verwijderen — met het risico dat er eentje
+    achterblijft en de taart plots twee bijna-identieke punten toont. Geeft terug
+    hoeveel activa mee omgezet werden."""
+    old, new = (old or "").strip(), (new or "").strip()
+    if not old or not new or old == new:
+        return 0
+    conn = get_connection()
+    cur = conn.execute("UPDATE assets SET sector=? WHERE sector=?", (new, old))
+    n = cur.rowcount or 0
+    conn.commit()
+    conn.close()
+    set_sectors([(new if s.lower() == old.lower() else s) for s in get_sectors()])
+    return int(n)
+
+
 def normalize_sector(raw) -> str | None:
     """Zet een sectornaam uit een onlinebron om naar een rubriek uit de keuzelijst.
     Onbekend maar niet leeg -> de naam zelf (die belandt dan als nieuwe rubriek in
@@ -2068,7 +2091,7 @@ def add_dividend(ticker, date, gross_amount, withholding_tax=0.0,
                  currency="EUR", notes=None, fx_rate=1.0,
                  gross_eur=None, withholding_eur=None,
                  foreign_wht_withheld=0, belgian_rv_withheld=0,
-                 account=None, details=None):
+                 account=None, details=None, fx_manual=0):
     """ticker mag None zijn voor interest/securities lending die niet aan een
     specifiek activum gekoppeld zijn (bv. cash-rekeninginterest)."""
     if gross_eur is None:
@@ -2092,7 +2115,7 @@ def add_dividend(ticker, date, gross_amount, withholding_tax=0.0,
             "gross_before_wht", "gross_before_wht_cur", "foreign_wht_amt",
             "foreign_wht_cur", "gross_after_wht", "gross_after_wht_cur",
             "belgian_rv_amt", "net_received", "net_received_cur", "net_eur",
-            "cash_basis", "cash_eur", "kind"]
+            "cash_basis", "cash_eur", "kind", "fx_manual"]
     vals = [ticker.strip().upper() if ticker else None, date, gross_amount, withholding_tax, currency, notes,
             fx_rate, gross_eur, withholding_eur,
             int(foreign_wht_withheld), int(belgian_rv_withheld), account,
@@ -2101,7 +2124,7 @@ def add_dividend(ticker, date, gross_amount, withholding_tax=0.0,
             d.get("gross_after_wht"), d.get("gross_after_wht_cur"),
             d.get("belgian_rv_amt"), d.get("net_received"),
             d.get("net_received_cur"), d.get("net_eur"),
-            d.get("cash_basis"), d.get("cash_eur"), d.get("kind")]
+            d.get("cash_basis"), d.get("cash_eur"), d.get("kind"), int(fx_manual)]
     conn = get_connection()
     conn.execute(f"INSERT INTO dividends ({','.join(cols)}) VALUES ({','.join('?'*len(cols))})",
                  vals)
@@ -2137,7 +2160,7 @@ _DIV_EDITABLE = {
     "gross_before_wht", "gross_before_wht_cur", "foreign_wht_amt", "foreign_wht_cur",
     "gross_after_wht", "gross_after_wht_cur", "belgian_rv_amt",
     "net_received", "net_received_cur", "cash_basis", "cash_eur", "kind",
-    "manual_override",
+    "manual_override", "fx_manual",
 }
 
 

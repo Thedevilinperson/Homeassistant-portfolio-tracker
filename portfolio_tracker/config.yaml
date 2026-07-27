@@ -1,11 +1,13 @@
 name: "Portfolio Tracker"
-version: "1.1.0"
+version: "1.2.0"
 slug: "portfolio_tracker"
 description: "Streamlit app voor aandelen, ETF's en Belgische meerwaardebelasting met AI-advies"
 ingress: true
 ingress_port: 8501
 panel: true
 icon: "mdi:chart-line"
+# Home Assistant toont deze link op de add-on-pagina.
+url: "https://github.com/Thedevilinperson/Homeassistant-portfolio-tracker"
 ports:
   8501/tcp: 8501
 map:

@@ -1,6 +1,6 @@
 # Portfolio Tracker - Handleiding
 
-Versie 1.1.0
+Versie 1.2.0
 
 ---
 
@@ -571,10 +571,35 @@ voorheffing. **Gedetailleerd** toont de volledige keten:
 Je vult in wat je op je afschrift ziet; de app leidt de rest af en waarschuwt als de
 onderdelen elkaar tegenspreken.
 
+**Eigen wisselkoers.** Keert een aandeel uit in een vreemde munt, dan rekent je broker
+om tegen *zijn* koers — vaak met een wisselmarge erin verwerkt. Vink
+**💱 Eigen wisselkoers gebruiken** aan en vul de koers van je afschrift in; de app
+toont meteen hoeveel die afwijkt van de marktkoers van die dag. Die koers blijft
+daarna voorgoed bij de lijn hangen: geen enkele herberekening vervangt ze nog door de
+marktkoers. Precies dezelfde werking als bij transacties.
+
+> In de gedetailleerde invoer geldt één eigen koers voor de hele keten. Staan er
+> uitzonderlijk twee verschillende vreemde munten in dezelfde keten, dan zegt de app
+> dat één koers daar niet voor kan gelden — voer zulke gevallen beter als aparte
+> lijnen in.
+
 **Overzicht** toont alle inkomsten in een bewerkbare tabel, met bovenaan hoeveel je via
-je aangifte fiscaal kunt recupereren. De **herberekening** werkt zoals bij transacties:
-eerst een voorbeeld van wat zou wijzigen, dan pas uitvoeren, en handmatig aangepaste
-lijnen blijven ongemoeid.
+je aangifte fiscaal kunt recupereren. De kolommen **FX-koers** en **FX eigen** werken
+zoals bij transacties: pas je de koers aan, dan wordt het vinkje automatisch gezet.
+
+De **herberekening** werkt zoals bij transacties: eerst een voorbeeld van wat zou
+wijzigen, dan pas uitvoeren.
+
+| Situatie | Wisselkoers | Bedragen |
+|---|---|---|
+| Gewone lijn | De historische marktkoers van de dividenddatum | Herberekend |
+| Eigen wisselkoers (💱) | **Jouw** koers blijft behouden | Herberekend op jouw koers |
+| Handmatig gecorrigeerd (🔒) | Ongemoeid | Ongemoeid, tenzij je uitdrukkelijk kiest voor overschrijven |
+
+Let op het verschil tussen de twee markeringen. 🔒 betekent dat je de **bedragen** hebt
+aangepast en dat de hele lijn met rust gelaten wordt. 💱 betekent enkel dat de
+**koers** van jou is: de bedragen worden dan wél netjes herrekend. Beschermd tegen
+overschrijven is niet hetzelfde als uitgesloten van controle.
 
 ### 5.8 🧮 Simulatie
 
@@ -666,12 +691,37 @@ Pasen volgt uit een formule van een paar regels.
 
 ### 5.12 ⚙️ Instellingen
 
-Vijf secties.
+Zes secties.
 
 **🔑 API-sleutel.** Je OpenAI-sleutel, welk model elk van de drie AI-taken gebruikt,
 een kostenraming per model, je geschatte investeringsvolume, en de privacymodus.
 
 **🏦 Rekeningen.** Je rekeningen en hun beleggingsprofiel.
+
+**🏭 Sectoren.** De volledige beheerplek voor de domeinen/sectoren die het
+taartdiagram *Spreiding per domein* voeden. Vijf blokken:
+
+1. **Kerncijfers** — hoeveel rubrieken er zijn, hoeveel activa er een sector hebben,
+   en hoeveel er nog niet toegewezen zijn.
+2. **Rubriek toevoegen** — de app levert de elf GICS-hoofdsectoren mee, aangevuld met
+   *Gediversifieerd (index/fonds)* en *Overige*. Voeg toe wat je nodig hebt, bv.
+   *Defensie* of *Waterstof*.
+3. **Rubriek hernoemen** — zet de naam in één keer om in de lijst **én** op elk
+   activum dat ze gebruikt. Zonder deze knop zou hernoemen betekenen: nieuwe rubriek
+   maken, elk activum apart omzetten en de oude weggooien — waarbij één vergeten
+   activum al genoeg is om je taart twee bijna-identieke punten te geven.
+4. **De lijst + verwijderen** — met per rubriek hoeveel activa ze gebruiken en of ze
+   standaard of eigen is. Alleen ongebruikte rubrieken kunnen weg; zo verdwijnt een
+   toewijzing nooit stilzwijgend.
+5. **Toewijzen in bulk** — een tabel met al je activa en een vinkje *toon enkel activa
+   zonder sector*, zodat je de gaten in één beweging kunt vullen. Sneller dan activum
+   per activum via de Activa-pagina.
+6. **Online ophalen** — vraagt de sector op bij Yahoo Finance (via het ticker, en
+   anders via de ISIN) en vertaalt ze naar je rubrieken. Standaard worden enkel activa
+   zónder sector ingevuld; wat jíj hebt toegewezen blijft hoe dan ook ongemoeid.
+
+Op de Activa-pagina blijft de kolom *Sector* staan voor losse correcties, met een knop
+die rechtstreeks naar deze sectie springt.
 
 **🧾 Meerwaardebelasting.** Tarief, jaarlijkse vrijstelling en je huwelijksstelsel.
 
@@ -683,6 +733,23 @@ volgens de tarieven die toen golden.
 
 **🗃️ Data.** Bulk-import via Excel, koersen handmatig ophalen, en het overzicht van de
 EUR-omrekening.
+
+### 5.13 📖 Handleiding
+
+Deze handleiding, in de app zelf. Ook de changelog, de Windows-installatie en de
+README staan er, elk met een zoekveld en een keuzelijst per hoofdstuk. Onderaan kun je
+het document downloaden.
+
+**Waarom in de app.** Home Assistant toont het README-bestand van een add-on in zijn
+eigen scherm, en daar werkt een verwijzing naar een ander bestand in de repository
+niet: klikken doet gewoon niets. De documentatie meeleveren in de app lost dat op en
+heeft twee bijkomende voordelen. Ze werkt zonder internetverbinding, en ze hoort
+altijd bij de versie die je effectief draait — een handleiding op GitHub loopt voor op
+een add-on die je nog niet herbouwd hebt.
+
+De bestanden worden gelezen van de schijf naast de code (`/app` in de container). Zie
+je hier een melding dat een bestand ontbreekt, dan is de installatie onvolledig:
+herbouw de add-on, en herstart ze niet enkel.
 
 ---
 
@@ -1026,10 +1093,41 @@ ze beweegt per definitie mee met de koers.
 De les die hier vastligt: "beschermd tegen overschrijven" en "uitgesloten van
 controle" zijn twee verschillende dingen, en ze mogen niet met één vinkje geregeld
 worden. De koers blijft nu beschermd, de afgeleide berekening wordt wél hertekend.
-Dezelfde vraag is het waard om te stellen bij elke andere plek waar iets als
-"handmatig" gemarkeerd staat.
 
-### 10.16 De beurskalender wordt berekend, niet opgehaald
+Diezelfde vraag is daarna gesteld bij de **dividenden**, waar een eigen wisselkoers
+sindsdien op precies dezelfde manier werkt: jouw koers blijft, de bedragen en hun
+EUR-tegenwaarde worden herrekend. Daar is het onderscheid ook zichtbaar gemaakt in de
+markering — 🔒 voor "de bedragen zijn van mij, blijf van deze lijn" en 💱 voor "enkel
+de koers is van mij". Twee verschillende beloftes verdienen twee verschillende
+symbolen.
+
+### 10.16 Documentatie hoort bij de versie, niet bij de repository
+
+De handleiding stond in de repository, met een link vanuit het README-bestand. In Home
+Assistant deed die link niets: HA rendert markdown in zijn eigen frontend, waar een
+relatief pad naar een ander bestand nergens naartoe wijst.
+
+Absolute links naar GitHub lossen het klikprobleem op, maar niet het echte probleem.
+Een handleiding op GitHub beschrijft de nieuwste versie, terwijl jij misschien nog een
+oudere draait — en ze werkt niet als je add-on geen internet heeft. Daarom staat de
+documentatie nu ook **in de app**, gelezen van de schijf naast de code. Ze is per
+definitie de handleiding van de versie die je op dat moment gebruikt.
+
+De drie plaatsen vullen elkaar aan: `DOCS.md` is de korte versie voor het
+Documentatie-tabblad van HA, `README.md` bevat de absolute links voor wie op GitHub
+kijkt, en de pagina **📖 Handleiding** is de volledige tekst voor wie de app openheeft.
+
+Bij het opzoeken van de juiste URL's kwam nog een tweede fout boven. De README in de
+repository-root was een kopie van de add-on-README, inclusief haar relatieve links naar
+`HANDLEIDING.md` — maar dat bestand staat in `portfolio_tracker/`. Vanuit de root gaven
+die links dus een 404, ook op GitHub zelf. Twee bestanden met dezelfde inhoud op twee
+verschillende plaatsen in de boom kunnen niet allebei kloppen met relatieve paden; ze
+hebben nu elk hun eigen rol, en absolute links.
+
+De links wijzen naar `/blob/HEAD/` en niet naar `/blob/main/`. HEAD volgt de
+standaardbranch, dus ze blijven werken als die ooit hernoemd wordt.
+
+### 10.17 De beurskalender wordt berekend, niet opgehaald
 
 Weekends en feestdagen zijn de reden dat koersen stilstaan, en dat mag geen
 waarschuwing geven. De voor de hand liggende oplossing is een beurskalender-API, maar
@@ -1111,10 +1209,24 @@ gebeuren sinds 1.1.0. Gaat het om een lokale sluitingsdag die de kalender niet k
 marktbrede terugval niet werken — vink de melding dan af met `✓ Gezien`, zodat ze in
 het archief belandt.
 
-**Mijn sectordiagram zit vol 'Niet toegewezen'.** Ga naar `🏢 Activa → 📋 Overzicht`
-en gebruik `🏭 Sectoren beheren → 🔎 Sectoren ophalen`. Wat daarna nog leeg blijft, zijn
-meestal fondsen en trackers: die krijgen bij Yahoo geen sector. Zet die zelf op
-*Gediversifieerd (index/fonds)*.
+**Mijn sectordiagram zit vol 'Niet toegewezen'.** Ga naar
+`⚙️ Instellingen → 🏭 Sectoren` en klik op `🔎 Ophalen`. Wat daarna nog leeg blijft,
+zijn meestal fondsen en trackers: die krijgen bij de bron geen sector. Vul die in het
+blok *Sectoren toewijzen* in, met het vinkje *toon enkel activa zonder sector* aan —
+dan zie je precies de gaten.
+
+**Mijn dividend in dollar klopt niet met mijn afschrift.** Je broker rekende
+waarschijnlijk om tegen zijn eigen koers, inclusief wisselmarge. Vink bij het invoeren
+`💱 Eigen wisselkoers gebruiken` aan, of zet de koers achteraf in de kolom *FX-koers*
+in het overzicht — het vinkje *FX eigen* gaat dan automatisch aan. Vanaf dan blijft
+jouw koers behouden bij elke herberekening.
+
+**Ik klik in Home Assistant op HANDLEIDING.md en er gebeurt niets.** Dat klopt voor
+versies vóór 1.2.0: HA toont dat bestand in zijn eigen scherm, waar een relatieve
+verwijzing naar een ander bestand in de repository niet werkt. Sinds 1.2.0 zijn die
+links absoluut. Maar het eenvoudigste blijft: open de app en kies **📖 Handleiding**
+in het linkermenu. Daar staat dezelfde tekst, doorzoekbaar, zonder internetverbinding,
+en horend bij precies de versie die je draait.
 
 **Mijn cash staat negatief.** Er ontbreken stortingen. Vul ze aan op de Cash-pagina.
 
@@ -1157,8 +1269,22 @@ Windows: de nieuwe bestanden overschrijven en `start.bat` opnieuw draaien. Wijzi
 | Beursdag | een dag waarop de betrokken beurs open was: geen weekend, geen feestdag |
 | Observed | de Amerikaanse regel die een feestdag in het weekend naar de vrijdag of maandag verschuift |
 | Basissymbool | het deel van een ticker vóór het beurssuffix (BMW.DE → BMW) |
+| Eigen wisselkoers | de koers die je broker effectief gebruikte, bewaard bij de lijn en nooit door de marktkoers vervangen |
+| Wisselmarge | het verschil tussen de brokerkoers en de marktkoers, vaak al in de koers verwerkt (auto-FX) |
 
 ### 12.2 Bestandsindeling
+
+De repository is een **Home Assistant add-on-repository**: de add-on zelf zit in de map
+`portfolio_tracker/`, met daarnaast een `repository.yaml` en een README in de root die
+beschrijven hoe je de repository aan Home Assistant toevoegt.
+
+```
+repository.yaml          definitie van de add-on-repository
+README.md                hoe je de repository toevoegt, wat erin zit
+portfolio_tracker/       de add-on zelf (alles hieronder)
+```
+
+Binnen `portfolio_tracker/`:
 
 | Bestand | Rol |
 |---|---|
@@ -1170,6 +1296,10 @@ Windows: de nieuwe bestanden overschrijven en `start.bat` opnieuw draaien. Wijzi
 | `scheduler.py` | de geplande achtergrondtaken |
 | `bulk_import.py` | de Excel-import |
 | `config.yaml` | add-on-definitie en versienummer |
+| `HANDLEIDING.md` | dit document, ook getoond op de pagina 📖 Handleiding |
+| `DOCS.md` | de korte versie voor het Documentatie-tabblad van Home Assistant |
+| `README.md` | kennismaking en links, voor wie op GitHub kijkt |
+| `CHANGELOG.md` | wat er per versie veranderd is, en waarom |
 | `windows/` | de opstartlaag voor Windows |
 
 ### 12.3 Verder lezen

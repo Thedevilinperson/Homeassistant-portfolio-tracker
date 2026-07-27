@@ -8,6 +8,7 @@ import json
 import logging
 import sys
 from datetime import date, datetime
+from pathlib import Path
 
 import pandas as pd
 import plotly.express as px
@@ -737,9 +738,15 @@ def _recompute_dividend_chain(divs, rv_rate: float, include_manual: bool = False
                                               rv_rate=rv_rate, wht_rate=wht)
         rA, rB, rC, rD, rRV = res["a"], res["b"], res["c"], res["d"], res["rv"]
 
-        # EUR-tegenwaarden + cash-boeking op basis van de (her)berekende keten
+        # EUR-tegenwaarden + cash-boeking op basis van de (her)berekende keten.
+        # Een EIGEN wisselkoers blijft behouden: die komt van je brokerafschrift en
+        # mag nooit door de historische marktkoers vervangen worden. De bedragen
+        # zelf worden wél opnieuw opgebouwd — beschermd tegen overschrijven is niet
+        # hetzelfde als uitgesloten van controle.
+        _own_fx = div_fx_override(d)
+
         def _te(v):
-            return None if v is None else compute_eur(v, cur, ndat)[1]
+            return None if v is None else compute_eur(v, cur, ndat, _own_fx)[1]
         a_eur, c_eur, d_eur = _te(rA), _te(rC), _te(rD)
         gross_eur = a_eur if a_eur is not None else (c_eur if c_eur is not None else d_eur)
         net_eur   = d_eur if d_eur is not None else c_eur
@@ -768,6 +775,7 @@ def _recompute_dividend_chain(divs, rv_rate: float, include_manual: bool = False
             "jaar":      dyear,
             "wht_pct":   round(wht * 100, 3),
             "handmatig": bool(d.get("manual_override")),
+            "eigen_fx":  bool(_own_fx),
             "oud_wht":   d.get("foreign_wht_amt"),
             "nieuw_wht": rB,
             "oud_rv":    d.get("belgian_rv_amt"),
@@ -782,7 +790,7 @@ def _recompute_dividend_chain(divs, rv_rate: float, include_manual: bool = False
             continue
 
         prim = rA if rA is not None else (rC if rC is not None else rD)
-        fx_prim = compute_eur(prim, cur, ndat)[0] or 1.0
+        fx_prim = _own_fx or (compute_eur(prim, cur, ndat)[0] or 1.0)
         db.update_dividend(
             d["id"], gross_amount=prim, withholding_tax=round(wh_eur / fx_prim, 2),
             fx_rate=fx_prim, gross_eur=gross_eur, withholding_eur=wh_eur, net_eur=net_eur,
@@ -937,6 +945,69 @@ def delete_with_confirm(btn_label, state_key, target_id, warning, do_delete, btn
     return False
 
 
+def _div_fx_widget(currency: str, on_date, key_prefix: str,
+                   context: str = "dit bedrag") -> tuple[int, float | None]:
+    """Blok 'eigen wisselkoers' voor de dividendformulieren.
+
+    Geeft (fx_manual, fx_override) terug. Bij EUR verschijnt er niets en is er
+    niets om te kiezen. Dezelfde redenering als bij transacties: een broker rekent
+    vaak met zijn eigen koers, en die hoort bij het bedrag zoals hij het afgerekend
+    heeft — niet bij de marktkoers van die dag. Wordt de koers hier vastgelegd, dan
+    laat elke latere herberekening ze staan."""
+    if currency == "EUR":
+        return 0, None
+    mkt, src = fx_lookup(currency, on_date)
+    if src == "historisch":
+        st.caption(f"💱 Marktkoers op {on_date}: **1 {currency} = {mkt:.6g} EUR**")
+    elif src == "actueel":
+        st.warning(f"💱 De historische koers voor {on_date} is niet beschikbaar; de app "
+                   f"gebruikt de **actuele** koers (1 {currency} = {mkt:.6g} EUR) als "
+                   "benadering. Geef hieronder liever de koers van je broker in.")
+    else:
+        st.error(f"💱 Geen enkele wisselkoers gevonden voor {currency}. Geef hieronder je "
+                 f"eigen koers in, anders kan de EUR-tegenwaarde van {context} niet "
+                 "berekend worden.")
+
+    fx_manual = int(st.checkbox(
+        "💱 Eigen wisselkoers gebruiken (koers van je broker)",
+        value=(mkt is None), key=f"{key_prefix}_fxman",
+        help="Brokers rekenen dividenden in vreemde munt vaak om tegen hun eigen koers, "
+             "die je op het afschrift terugvindt. Vul die hier in, dan blijft ze voorgoed "
+             "aan deze lijn hangen en wordt ze nooit overschreven door een herberekening "
+             "met de marktkoers."))
+    if not fx_manual:
+        return 0, None
+
+    f1, f2 = st.columns([1, 2])
+    with f1:
+        val = st.number_input(f"1 {currency} = ? EUR", min_value=0.0, format="%.10g",
+                              value=float(mkt) if mkt else 0.0, step=0.0001,
+                              key=f"{key_prefix}_fxval")
+    with f2:
+        if mkt and val:
+            spread = (val - mkt) / mkt * 100
+            st.caption(f"Afwijking t.o.v. de marktkoers: **{pct(spread)}**"
+                       + ("  (jouw koers is ongunstiger — typisch een wisselmarge)"
+                          if spread < 0 else ""))
+    return 1, (val or None)
+
+
+def div_fx_override(d: dict) -> float | None:
+    """De eigen wisselkoers van een dividend, of None wanneer er geen is.
+
+    Net als bij transacties rekent een broker vaak met zijn eigen koers. Staat
+    fx_manual aan, dan is fx_rate JOUW koers en mag geen enkele herberekening ze
+    door de historische marktkoers vervangen. Een koers van 0 of ontbrekend telt
+    niet als eigen koers — dan zou de omrekening stilzwijgend op nul uitkomen."""
+    if not d.get("fx_manual"):
+        return None
+    try:
+        fx = float(d.get("fx_rate") or 0)
+    except (TypeError, ValueError):
+        return None
+    return fx if fx > 0 else None
+
+
 def backfill_eur(force: bool = False) -> int:
     """Reken bestaande transacties + dividenden om naar EUR (historische koers).
     Voor dividenden worden álle EUR-velden herberekend — ook net_eur en de
@@ -957,7 +1028,9 @@ def backfill_eur(force: bool = False) -> int:
             continue
         cur  = d.get("currency") or "EUR"
         ndat = d["date"][:10]
-        fx   = compute_eur(1.0, cur, ndat)[0] or 1.0
+        # Eigen brokerkoers heeft altijd voorrang — ook bij een geforceerde backfill.
+        _own = div_fx_override(d)
+        fx   = _own if _own else (compute_eur(1.0, cur, ndat)[0] or 1.0)
         A, C, Dv = d.get("gross_before_wht"), d.get("gross_after_wht"), d.get("net_received")
         if any(v is not None for v in (A, C, Dv)):
             # Native keten aanwezig: de bedragen blijven, enkel hun EUR-tegenwaarde wijzigt.
@@ -2337,112 +2410,23 @@ def page_assets():
                 st.info("Geen wijzigingen gevonden.")
 
         st.divider()
-        with st.expander("🏭 Sectoren beheren en in één keer ophalen"):
-            st.caption(
-                "Het domein/sector van een activum bepaalt het taartdiagram **Spreiding per "
-                "domein** op de portefeuillepagina. De lijst hieronder is de keuzelijst die "
-                "in de tabel verschijnt — je kan er zelf rubrieken aan toevoegen.")
-
-            _cur_secs = db.get_sectors()
-            _in_use = {}
-            for _a in db.get_assets():
-                _s = (_a.get("sector") or "").strip()
-                if _s:
-                    _in_use[_s] = _in_use.get(_s, 0) + 1
-
-            gc1, gc2 = st.columns([2, 1])
-            with gc1:
-                _new = st.text_input("Nieuwe sector", key="sec_new_name",
-                                     placeholder="bv. Defensie, Waterstof, Infrastructuur")
-            with gc2:
-                st.write(""); st.write("")
-                if st.button("➕ Toevoegen", key="sec_add_btn", width="stretch"):
-                    if not _new.strip():
-                        st.warning("Geef eerst een naam in.")
-                    elif db.add_sector(_new.strip()):
-                        st.success(f"✅ '{_new.strip()}' toegevoegd aan de keuzelijst.")
-                        st.rerun()
-                    else:
-                        st.info("Die sector staat al in de lijst.")
-
-            show_df(pd.DataFrame([{
-                "Sector": s,
-                "Activa": _in_use.get(s, 0),
-                "Standaard": "ja" if s in db.DEFAULT_SECTORS else "eigen",
-            } for s in _cur_secs]), width="stretch", hide_index=True, column_config={
-                "Activa": st.column_config.NumberColumn(
-                    format="%d", help="Hoeveel activa deze sector nu gebruiken."),
-                "Standaard": st.column_config.TextColumn(
-                    help="'ja' = een van de GICS-hoofdsectoren die de app standaard "
-                         "meelevert, 'eigen' = door jou toegevoegd."),
-            })
-
-            _unused = [s for s in _cur_secs if not _in_use.get(s)]
-            if _unused:
-                dc1, dc2 = st.columns([3, 1])
-                _del = dc1.multiselect("Uit de lijst halen (enkel ongebruikte rubrieken)",
-                                       _unused, key="sec_del_sel")
-                dc2.write(""); dc2.write("")
-                if dc2.button("🗑️ Verwijderen", key="sec_del_btn", width="stretch") and _del:
-                    for s in _del:
-                        db.remove_sector(s)
-                    st.success(f"✅ {len(_del)} rubriek(en) uit de keuzelijst gehaald.")
-                    st.rerun()
-                st.caption("Enkel rubrieken die aan géén enkel activum hangen kunnen weg. "
-                           "Zo kan een toewijzing nooit stilzwijgend verdwijnen doordat de "
-                           "lijst ingekort wordt.")
-
-            st.markdown("**Sectoren online ophalen**")
-            st.caption(
-                "Vraagt per activum de sector op bij Yahoo Finance (via het ticker, en anders "
-                "via de ISIN) en vertaalt die naar de rubrieken hierboven. **Bestaande "
-                "toewijzingen blijven staan**: enkel activa zónder sector worden ingevuld, "
-                "tenzij je hieronder uitdrukkelijk anders kiest. Fondsen en trackers krijgen "
-                "bij Yahoo meestal geen sector — die zet je zelf op *Gediversifieerd*.")
-            oc1, oc2 = st.columns([3, 1])
-            _overwrite = oc1.checkbox(
-                "Ook automatisch toegekende sectoren vernieuwen", key="sec_fetch_over",
-                help="Sectoren die JIJ handmatig hebt gezet blijven hoe dan ook ongemoeid — "
-                     "die overschrijven zou je eigen werk stilzwijgend ongedaan maken.")
-            oc2.write(""); oc2.write("")
-            if oc2.button("🔎 Sectoren ophalen", key="sec_fetch_btn", width="stretch"):
-                res_rows, n_set = [], 0
-                _targets = [a for a in db.get_assets()
-                            if not (a.get("sector") or "").strip()
-                            or (_overwrite and (a.get("sector_source") or "") == "auto")]
-                with st.spinner(f"Sector opzoeken voor {len(_targets)} activum/activa..."):
-                    for a in _targets:
-                        try:
-                            si = md.get_sector_info(a["ticker"], a.get("isin"))
-                        except Exception as exc:
-                            res_rows.append({"Activum": asset_label(a["ticker"]),
-                                             "Gevonden": "—", "Uitslag": f"Fout: {exc}"})
-                            continue
-                        sn = db.normalize_sector(si.get("sector"))
-                        if sn:
-                            db.set_asset_sector(a["ticker"], sn, source="auto")
-                            n_set += 1
-                            uit = f"✅ Toegekend via {si.get('bron') or 'online'}"
-                        elif a["asset_type"] == "etf":
-                            uit = ("Geen sector bij de bron — normaal voor een tracker. "
-                                   "Zet ze zelf op 'Gediversifieerd (index/fonds)'.")
-                        else:
-                            uit = "Geen sector gevonden — zelf toe te kennen in de tabel."
-                        res_rows.append({"Activum": asset_label(a["ticker"]),
-                                         "Gevonden": si.get("sector") or "—", "Uitslag": uit})
-                st.session_state["sec_fetch_result"] = res_rows
-                st.session_state["sec_fetch_msg"] = (
-                    f"Klaar — {n_set} activum/activa kregen een sector."
-                    + ("" if n_set else "  Niets gevonden: fondsen en trackers hebben bij "
-                                        "de bron meestal geen sector, die ken je zelf toe."))
-                if n_set:
-                    clear_cache()
-                st.rerun()
-            if st.session_state.get("sec_fetch_msg"):
-                st.success(st.session_state.pop("sec_fetch_msg"))
-            if st.session_state.get("sec_fetch_result"):
-                show_df(pd.DataFrame(st.session_state["sec_fetch_result"]),
-                        width="stretch", hide_index=True)
+        sc_a, sc_b = st.columns([3, 1])
+        sc_a.caption(
+            "🏭 **Domein/sector** — de kolom hierboven bepaalt het taartdiagram *Spreiding "
+            "per domein* op de portefeuillepagina. De keuzelijst zelf beheer je op "
+            "**⚙️ Instellingen → 🏭 Sectoren**: daar voeg je rubrieken toe, hernoem je ze, "
+            "en ken je sectoren in bulk toe aan meerdere activa tegelijk.")
+        sc_b.write("")
+        if sc_b.button("⚙️ Naar sectoren", key="assets_to_sectors", width="stretch"):
+            st.session_state["nav_goto"] = "⚙️ Instellingen"
+            # Zowel de sessie als de bewaarde UI-status zetten: sticky() leest de
+            # database enkel wanneer de sleutel nog NIET in de sessie zit, dus met
+            # alleen _ui_save zou je op de laatst bekeken sectie belanden. Het is
+            # veilig om de widget-key hier te zetten — de instellingenpagina (en dus
+            # haar radio) wordt in deze run niet gerenderd.
+            st.session_state["settings_section"] = "🏭 Sectoren"
+            _ui_save("settings_section", "🏭 Sectoren")
+            st.rerun()
 
         st.divider()
         bec1, bec2 = st.columns([3, 1])
@@ -3450,23 +3434,35 @@ def page_dividends():
                 notes = st.text_area("Notities (optioneel)", height=60, key=dk("s_notes"))
                 g = gross or 0.0
                 w = wh_amt or 0.0
-                st.info(f"**Netto:** {currency} {g - w:,.2f}")
+                s_fx_manual, s_fx_override = _div_fx_widget(
+                    currency, d_date, key_prefix=dk("s"), context="het dividend")
+                _fxs, _g_eur = compute_eur(g, currency, d_date, s_fx_override)
+                st.info(f"**Netto:** {currency} {g - w:,.2f}"
+                        + ("" if currency == "EUR" or _fxs is None else
+                           f"  ≈  €{(g - w) * _fxs:,.2f}  (koers {_fxs:.6g})"))
                 if st.button("✅ Dividend toevoegen", type="primary", key=dk("s_submit")):
                     if not gross or gross <= 0:
                         st.error("Vul een bruto dividend in.")
                     else:
-                        fx_rate, gross_eur = compute_eur(g, currency, d_date)
-                        _, wh_eur = compute_eur(w, currency, d_date)
-                        db.add_dividend(d_ticker, str(d_date), g, w, currency, notes or None,
-                                        fx_rate=fx_rate, gross_eur=gross_eur, withholding_eur=wh_eur,
-                                        belgian_rv_withheld=1 if w > 0 else 0, account=d_account,
-                                        details={"kind": d_kind, "net_eur": gross_eur - wh_eur})
-                        clear_cache()
-                        st.session_state["div_amt_nonce"] = dn + 1
-                        _lbl = d_ticker or "algemeen (niet gekoppeld)"
-                        st.session_state["div_added_msg"] = (
-                            f"✅ Dividend {currency} {g - w:.2f} netto voor {_lbl} op {d_account} toegevoegd!")
-                        st.rerun()
+                        fx_rate, gross_eur = compute_eur(g, currency, d_date, s_fx_override)
+                        _, wh_eur = compute_eur(w, currency, d_date, s_fx_override)
+                        if fx_rate is None:
+                            st.error("Geen wisselkoers beschikbaar voor "
+                                     f"{currency} op {d_date}. Vink '💱 Eigen wisselkoers "
+                                     "gebruiken' aan en vul de koers van je broker in — "
+                                     "zonder koers zou het EUR-bedrag fout zijn.")
+                        else:
+                            db.add_dividend(d_ticker, str(d_date), g, w, currency, notes or None,
+                                            fx_rate=fx_rate, gross_eur=gross_eur, withholding_eur=wh_eur,
+                                            belgian_rv_withheld=1 if w > 0 else 0, account=d_account,
+                                            fx_manual=s_fx_manual,
+                                            details={"kind": d_kind, "net_eur": gross_eur - wh_eur})
+                            clear_cache()
+                            st.session_state["div_amt_nonce"] = dn + 1
+                            _lbl = d_ticker or "algemeen (niet gekoppeld)"
+                            st.session_state["div_added_msg"] = (
+                                f"✅ Dividend {currency} {g - w:.2f} netto voor {_lbl} op {d_account} toegevoegd!")
+                            st.rerun()
 
             else:  # Gedetailleerd
                 a_country = (amap.get(d_ticker, {}).get("country") or "BE").upper()
@@ -3527,6 +3523,23 @@ def page_dividends():
                 D_cur = cur_box_t(r4b, "Dcur")
                 notes = st.text_area("Notities (optioneel)", height=60, key=dk("d_notes"))
 
+                # Eén eigen koers voor de hele lijn. De velden ①-④ kunnen elk een eigen
+                # munt hebben, maar in de praktijk gaat het om één vreemde munt die je
+                # broker tegen één koers omrekent; die koers geldt dan voor elk veld dat
+                # niet al in euro staat.
+                _fx_curs = sorted({c for c, v in ((A_cur, A), (B_cur, B), (C_cur, C), (D_cur, D))
+                                   if v is not None and c != "EUR"})
+                d_fx_manual, d_fx_override = 0, None
+                if _fx_curs:
+                    if len(_fx_curs) > 1:
+                        st.warning("⚠️ Je gebruikt meer dan één vreemde munt in deze keten "
+                                   f"({', '.join(_fx_curs)}). Eén eigen koers kan er maar voor "
+                                   "één gelden — voer zulke gevallen beter als aparte lijnen in, "
+                                   "of laat de marktkoersen hun werk doen.")
+                    else:
+                        d_fx_manual, d_fx_override = _div_fx_widget(
+                            _fx_curs[0], d_date, key_prefix=dk("d"), context="deze keten")
+
                 # Keten aanvullen met de tarieven (land + RV%)
                 res = tax_mod.resolve_dividend_chain(
                     A, B, C, D,
@@ -3569,10 +3582,12 @@ def page_dividends():
                          "gekozen worden.")
 
                 if st.button("✅ Dividend toevoegen", type="primary", key=dk("d_submit")):
-                    # EUR per veld (elk in zijn eigen munt op de dividenddatum)
+                    # EUR per veld (elk in zijn eigen munt op de dividenddatum). Een eigen
+                    # brokerkoers geldt enkel voor de munt waarvoor je ze ingaf.
                     def to_eur(v, cur):
                         if v is None: return None
-                        return compute_eur(v, cur, d_date)[1]
+                        _ov = d_fx_override if (d_fx_manual and cur in _fx_curs) else None
+                        return compute_eur(v, cur, d_date, _ov)[1]
                     a_eur = to_eur(rA, A_cur); b_eur = to_eur(rB, B_cur)
                     c_eur = to_eur(rC, C_cur); d_eur = to_eur(rD, D_cur)
                     gross_eur = a_eur if a_eur is not None else (c_eur if c_eur is not None else d_eur)
@@ -3592,7 +3607,8 @@ def page_dividends():
                         # Native rollup (voor weergave/compat): primair veld = ① of ③ of ④
                         prim_v, prim_cur = ((rA, A_cur) if rA is not None else
                                             (rC, C_cur) if rC is not None else (rD, D_cur))
-                        fx_prim = compute_eur(prim_v, prim_cur, d_date)[0] or 1.0
+                        _ov = d_fx_override if (d_fx_manual and prim_cur in _fx_curs) else None
+                        fx_prim = compute_eur(prim_v, prim_cur, d_date, _ov)[0] or 1.0
                         wh_native = round(wh_eur / fx_prim, 2)
                         details = {
                             "gross_before_wht": rA, "gross_before_wht_cur": A_cur if rA is not None else None,
@@ -3609,7 +3625,8 @@ def page_dividends():
                                         fx_rate=fx_prim, gross_eur=gross_eur, withholding_eur=wh_eur,
                                         foreign_wht_withheld=1 if (rB and rB > 0) else 0,
                                         belgian_rv_withheld=1 if (rRV and rRV > 0) else 0,
-                                        account=d_account, details=details)
+                                        account=d_account, details=details,
+                                        fx_manual=int(bool(_ov)))
                         clear_cache()
                         st.session_state["div_amt_nonce"] = dn + 1
                         _lbl = d_ticker or "algemeen (niet gekoppeld)"
@@ -3687,6 +3704,8 @@ def page_dividends():
                 "④ Netto":  d.get("net_received") if d.get("net_received") is not None
                             else round(d["gross_amount"] - d["withholding_tax"], 2),
                 "Munt":     d.get("net_received_cur") or d.get("gross_before_wht_cur") or d["currency"],
+                "FX-koers": round(float(d.get("fx_rate") or 1.0), 6),
+                "FX eigen": bool(d.get("fx_manual")),
                 "Cash":     CASH_LBL.get(d.get("cash_basis") or "net", "④ Netto"),
                 "Netto €":  round(_neur(d), 2),
                 "🔒 Handmatig": bool(d.get("manual_override")),
@@ -3717,6 +3736,15 @@ def page_dividends():
                 "④ Netto":       cc.NumberColumn(min_value=0.0, format="%.10g",
                                                  help="Laat leeg om automatisch te berekenen (③ × (1 − RV%))."),
                 "Munt":          cc.SelectboxColumn(options=CUR_OPTS),
+                "FX-koers":      cc.NumberColumn(
+                    format="%.10g",
+                    help="1 eenheid van de munt in EUR. Vink 'FX eigen' aan om je EIGEN "
+                         "koers (die van je broker) te bewaren; ze wordt dan nooit "
+                         "overschreven door een herberekening met de marktkoers."),
+                "FX eigen":      cc.CheckboxColumn(
+                    help="Aan = de koers hiernaast is JOUW koers en blijft voorgoed bij deze "
+                         "lijn. Pas je de koers aan, dan wordt dit vinkje automatisch gezet. "
+                         "Vink af om weer met de historische marktkoers te rekenen."),
                 "Cash":          cc.SelectboxColumn(options=list(CASH_LBL.values()),
                                                     help="Welk veld naar het cash-grootboek gaat."),
                 "Netto €":       cc.NumberColumn(disabled=True, format="%.10g"),
@@ -3740,7 +3768,8 @@ def page_dividends():
                     orig = rows[i]
                     if all(r[k] == orig[k] or (pd.isna(r[k]) and orig[k] is None)
                            for k in ("Datum", "Soort", "Rekening", "① Bruto", "② Bronbel.", "③ Na bronbel.",
-                                     "④ Netto", "Munt", "Cash", "Notities", "🔒 Handmatig")):
+                                     "④ Netto", "Munt", "Cash", "Notities", "🔒 Handmatig",
+                                     "FX-koers", "FX eigen")):
                         continue
                     nd = _date_or_none(str(r["Datum"]))
                     if nd is None:
@@ -3761,8 +3790,27 @@ def page_dividends():
                             if (kind == "dividend" and ctry != "BE") else 0.0)
                     res = tax_mod.resolve_dividend_chain(nA, nB, nC, nD, rv_rate=_rvrate, wht_rate=_wht)
                     rA, rB, rC, rD, rRV = res["a"], res["b"], res["c"], res["d"], res["rv"]
+
+                    # ── Wisselkoers ──────────────────────────────────────────
+                    # Zelf ingevulde koers (of 'FX eigen' aangevinkt) = die van je broker:
+                    # die blijft bij de lijn en wordt nooit door de marktkoers vervangen.
+                    fx_edited = not _cell_eq(r["FX-koers"], orig["FX-koers"])
+                    fx_man = int(bool(r["FX eigen"]) or fx_edited)
+                    fx_ov = None
+                    if fx_man and ncur != "EUR":
+                        try:
+                            fx_ov = float(r["FX-koers"])
+                        except (TypeError, ValueError):
+                            fx_ov = None
+                        if not fx_ov or fx_ov <= 0:
+                            problems.append(f"#{d['id']}: 'FX eigen' staat aan maar de FX-koers "
+                                            "is leeg of 0.")
+                            continue
+                    if ncur == "EUR":
+                        fx_man, fx_ov = 0, None
+
                     def _te(v):
-                        return None if v is None else compute_eur(v, ncur, nd)[1]
+                        return None if v is None else compute_eur(v, ncur, nd, fx_ov)[1]
                     a_eur, c_eur, d_eur = _te(rA), _te(rC), _te(rD)
                     gross_eur = a_eur if a_eur is not None else (c_eur if c_eur is not None else d_eur)
                     net_eur   = d_eur if d_eur is not None else c_eur
@@ -3779,12 +3827,13 @@ def page_dividends():
                         cash_eur_v = net_eur
                     wh_eur = max(0.0, gross_eur - net_eur)
                     prim_v = rA if rA is not None else (rC if rC is not None else rD)
-                    fx_prim = compute_eur(prim_v, ncur, nd)[0] or 1.0
+                    fx_prim = fx_ov or (compute_eur(prim_v, ncur, nd)[0] or 1.0)
                     db.update_dividend(
                         d["id"], date=str(nd), account=str(r["Rekening"]),
                         notes=(str(r["Notities"]) or None) if not pd.isna(r["Notities"]) else None,
                         currency=ncur, gross_amount=prim_v,
                         withholding_tax=round(wh_eur / fx_prim, 2), fx_rate=fx_prim,
+                        fx_manual=fx_man,
                         gross_eur=gross_eur, withholding_eur=wh_eur, net_eur=net_eur,
                         foreign_wht_withheld=1 if (rB and rB > 0) else 0,
                         belgian_rv_withheld=1 if (rRV and rRV > 0) else 0,
@@ -3820,7 +3869,10 @@ def page_dividends():
                    "activum **en van het jaar van het dividend**, plus de RV uit de instellingen "
                    "(inclusief EUR-bedragen en cash-boeking). Lijnen die al kloppen blijven "
                    "ongemoeid. **Handmatig gecorrigeerde lijnen (🔒) worden standaard niet "
-                   "aangeraakt** — je ziet hieronder eerst wat er precies zou wijzigen.")
+                   "aangeraakt** — je ziet hieronder eerst wat er precies zou wijzigen.  \n"
+                   "💱 **Lijnen met een eigen wisselkoers behouden jouw koers**: enkel de "
+                   "bedragen en hun EUR-tegenwaarde worden herrekend, de koers zelf blijft "
+                   "staan zoals je broker ze afrekende.")
 
         _n_manual = sum(1 for d in divs
                         if d.get("manual_override") and (d.get("kind") or "dividend") == "dividend")
@@ -3847,7 +3899,7 @@ def page_dividends():
                        + (f", waarvan **{_nman} handmatig gecorrigeerd**" if _nman else "")
                        + f". Impact op het totale netto: **{eur(_dnet)}**.")
             show_df(pd.DataFrame([{
-                "": "🔒" if c["handmatig"] else "",
+                "": ("🔒" if c["handmatig"] else "") + ("💱" if c.get("eigen_fx") else ""),
                 "ID":        c["id"],
                 "Datum":     c["datum"],
                 "Activum":   asset_label(c["ticker"], names_map),
@@ -3865,6 +3917,11 @@ def page_dividends():
                 "④ wordt":       st.column_config.NumberColumn(format="%.10g"),
                 "Δ netto €":     st.column_config.NumberColumn(format="€ %+.10g"),
             })
+            _neigen = sum(1 for c in _preview if c.get("eigen_fx"))
+            if _neigen:
+                st.caption(f"💱 **{_neigen}** lijn(en) hebben een eigen wisselkoers. Die koers "
+                           "blijft behouden; enkel de bedragen en hun EUR-tegenwaarde worden "
+                           "herrekend.")
             _conf_lbl = ("Ja, overschrijf ook mijn handmatige correcties" if (_incl and _nman)
                          else "Ja, voer deze herberekening uit")
             # Zelfde valkuil als bij de TOB: een widget-key mag niet overschreven worden
@@ -4440,7 +4497,8 @@ def page_settings():
     st.title("⚙️ Instellingen")
 
     _ssec = _section_radio("settings_section",
-        ["🔑 API-sleutel", "🏦 Rekeningen", "🧾 Meerwaardebelasting", "🏛️ TOB & bronbelasting", "🗃️ Data"])
+        ["🔑 API-sleutel", "🏦 Rekeningen", "🏭 Sectoren", "🧾 Meerwaardebelasting",
+         "🏛️ TOB & bronbelasting", "🗃️ Data"])
 
     if _ssec == "🔑 API-sleutel":
         st.subheader("OpenAI API & AI-instellingen")
@@ -4610,6 +4668,209 @@ def page_settings():
             if sel != cur_prof:
                 db.set_account_profile(acct, sel)
                 st.toast(f"Profiel '{acct}' bijgewerkt", icon="✅")
+
+    if _ssec == "🏭 Sectoren":
+        st.subheader("🏭 Domeinen / sectoren")
+        st.caption(
+            "De sector van een activum bepaalt het taartdiagram **Spreiding per domein** op "
+            "de portefeuillepagina. De app levert de elf GICS-hoofdsectoren mee, aangevuld "
+            "met *Gediversifieerd (index/fonds)* voor brede trackers en *Overige*. Die lijst "
+            "is volledig van jou: voeg toe, hernoem of gooi weg wat je niet gebruikt.")
+
+        assets_all = db.get_assets()
+        cur_secs = db.get_sectors()
+        in_use = {}
+        for a in assets_all:
+            s = (a.get("sector") or "").strip()
+            if s:
+                in_use[s] = in_use.get(s, 0) + 1
+        n_unassigned = sum(1 for a in assets_all if not (a.get("sector") or "").strip())
+
+        m1, m2, m3 = st.columns(3)
+        m1.metric("Rubrieken in de lijst", str(len(cur_secs)))
+        m2.metric("Activa met een sector", str(len(assets_all) - n_unassigned))
+        m3.metric("Nog niet toegewezen", str(n_unassigned),
+                  delta_color="off",
+                  help="Deze activa belanden samen onder 'Niet toegewezen' in het "
+                       "taartdiagram. Ken ze hieronder toe of haal ze online op.")
+
+        st.divider()
+        st.markdown("**➕ Rubriek toevoegen**")
+        ac1, ac2 = st.columns([3, 1])
+        new_sec = ac1.text_input("Naam", key="set_sec_new", label_visibility="collapsed",
+                                 placeholder="bv. Defensie, Waterstof, Infrastructuur")
+        if ac2.button("Toevoegen", key="set_sec_add", width="stretch"):
+            if not new_sec.strip():
+                st.warning("Geef eerst een naam in.")
+            elif db.add_sector(new_sec.strip()):
+                st.success(f"✅ '{new_sec.strip()}' toegevoegd.")
+                st.rerun()
+            else:
+                st.info("Die rubriek staat al in de lijst.")
+
+        st.markdown("**✏️ Rubriek hernoemen**")
+        st.caption("Hernoemt de rubriek overal in één keer: in de lijst én op elk activum "
+                   "dat ze gebruikt. Zo blijft er niets achter onder de oude naam.")
+        rc1, rc2, rc3 = st.columns([2, 2, 1])
+        _ren_from = rc1.selectbox("Van", cur_secs, key="set_sec_ren_from",
+                                  format_func=lambda s: f"{s}  ({in_use.get(s, 0)} activa)")
+        _ren_to = rc2.text_input("Naar", key="set_sec_ren_to", placeholder="nieuwe naam")
+        rc3.write("")
+        if rc3.button("Hernoemen", key="set_sec_ren_btn", width="stretch"):
+            if not _ren_to.strip():
+                st.warning("Geef een nieuwe naam in.")
+            elif _ren_to.strip() == _ren_from:
+                st.info("Oude en nieuwe naam zijn gelijk.")
+            else:
+                n_moved = db.rename_sector(_ren_from, _ren_to.strip())
+                clear_cache()
+                st.success(f"✅ '{_ren_from}' → '{_ren_to.strip()}' "
+                           f"({n_moved} activum/activa mee omgezet).")
+                st.rerun()
+
+        st.markdown("**📋 De volledige lijst**")
+        show_df(pd.DataFrame([{
+            "Sector": s,
+            "Activa": in_use.get(s, 0),
+            "Herkomst": "standaard" if s in db.DEFAULT_SECTORS else "eigen",
+        } for s in cur_secs]), width="stretch", hide_index=True, column_config={
+            "Activa": st.column_config.NumberColumn(
+                format="%d", help="Hoeveel activa deze rubriek nu gebruiken."),
+            "Herkomst": st.column_config.TextColumn(
+                help="'standaard' = een van de rubrieken die de app meelevert, "
+                     "'eigen' = door jou toegevoegd."),
+        })
+
+        _unused = [s for s in cur_secs if not in_use.get(s)]
+        if _unused:
+            dc1, dc2 = st.columns([3, 1])
+            _del = dc1.multiselect("Verwijderen (enkel ongebruikte rubrieken)", _unused,
+                                   key="set_sec_del")
+            dc2.write("")
+            if dc2.button("🗑️ Verwijderen", key="set_sec_del_btn", width="stretch") and _del:
+                for s in _del:
+                    db.remove_sector(s)
+                st.success(f"✅ {len(_del)} rubriek(en) verwijderd.")
+                st.rerun()
+            st.caption("Enkel rubrieken die aan géén enkel activum hangen kunnen weg. Wil je "
+                       "een rubriek in gebruik toch kwijt, hernoem ze dan eerst of wijs de "
+                       "activa hieronder aan een andere rubriek toe.")
+        else:
+            st.caption("Alle rubrieken zijn in gebruik — er valt niets te verwijderen.")
+
+        st.divider()
+        st.markdown("**🗂️ Sectoren toewijzen aan je activa**")
+        st.caption("Wijzig de kolom *Sector* en klik op opslaan. Sneller dan activum per "
+                   "activum via de Activa-pagina, en je ziet in één oogopslag welke nog "
+                   "leeg staan.")
+        SEC_EMPTY = "—"
+        _sopts = [SEC_EMPTY] + cur_secs
+        only_empty = st.checkbox("Toon enkel activa zonder sector", key="set_sec_only_empty",
+                                 value=bool(n_unassigned))
+        _rows_a = [a for a in assets_all
+                   if not only_empty or not (a.get("sector") or "").strip()]
+        if not _rows_a:
+            st.success("✅ Elk activum heeft een sector.")
+        else:
+            _srows = []
+            for a in _rows_a:
+                _s = (a.get("sector") or "").strip() or SEC_EMPTY
+                if _s not in _sopts:
+                    _sopts.append(_s)
+                _srows.append({
+                    "Ticker": a["ticker"],
+                    "Naam":   (a.get("name") or a["ticker"])[:32],
+                    "Type":   {"stock": "Aandeel", "etf": "ETF",
+                               "bond": "Obligatie"}.get(a["asset_type"], a["asset_type"]),
+                    "Sector": _s,
+                    "Bron":   {"auto": "automatisch", "manual": "door jou"}.get(
+                        a.get("sector_source") or "", ""),
+                })
+            _sed = st.data_editor(
+                pd.DataFrame(_srows), width="stretch", hide_index=True,
+                key="set_sec_editor", num_rows="fixed", column_config={
+                    "Ticker": st.column_config.TextColumn(disabled=True),
+                    "Naam":   st.column_config.TextColumn(disabled=True),
+                    "Type":   st.column_config.TextColumn(disabled=True),
+                    "Sector": st.column_config.SelectboxColumn(
+                        options=_sopts,
+                        help="'—' = nog niet toegewezen. Voor brede indextrackers kies je "
+                             "best 'Gediversifieerd (index/fonds)': die zitten in alle "
+                             "sectoren tegelijk en zouden je spreiding anders vertekenen."),
+                    "Bron":   st.column_config.TextColumn(
+                        disabled=True,
+                        help="'automatisch' = online opgehaald, 'door jou' = handmatig "
+                             "gezet. Een online ophaalronde raakt jouw toewijzingen nooit aan."),
+                })
+            if st.button("💾 Toewijzingen opslaan", type="primary", key="set_sec_save"):
+                n_upd = 0
+                for i, a in enumerate(_rows_a):
+                    new_val = str(_sed.iloc[i]["Sector"]).strip()
+                    old_val = (a.get("sector") or "").strip() or SEC_EMPTY
+                    if new_val == old_val:
+                        continue
+                    db.set_asset_sector(a["ticker"],
+                                        None if new_val == SEC_EMPTY else new_val,
+                                        source="manual")
+                    n_upd += 1
+                if n_upd:
+                    clear_cache()
+                    st.success(f"✅ {n_upd} activum/activa bijgewerkt.")
+                    st.rerun()
+                else:
+                    st.info("Geen wijzigingen gevonden.")
+
+        st.divider()
+        st.markdown("**🔎 Sectoren online ophalen**")
+        st.caption(
+            "Vraagt per activum de sector op bij Yahoo Finance — eerst via het ticker, en "
+            "anders via de ISIN, wat vaak wél lukt bij .BR-noteringen. De Engelse "
+            "sectornamen worden vertaald naar de rubrieken hierboven. Standaard worden "
+            "enkel activa **zonder** sector ingevuld; sectoren die jíj gezet hebt blijven "
+            "hoe dan ook ongemoeid. Fondsen en trackers krijgen bij de bron meestal geen "
+            "sector — dat is geen fout, die ken je zelf toe.")
+        oc1, oc2 = st.columns([3, 1])
+        _overwrite = oc1.checkbox("Ook eerder automatisch toegekende sectoren vernieuwen",
+                                  key="set_sec_over")
+        oc2.write("")
+        if oc2.button("🔎 Ophalen", key="set_sec_fetch", width="stretch"):
+            res_rows, n_set = [], 0
+            _targets = [a for a in assets_all
+                        if not (a.get("sector") or "").strip()
+                        or (_overwrite and (a.get("sector_source") or "") == "auto")]
+            with st.spinner(f"Sector opzoeken voor {len(_targets)} activum/activa..."):
+                for a in _targets:
+                    try:
+                        si = md.get_sector_info(a["ticker"], a.get("isin"))
+                    except Exception as exc:
+                        res_rows.append({"Activum": asset_label(a["ticker"]),
+                                         "Gevonden": "—", "Uitslag": f"Fout: {exc}"})
+                        continue
+                    sn = db.normalize_sector(si.get("sector"))
+                    if sn:
+                        db.set_asset_sector(a["ticker"], sn, source="auto")
+                        n_set += 1
+                        uit = f"✅ Toegekend via {si.get('bron') or 'online'}"
+                    elif a["asset_type"] == "etf":
+                        uit = ("Geen sector bij de bron — normaal voor een tracker. "
+                               "Zet ze zelf op 'Gediversifieerd (index/fonds)'.")
+                    else:
+                        uit = "Geen sector gevonden — zelf toe te kennen hierboven."
+                    res_rows.append({"Activum": asset_label(a["ticker"]),
+                                     "Gevonden": si.get("sector") or "—", "Uitslag": uit})
+            st.session_state["sec_fetch_result"] = res_rows
+            st.session_state["sec_fetch_msg"] = (
+                f"Klaar — {n_set} activum/activa kregen een sector."
+                + ("" if n_set else "  Niets gevonden: fondsen en trackers hebben bij de "
+                                    "bron meestal geen sector, die ken je zelf toe."))
+            if n_set:
+                clear_cache()
+            st.rerun()
+        if st.session_state.get("sec_fetch_msg"):
+            st.success(st.session_state.pop("sec_fetch_msg"))
+        if st.session_state.get("sec_fetch_result"):
+            show_df(pd.DataFrame(st.session_state["sec_fetch_result"]),
+                    width="stretch", hide_index=True)
 
     if _ssec == "🧾 Meerwaardebelasting":
         st.subheader("Meerwaardebelasting (opt-out stelsel)")
@@ -5612,6 +5873,134 @@ def page_status():
                "waarschuwingen.")
 
 
+# ── PAGINA: Handleiding ───────────────────────────────────────────────────────
+
+DOC_FILES = [
+    ("HANDLEIDING.md",     "📖 Handleiding",   "De volledige gebruikershandleiding"),
+    ("CHANGELOG.md",       "🧾 Wijzigingen",   "Wat er per versie veranderd is, en waarom"),
+    ("INSTALL_WINDOWS.md", "🪟 Windows",       "Installatie en gebruik op een Windows-PC"),
+    ("DOCS.md",            "🏠 Add-on",        "De korte versie die Home Assistant toont"),
+    ("README.md",          "ℹ️ Over deze app", "Korte kennismaking"),
+]
+
+# Waar een documentatiebestand kan staan. De Dockerfile kopieert de hele repo naar
+# /app, dus de mapstructuur van de repository blijft behouden: INSTALL_WINDOWS.md zit
+# in windows/, de rest in de hoofdmap. Een Windows-installatie draait vanuit dezelfde
+# boom, maar het werkpad kan de map windows/ zelf zijn — vandaar ook '..'.
+_DOC_DIRS = [".", "windows", "..", "../windows", "docs"]
+
+
+@st.cache_data(ttl=300, show_spinner=False)
+def _read_doc(fname: str) -> str | None:
+    """Lees een documentatiebestand dat bij de code hoort.
+
+    Alles komt van de schijf: geen netwerk, geen GitHub, dus ook leesbaar wanneer de
+    add-on offline draait. En omdat het bestand méé geïnstalleerd is, hoort het per
+    definitie bij de versie die je op dat moment gebruikt."""
+    try:
+        base = Path(__file__).resolve().parent
+        for d in _DOC_DIRS:
+            p = (base / d / fname).resolve()
+            if p.is_file():
+                return p.read_text(encoding="utf-8")
+        logger.info(f"_read_doc: {fname} niet gevonden onder {base}")
+        return None
+    except Exception as exc:
+        logger.warning(f"_read_doc({fname}): {exc}")
+        return None
+
+
+def _doc_chapters(text: str) -> tuple[str, list[tuple[str, str]]]:
+    """Splits een markdowntekst op de kopniveaus '## ' in (voorwoord, hoofdstukken).
+
+    Een handleiding van bijna twaalfhonderd regels in één keer renderen maakt de
+    pagina traag en onleesbaar. Per hoofdstuk tonen houdt het overzichtelijk, en de
+    zoekfunctie hieronder blijft over de volledige tekst werken.
+
+    Wat vóór het eerste '## ' staat (de documenttitel en het versienummer) komt apart
+    terug in plaats van weggegooid te worden — anders zou je in de app nergens meer
+    zien welke versie van de handleiding je leest."""
+    preamble, chapters, title, buf = [], [], None, []
+    for line in text.split("\n"):
+        if line.startswith("## ") and not line.startswith("###"):
+            if title is None:
+                preamble = buf
+            else:
+                chapters.append((title, "\n".join(buf)))
+            title, buf = line[3:].strip(), []
+        else:
+            buf.append(line)
+    if title is not None:
+        chapters.append((title, "\n".join(buf)))
+    else:
+        preamble = buf
+    return "\n".join(preamble).strip(), chapters
+
+
+def page_docs():
+    st.title("📖 Documentatie")
+    st.caption("De volledige handleiding zit in de app zelf — geen internet nodig, en ze "
+               "hoort altijd bij de versie die je draait.")
+
+    labels = [lbl for _f, lbl, _d in DOC_FILES]
+    pick = _section_radio("docs_file", labels)
+    fname, _lbl, descr = next(x for x in DOC_FILES if x[1] == pick)
+    text = _read_doc(fname)
+
+    if text is None:
+        st.warning(f"**{fname}** is niet gevonden bij de app. Het hoort meegeleverd te "
+                   "worden met de add-on; ontbreekt het, dan is de installatie "
+                   "onvolledig. Kies **Herbouwen** in Home Assistant (niet enkel "
+                   "herstarten): door de laagcaching van Docker pikt een gewone "
+                   "herstart nieuwe bestanden niet op.")
+        return
+
+    st.caption(descr)
+
+    q = st.text_input("🔎 Zoeken in dit document", key=f"docs_q_{fname}",
+                      placeholder="bv. fotomoment, TOB, sector, wisselkoers")
+    if q.strip():
+        needle = q.strip().lower()
+        hits = [(i + 1, ln) for i, ln in enumerate(text.split("\n"))
+                if needle in ln.lower() and ln.strip()]
+        if not hits:
+            st.info(f"Geen resultaat voor '{q.strip()}'.")
+        else:
+            st.success(f"**{len(hits)} regel(s)** met '{q.strip()}':")
+            for ln_no, ln in hits[:60]:
+                st.markdown(f"`{ln_no:>4}`  {ln.strip()}")
+            if len(hits) > 60:
+                st.caption(f"… en nog {len(hits) - 60} regels. Verfijn je zoekterm.")
+        st.divider()
+
+    preamble, chapters = _doc_chapters(text)
+    if preamble:
+        st.markdown(preamble)
+    if len(chapters) <= 1:
+        st.markdown(text if not preamble else
+                    (chapters[0][1] if chapters else ""))
+        return
+
+    titles = [t for t, _c in chapters]
+    ALL = "📚 Alles in één keer"
+    sel = st.selectbox("Hoofdstuk", [ALL] + titles, key=f"docs_ch_{fname}")
+    if sel == ALL:
+        st.caption("Let op: het volledige document renderen kan even duren.")
+        st.markdown(text)
+    else:
+        i = titles.index(sel)
+        st.markdown(f"## {titles[i]}\n{chapters[i][1]}")
+        nav1, nav2 = st.columns(2)
+        if i > 0:
+            nav1.caption(f"⬅️ Vorige: *{titles[i-1]}*")
+        if i < len(titles) - 1:
+            nav2.caption(f"➡️ Volgende: *{titles[i+1]}*")
+
+    st.divider()
+    st.download_button("⬇️ Dit document downloaden", text, file_name=fname,
+                       mime="text/markdown", key=f"docs_dl_{fname}")
+
+
 PAGES = {
     "📊 Dashboard":            page_dashboard,
     "💼 Portefeuille":         page_portfolio,
@@ -5625,6 +6014,7 @@ PAGES = {
     "🤖 AI Advisor":           page_ai_advisor,
     "🩺 Status":               page_status,
     "⚙️ Instellingen":         page_settings,
+    "📖 Handleiding":          page_docs,
 }
 
 with st.sidebar:

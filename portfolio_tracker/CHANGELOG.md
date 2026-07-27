@@ -2,6 +2,89 @@
 
 Alle noemenswaardige wijzigingen aan de Portfolio Tracker add-on.
 
+## 1.2.0
+Drie punten: het beheer van de sectoren verhuist naar een volwaardige plek, dividenden
+krijgen dezelfde bescherming van je eigen wisselkoers als transacties, en de
+handleiding is voortaan bereikbaar vanuit de app zelf.
+
+### Sectoren beheer je nu in de instellingen
+
+Het sectorblok stond weggestopt in een uitklapper op de Activa-pagina. Het staat nu
+onder **⚙️ Instellingen → 🏭 Sectoren**, met twee mogelijkheden die er nog niet waren.
+
+**Rubriek hernoemen.** Zet de naam in één keer om in de keuzelijst én op elk activum
+dat ze gebruikt. Zonder die knop was hernoemen een reeks losse handelingen — nieuwe
+rubriek maken, activa één voor één omzetten, oude weggooien — waarbij één vergeten
+activum al volstaat om je taartdiagram twee bijna-identieke punten te geven. Nieuw in
+`database.py`: `rename_sector()`.
+
+**Toewijzen in bulk.** Een tabel met al je activa en een vinkje *toon enkel activa
+zonder sector*, zodat je de gaten in één beweging vult in plaats van activum per
+activum. De kolom *Bron* laat zien wat online opgehaald is en wat je zelf hebt gezet.
+
+Verder: kerncijfers bovenaan (rubrieken, toegewezen, nog open), de lijst met per
+rubriek hoeveel activa ze gebruiken, verwijderen van ongebruikte rubrieken, en het
+online ophalen. Op de Activa-pagina blijft de kolom *Sector* staan voor losse
+correcties, met een knop die rechtstreeks naar de nieuwe sectie springt.
+
+### Eigen wisselkoers bij dividenden
+
+Keert een aandeel uit in een vreemde munt, dan rekent je broker om tegen zijn eigen
+koers, vaak met een wisselmarge erin verwerkt. Tot nu kon je die enkel bij transacties
+vastleggen; bij dividenden gebruikte de app altijd de historische marktkoers, en dan
+klopte het euro-bedrag niet met je afschrift.
+
+Nieuw in de database: `dividends.fx_manual`. Nieuw in de app: het blok
+**💱 Eigen wisselkoers gebruiken** in beide invoerwijzen, met de afwijking ten opzichte
+van de marktkoers erbij, en de kolommen *FX-koers* en *FX eigen* in het overzicht — de
+koers aanpassen zet het vinkje automatisch, net als bij transacties.
+
+**De herberekening past dezelfde les toe als bij de TOB in 1.1.0.** Lijnen met een
+eigen koers worden niet overgeslagen: jouw koers blijft staan, maar de bedragen en hun
+EUR-tegenwaarde worden wél opnieuw berekend. Beschermd tegen overschrijven is niet
+hetzelfde als uitgesloten van controle. Ze zijn met 💱 gemarkeerd, wat iets anders
+betekent dan de bestaande 🔒: die staat voor "de bedragen zijn van mij, blijf van deze
+lijn", 💱 enkel voor "de koers is van mij". Twee beloftes, twee symbolen.
+
+`backfill_eur()` respecteert de eigen koers ook bij een geforceerde omrekening.
+
+### De handleiding zit nu in de app
+
+**Het probleem.** In Home Assistant deed een klik op `HANDLEIDING.md` niets. HA rendert
+markdown in zijn eigen frontend, waar een relatief pad naar een ander bestand in de
+repository nergens naartoe wijst.
+
+**Nieuwe pagina 📖 Handleiding.** De volledige handleiding, de changelog, de
+Windows-installatie en de README, elk met een zoekveld over de hele tekst en een
+keuzelijst per hoofdstuk. Onderaan een downloadknop. De bestanden worden van de schijf
+naast de code gelezen — de Dockerfile kopieert ze al mee, dus er was niets extra voor
+nodig.
+
+Absolute links naar GitHub zouden het klikprobleem oplossen maar niet het echte
+probleem: een handleiding op GitHub beschrijft de nieuwste versie terwijl jij misschien
+nog een oudere draait, en ze werkt niet zonder internet. De documentatie in de app
+hoort per definitie bij de versie die je gebruikt.
+
+**Nieuw bestand `DOCS.md`** voor het Documentatie-tabblad van de add-on: een korte
+kennismaking, de installatie, de eerste stappen en de belangrijkste waarschuwingen —
+zonder links die in HA toch niet werken.
+
+**Beide README-bestanden gebruiken nu absolute GitHub-URL's.** Daarbij kwam een tweede
+fout aan het licht: de README in de repository-root linkte naar `HANDLEIDING.md` en
+`CHANGELOG.md`, maar die staan in `portfolio_tracker/`. Die links waren dus niet enkel
+in Home Assistant stuk, maar ook op GitHub zelf — ze gaven een 404.
+
+De root-README was bovendien een kopie van de add-on-README. Dat is nu een echte
+repository-readme geworden: hoe je de repository aan Home Assistant toevoegt, wat de
+add-on doet, en hoe de mappen ingedeeld zijn. De add-on-README blijft de kennismaking
+met de app zelf.
+
+De links gebruiken `/blob/HEAD/` in plaats van `/blob/main/`. HEAD wijst altijd naar
+de standaardbranch, dus ze blijven werken als die ooit hernoemd wordt — en de
+repository heeft momenteel zowel `main` als `master` met identieke inhoud.
+
+`config.yaml` kreeg een `url:`, die HA als klikbare link op de add-on-pagina toont.
+
 ## 1.1.0
 Vijf verbeteringen die elk een plek raken waar de app iets toonde dat niet
 overeenkwam met de werkelijkheid, plus een nieuwe spreidingsanalyse per sector.
