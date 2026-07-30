@@ -29,12 +29,21 @@ echo "   Scheduler PID: ${SCHEDULER_PID}"
 sleep 3
 
 # Streamlit starten
-echo "🌐 Streamlit starten op poort 8501..."
+# --------------------------------------------------------------------------
+# XSRF-bescherming staat AAN. Ze was uitgezet om het achter de reverse proxy van
+# Home Assistant zeker werkend te krijgen, maar dat verzwakt de app: zonder deze
+# bescherming kan een kwaadaardige pagina in je browser meeliften op je geopende
+# sessie. Via ingress werkt ze gewoon (de cookies lopen mee).
+# Streamlit dwingt bij XSRF=true zelf CORS terug aan; die vlag geven we dus niet
+# meer mee, anders logt het bij elke start een override-waarschuwing.
+# Loopt de bulk-import (bestandsupload) bij jou vast op een 403, zet dan tijdelijk
+# XSRF_PROTECTION=false in de add-on-omgeving — maar liefst niet permanent.
+XSRF_PROTECTION="${XSRF_PROTECTION:-true}"
+echo "🌐 Streamlit starten op poort 8501 (XSRF-bescherming: ${XSRF_PROTECTION})..."
 exec streamlit run /app/app.py \
     --server.port=8501 \
     --server.address=0.0.0.0 \
     --server.headless=true \
-    --server.enableCORS=false \
-    --server.enableXsrfProtection=false \
+    --server.enableXsrfProtection="${XSRF_PROTECTION}" \
     --server.fileWatcherType=none \
     --browser.gatherUsageStats=false

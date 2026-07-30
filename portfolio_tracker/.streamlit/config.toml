@@ -2,8 +2,11 @@
 headless          = true
 port              = 8501
 address           = "0.0.0.0"
-enableCORS        = false
-enableXsrfProtection = false
+# XSRF-bescherming AAN: zonder haar kan een kwaadaardige pagina in je browser
+# meeliften op je geopende sessie. Streamlit zet enableCORS bij XSRF=true zelf
+# terug aan, dus die vlag staat hier bewust niet meer (anders een override-
+# waarschuwing bij elke start).
+enableXsrfProtection = true
 # Geen bestandswatcher nodig in productie (bespaart resources op Pi 4)
 fileWatcherType   = "none"
 # Grotere upload limiet (voor toekomstige import-functie)

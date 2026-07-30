@@ -56,6 +56,13 @@ Docker pikt een gewone herstart de gewijzigde bestanden niet op.
 
 ## Belangrijk
 
+- **De app heeft geen eigen login.** Ze draait via ingress en zit dus achter de
+  aanmelding van Home Assistant. Er wordt bewust geen poort gepubliceerd: dat zou de
+  app rechtstreeks op je thuisnetwerk zetten, buiten die aanmelding om, en dan kan
+  iedereen op hetzelfde netwerk je portefeuille lezen én bewerken.
+- **De OpenAI-sleutel** staat standaard in `portfolio.db`, in `/share` — waar ook
+  andere add-ons bij kunnen. Wil je dat vermijden, zet dan de omgevingsvariabele
+  `OPENAI_API_KEY`: die krijgt voorrang en houdt de sleutel buiten de database.
 - **Draai nooit twee instanties tegen dezelfde database.** SQLite is niet gemaakt
   voor twee schrijvers; je riskeert gegevensverlies. Gebruik de add-on óf de
   Windows-versie, niet allebei op dezelfde databank.
@@ -67,7 +74,7 @@ Docker pikt een gewone herstart de gewijzigde bestanden niet op.
 
 ## Hulp nodig?
 
-Hoofdstuk 11.3 van de handleiding (**📖 Handleiding → 11. Onderhoud, back-up en
+Hoofdstuk 11.4 van de handleiding (**📖 Handleiding → 11. Onderhoud, back-up en
 probleemoplossing**) behandelt de veelvoorkomende situaties: een positie zonder
 koers, een TOB die niet klopt met je afschrift, een negatief cashsaldo, een AI die
 niet antwoordt, en meer.

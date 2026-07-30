@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import re
 from datetime import datetime
 
@@ -259,13 +260,26 @@ IDEAS_PER_BUCKET = 2
 
 # ── Interne hulpfuncties ──────────────────────────────────────────────────────
 
+def openai_key() -> str:
+    """De OpenAI-sleutel. De omgevingsvariabele OPENAI_API_KEY wint van de database.
+
+    Zo kan de sleutel buiten de database gehouden worden (bv. via de add-on- of
+    Windows-omgeving): hij belandt dan niet in portfolio.db, die in /share staat en
+    dus voor andere add-ons leesbaar is. Zonder omgevingsvariabele blijft de
+    instelling in de app gewoon werken."""
+    env = (os.environ.get("OPENAI_API_KEY") or "").strip()
+    if env:
+        return env
+    return (db.get_setting("openai_api_key", "") or "").strip()
+
+
 def _get_client(model_setting: str = "openai_model") -> tuple[OpenAI | None, str]:
     """Geeft (client, model) terug, of (None, '') als API-sleutel ontbreekt."""
-    key   = db.get_setting("openai_api_key", "")
+    key   = openai_key()
     model = db.get_setting(model_setting, "") or db.get_setting("openai_model", "gpt-4.1-mini")
-    if not key or not key.strip():
+    if not key:
         return None, ""
-    return OpenAI(api_key=key.strip()), model
+    return OpenAI(api_key=key), model
 
 
 def _investment_volume() -> dict:

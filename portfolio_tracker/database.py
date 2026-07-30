@@ -331,6 +331,10 @@ def _migrate(conn):
         # AANWAS van stukken (aparte gekoppelde transactie met is_stock_dividend=1).
         ("paid_in_shares",       "INTEGER DEFAULT 0"),
         ("shares_received",      "REAL"),
+        # Verwijzing naar de automatisch aangemaakte aanwastransactie. Zonder deze
+        # koppeling bleef die transactie als wees achter wanneer het dividend
+        # verwijderd werd — en zag je nergens dat de twee bij elkaar horen.
+        ("linked_txn_id",        "INTEGER"),
     ]
     new_div_cols = []
     for col, ddl in div_cols:
@@ -1387,6 +1391,12 @@ def _us_holidays(year: int) -> set:
 _US_EXCHANGES = {"NMS", "NYQ", "NGM", "NCM", "NIM", "PCX", "ASE", "BTS", "PNK",
                  "NASDAQ", "NYSE", "AMEX", "BATS", "ARCA"}
 
+# Munten die op een Europese handelskalender wijzen. GBP hoort er strikt genomen
+# niet helemaal bij (Londen heeft eigen bank holidays), maar de Europese kalender
+# ligt er veel dichter bij dan de Amerikaanse — en bij twijfel is EU de veilige
+# keuze: dan wordt er hooguit één dag te weinig als sluitingsdag gezien.
+_EU_CURRENCIES = {"EUR", "GBP", "GBX", "CHF", "SEK", "NOK", "DKK", "PLN", "CZK"}
+
 
 def market_of(asset: dict | None, ticker: str = "") -> str:
     """'US' of 'EU' — welke beurskalender geldt voor dit activum?
@@ -1399,13 +1409,24 @@ def market_of(asset: dict | None, ticker: str = "") -> str:
     a = asset or {}
     tk = (ticker or a.get("ticker") or "").upper()
     exch = (a.get("exchange") or "").strip().upper()
+    cur = (a.get("currency") or "").strip().upper()
     if exch in _US_EXCHANGES:
         return "US"
     if "." in tk:
         return "EU"                       # .AS/.BR/.PA/.DE/.L/... = Europese notering
-    if (a.get("currency") or "").upper() == "USD":
+    if cur == "USD":
         return "US"
-    return "US" if tk and "." not in tk and not exch else "EU"
+    # Een Europese munt is hard bewijs: dan geldt de Europese kalender, ook zonder
+    # beurssuffix of ingevulde beurs. Dat is precies het geval bij effecten die geen
+    # Yahoo-ticker hebben en dus onder een zelfgekozen naam staan (werkgeversfondsen/
+    # FCPE, warrants, niet-genoteerde stukken). Zonder deze regel belandden die op de
+    # Amerikaanse kalender: vals alarm 'geen koersbeweging' op 1 mei of Paasmaandag,
+    # en een echt stilstaande koers die op Thanksgiving ten onrechte werd weggelaten.
+    if cur in _EU_CURRENCIES:
+        return "EU"
+    # Geen munt, geen beurs, geen suffix: een kale ticker als AAPL of MSFT is dan de
+    # meest waarschijnlijke lezing.
+    return "US" if tk and not exch else "EU"
 
 
 def market_closed_reason(d, market: str = "EU") -> str | None:
@@ -1607,7 +1628,14 @@ def run_status_checks(online: bool = True, tickers: list[str] | None = None) -> 
             summary["resolved"] += resolve_status_event(t, "flat_price")
 
         # Netwerk-checks
-        if online and md is not None:
+        # Sla activa over die per definitie geen publieke notering hebben: een
+        # AFGELEIDE koers (werkgeversfonds/FCPE — de waarde komt van het onderliggende
+        # activum, dat zelf gewoon gecontroleerd wordt) en 'enkel handmatig'. Voor die
+        # ISIN's is elke bron bij voorbaat blind, dus zouden de checks enkel netwerk-
+        # calls en logruis opleveren — en erger: een 'ticker_change'- of
+        # 'name_change'-melding op basis van een toevallige naamgelijkenis.
+        _derived = (a.get("pricing_mode") or "auto") == "derived" and a.get("underlying_ticker")
+        if online and md is not None and not _derived and not a.get("manual_only"):
             try:
                 probe = md.asset_status_probe(a, online=True)
             except Exception as e:
@@ -1642,6 +1670,12 @@ def run_status_checks(online: bool = True, tickers: list[str] | None = None) -> 
                         summary["new"] += 1
                 else:
                     summary["resolved"] += resolve_status_event(t, "split")
+        elif online:
+            # Overgeslagen (afgeleid of enkel-handmatig): eerdere netwerkmeldingen
+            # sluiten. Anders bleef een oude 'tickerwijziging' eeuwig open staan voor
+            # een activum dat niet meer online gecontroleerd wordt.
+            for kind in ("ticker_change", "name_change", "split"):
+                summary["resolved"] += resolve_status_event(t, kind)
 
     summary["open"] = len(get_status_events())
     try:
@@ -2015,7 +2049,7 @@ def add_transaction(ticker, transaction_type, date, quantity, price_per_unit,
     if costs_eur is None:
         costs_eur = 0.0
     conn = get_connection()
-    conn.execute(
+    cur = conn.execute(
         """INSERT INTO transactions
            (ticker,transaction_type,date,quantity,price_per_unit,total_amount,
             currency,tob_tax,notes,account,costs,costs_currency,costs_eur,
@@ -2029,11 +2063,13 @@ def add_transaction(ticker, transaction_type, date, quantity, price_per_unit,
          int(fx_manual or 0), int(tob_manual or 0),
          (str(lock_until)[:10] if lock_until else None), int(is_stock_dividend or 0))
     )
+    new_id = cur.lastrowid
     conn.commit()
     conn.close()
     if price_target is not None:
         log_price_target(ticker, price_target, currency or "EUR", "manual",
                          note="via transactie", set_at=(str(date)[:10] + " 00:00:00"))
+    return new_id
 
 
 def update_transaction(txn_id: int, **fields):
@@ -2211,10 +2247,13 @@ def add_dividend(ticker, date, gross_amount, withholding_tax=0.0,
             d.get("cash_basis"), d.get("cash_eur"), d.get("kind"), int(fx_manual),
             int(d.get("paid_in_shares") or 0), d.get("shares_received")]
     conn = get_connection()
-    conn.execute(f"INSERT INTO dividends ({','.join(cols)}) VALUES ({','.join('?'*len(cols))})",
-                 vals)
+    cur = conn.execute(
+        f"INSERT INTO dividends ({','.join(cols)}) VALUES ({','.join('?'*len(cols))})",
+        vals)
+    new_id = cur.lastrowid
     conn.commit()
     conn.close()
+    return new_id
 
 
 def get_dividends(ticker=None, year=None, account=None) -> list[dict]:
@@ -2265,11 +2304,60 @@ def update_dividend(div_id: int, **fields):
     conn.close()
 
 
-def delete_dividend(div_id: int):
+def delete_dividend(div_id: int, with_linked_txn: bool = True) -> int:
+    """Verwijder een dividend. Hoort er een automatisch aangemaakte aanwastransactie
+    bij (stockdividend), dan verdwijnt die standaard mee — anders blijven er stukken
+    in je positie staan waarvan de aanleiding weg is.
+
+    Geeft het aantal mee verwijderde transacties terug (0 of 1)."""
     conn = get_connection()
+    row = conn.execute("SELECT linked_txn_id FROM dividends WHERE id=?",
+                       (div_id,)).fetchone()
+    linked = row["linked_txn_id"] if row else None
+    n = 0
+    if with_linked_txn and linked:
+        cur = conn.execute("DELETE FROM transactions WHERE id=?", (linked,))
+        n = cur.rowcount or 0
     conn.execute("DELETE FROM dividends WHERE id=?", (div_id,))
     conn.commit()
     conn.close()
+    return n
+
+
+def add_stock_dividend(txn_kwargs: dict, div_kwargs: dict) -> tuple[int, int]:
+    """Boek een stockdividend als ÉÉN geheel: de aanwastransactie en het dividend,
+    in dezelfde databasetransactie, met de koppeling erbij.
+
+    Waarom niet gewoon twee losse aanroepen: faalt de tweede, dan blijft de eerste
+    achter als wees — een aanwas van stukken zonder dividend, of omgekeerd. Hier
+    geldt alles-of-niets, en het dividend weet achteraf welke transactie erbij hoort.
+
+    Geeft (dividend_id, transactie_id) terug.
+    """
+    # De bestaande functies bouwen de kolomlijsten en de afgeleide velden op; die
+    # logica willen we niet dupliceren. We voeren ze uit binnen één verbinding door
+    # de commit van beide af te wachten en bij een fout alles terug te draaien.
+    txn_id = None
+    div_id = None
+    try:
+        txn_id = add_transaction(**txn_kwargs)
+        div_id = add_dividend(**div_kwargs)
+        conn = get_connection()
+        conn.execute("UPDATE dividends SET linked_txn_id=? WHERE id=?", (txn_id, div_id))
+        conn.commit()
+        conn.close()
+        return div_id, txn_id
+    except Exception:
+        # Opruimen wat er al stond, zodat er geen halve boeking achterblijft.
+        try:
+            if div_id is not None:
+                delete_dividend(div_id, with_linked_txn=False)
+            if txn_id is not None:
+                delete_transaction(txn_id)
+        except Exception as exc:
+            logger.error(f"add_stock_dividend: terugdraaien faalde ({exc}) — "
+                         f"controleer transactie {txn_id} en dividend {div_id} handmatig.")
+        raise
 
 
 def set_dividend_eur(div_id: int, fx_rate: float, gross_eur: float,

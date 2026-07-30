@@ -67,6 +67,13 @@ if "%BIND_ADDRESS%"=="0.0.0.0" set "OPEN_HOST=localhost"
 start "" "http://%OPEN_HOST%:%APP_PORT%"
 :geen_browser
 
+rem --- Streamlit-configuratie actief maken -------------------------------------
+rem  Streamlit leest zijn instellingen (thema, uploadlimiet, XSRF) alleen uit
+rem  .streamlit\config.toml. Het bestand staat in de repowortel; hier zetten we
+rem  het op de plek waar Streamlit effectief kijkt.
+if not exist ".streamlit" mkdir ".streamlit"
+if exist "config.toml" copy /y "config.toml" ".streamlit\config.toml" >nul
+
 rem --- Streamlit op de voorgrond ---------------------------------------------
 echo.
 echo Streamlit draait op http://%BIND_ADDRESS%:%APP_PORT%

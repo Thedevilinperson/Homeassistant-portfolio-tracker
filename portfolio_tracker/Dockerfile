@@ -25,6 +25,12 @@ RUN pip install --no-cache-dir -r requirements.txt
 # Alle applicatiebestanden kopiëren
 COPY . .
 
+# Streamlit leest zijn configuratie ALLEEN uit .streamlit/config.toml (naast de
+# CLI-vlaggen). Het bestand stond in de repowortel en werd daardoor stilzwijgend
+# genegeerd — inclusief het donkere thema, dat de eigen CSS van de app wél
+# veronderstelt. Deze kopie maakt het effectief.
+RUN mkdir -p /app/.streamlit && cp /app/config.toml /app/.streamlit/config.toml
+
 # Omgevingsvariabelen
 ENV DATA_DIR=/share/portfolio_tracker \
     TZ=Europe/Brussels \

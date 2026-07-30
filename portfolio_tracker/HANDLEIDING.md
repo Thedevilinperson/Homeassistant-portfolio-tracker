@@ -1,6 +1,6 @@
 # Portfolio Tracker - Handleiding
 
-Versie 1.3.0
+Versie 1.3.1
 
 ---
 
@@ -1203,7 +1203,32 @@ geen kalender nodig en dekt automatisch elke sluiting die niemand voorzien had.
 
 ## 11. Onderhoud, back-up en probleemoplossing
 
-### 11.1 Back-up
+### 11.1 Toegang en veiligheid
+
+De app heeft **geen eigen login**. Wie de pagina kan openen, kan alles zien en wijzigen.
+Dat is een bewuste keuze — het is een persoonlijk instrument op je eigen hardware — maar
+het betekent dat de toegang van buitenaf geregeld moet zijn.
+
+**Home Assistant.** De add-on draait via *ingress*: je opent hem vanuit het HA-paneel en
+je bent dus al aangemeld bij Home Assistant. Er wordt bewust **geen poort gepubliceerd**.
+Een `ports:`-blok in `config.yaml` zou de app rechtstreeks op je thuisnetwerk zetten,
+buiten die aanmelding om — dan kan iedereen op hetzelfde netwerk je portefeuille lezen
+en bewerken. Voeg zo'n poort alleen toe als je precies weet waarom, en zet er dan zelf
+iets voor.
+
+**Windows.** `config.bat` zet `BIND_ADDRESS` standaard op `127.0.0.1`: alleen bereikbaar
+op die PC. Zet je dat op `0.0.0.0` om vanaf je telefoon te kijken, dan geldt hetzelfde
+voorbehoud — iedereen op je netwerk kan dan mee. Stel de app nooit rechtstreeks open op
+het internet via een poortdoorschakeling.
+
+**De OpenAI-sleutel.** Die wordt na het opslaan niet meer teruggetoond: je ziet alleen
+nog een herkenningsvorm zoals `sk-pro••••••••••••abcd`. Het invoerveld leeg laten
+betekent "ongewijzigd". Standaard staat de sleutel in `portfolio.db`, en dat bestand
+staat bij Home Assistant in `/share`, waar ook andere add-ons bij kunnen. Wil je dat
+vermijden, zet dan de omgevingsvariabele `OPENAI_API_KEY`: die krijgt voorrang en houdt
+de sleutel volledig buiten de database.
+
+### 11.2 Back-up
 
 De volledige toestand zit in `portfolio.db` in je datamap. Dat ene bestand kopiëren is
 een volledige back-up. Doe het bij voorkeur met de app gesloten; anders bestaan er ook
@@ -1220,7 +1245,7 @@ Terugzetten is het bestand terugkopiëren en de app starten. Het schema wordt bi
 opstarten automatisch bijgewerkt, dus een oudere back-up openen met een nieuwere versie
 werkt.
 
-### 11.2 Twee installaties, twee databases
+### 11.3 Twee installaties, twee databases
 
 Wil je een tweede portefeuille volledig gescheiden houden, geef die installatie dan een
 eigen datamap. Dat is de bedoelde manier om met de Windows-versie een zuivere tweede
@@ -1229,7 +1254,7 @@ portefeuille te draaien.
 Wat je niet moet doen: twee installaties op dezelfde database laten werken via een
 netwerkschijf.
 
-### 11.3 Veelvoorkomende situaties
+### 11.4 Veelvoorkomende situaties
 
 **Een positie heeft geen koers.** Kijk eerst op `🩺 Status`, gebruik dan
 `🔬 Bronnen diagnose` op de Activa-pagina. Werkt geen enkele bron, dan is een
@@ -1295,7 +1320,7 @@ Gebruik `Ververs prijzen` of Rerun in het menu rechtsboven.
 **De AI antwoordt niet.** Controleer je API-sleutel, en of het luik ingeschakeld staat
 in de instellingen. Was het antwoord afgekapt, dan meldt de app dat expliciet.
 
-### 11.4 Bijwerken
+### 11.5 Bijwerken
 
 Home Assistant: de nieuwe bestanden in de repo zetten en de add-on **herbouwen**, niet
 herstarten. Een herstart alleen gebruikt de oude Docker-laag.

@@ -1,5 +1,5 @@
 name: "Portfolio Tracker"
-version: "1.3.0"
+version: "1.3.1"
 slug: "portfolio_tracker"
 description: "Streamlit app voor aandelen, ETF's en Belgische meerwaardebelasting met AI-advies"
 ingress: true
@@ -8,8 +8,13 @@ panel: true
 icon: "mdi:chart-line"
 # Home Assistant toont deze link op de add-on-pagina.
 url: "https://github.com/Thedevilinperson/Homeassistant-portfolio-tracker"
-ports:
-  8501/tcp: 8501
+# BEWUST GEEN 'ports:'-blok. Een gepubliceerde poort (8501/tcp) zet de app
+# rechtstreeks op het LAN, BUITEN de authenticatie van Home Assistant om — de app
+# zelf heeft geen login, dus iedereen op het netwerk kon dan de portefeuille lezen
+# en bewerken. Via ingress loopt alles door de aanmelding van Home Assistant.
+# Heb je toch rechtstreekse toegang nodig (bv. voor een ander toestel), voeg de
+# poort dan zelf toe in de add-on-configuratie én zet je netwerk erop in — het is
+# een bewuste keuze, geen standaardinstelling.
 map:
   - share:rw
 arch:

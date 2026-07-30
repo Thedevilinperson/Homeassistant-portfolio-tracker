@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import sys
 from datetime import date, datetime
 from pathlib import Path
@@ -1750,7 +1751,7 @@ def page_portfolio():
         with sc2:
             if st.button("🔄 Genereer advies", key="gen_ratings",
                          help="Genereert het volledige dagelijkse portefeuilleadvies (tekst + ratings)."):
-                if not db.get_setting("openai_api_key", ""):
+                if not ai_advisor.openai_key():
                     st.warning("Geen OpenAI-sleutel — stel die in via ⚙️ Instellingen.")
                 else:
                     with st.spinner("AI beoordeelt je portefeuille..."):
@@ -2160,7 +2161,7 @@ def page_assets():
             if st.button("🤖 Bepaal via AI", key=k("ai_pt")):
                 if not ticker.strip():
                     st.warning("Vul eerst een ticker in.")
-                elif not db.get_setting("openai_api_key", ""):
+                elif not ai_advisor.openai_key():
                     st.warning("Geen OpenAI-sleutel — stel die in via ⚙️ Instellingen.")
                 else:
                     with st.spinner("AI bepaalt koersdoel..."):
@@ -2944,7 +2945,7 @@ def page_transactions():
             st.write("")
             st.write("")
             if st.button("🤖 Bepaal via AI", key="ai_pt"):
-                if not db.get_setting("openai_api_key", ""):
+                if not ai_advisor.openai_key():
                     st.warning("Geen OpenAI-sleutel — stel die in via ⚙️ Instellingen.")
                 else:
                     with st.spinner("AI bepaalt koersdoel..."):
@@ -3677,27 +3678,28 @@ def page_dividends():
                                    f"**{asset_cur} {d_shares * d_shareval:,.2f}** — "
                                    "cash-boeking: geen (aanwas van stukken).")
 
-            def _book_stock_dividend_txn(fx_override) -> bool:
-                """Boek de gekoppelde aanwastransactie (aankoop zonder cash, zonder TOB)
-                voor een stockdividend. Kostbasis = brutowaarde van de toegekende
-                stukken. Geeft False (en toont een fout) als er geen wisselkoers is —
-                NOOIT stilzwijgend naar koers 1,0 terugvallen."""
+            def _stock_txn_kwargs(fx_override):
+                """Bouw de argumenten voor de gekoppelde aanwastransactie (aankoop
+                zonder cash, zonder TOB) van een stockdividend. Kostbasis = brutowaarde
+                van de toegekende stukken. Geeft None terug (en toont een fout) als er
+                geen wisselkoers is — NOOIT stilzwijgend naar koers 1,0 terugvallen."""
                 _tot = float(d_shares) * float(d_shareval)
                 _fx, _tot_eur = compute_eur(_tot, asset_cur, d_date, fx_override)
                 if _fx is None or _tot_eur is None:
                     st.error(f"Geen wisselkoers beschikbaar voor {asset_cur} op {d_date}. "
                              "Vink '💱 Eigen wisselkoers gebruiken' aan en vul de koers in — "
                              "zonder koers zou de kostbasis van de nieuwe stukken fout zijn.")
-                    return False
-                db.add_transaction(
-                    d_ticker, "buy", str(d_date), float(d_shares), float(d_shareval),
-                    _tot, asset_cur, 0.0,
-                    "Stockdividend / kapitalisatie in aandelen (automatisch gekoppeld)",
-                    account=d_account, costs=0.0, costs_currency="EUR",
-                    fx_rate=_fx, total_amount_eur=_tot_eur, costs_eur=0.0,
-                    is_stock_dividend=1, fx_manual=int(bool(fx_override)),
-                    lock_until=(str(d_stock_lock) if d_stock_lock else None))
-                return True
+                    return None
+                return {
+                    "ticker": d_ticker, "transaction_type": "buy", "date": str(d_date),
+                    "quantity": float(d_shares), "price_per_unit": float(d_shareval),
+                    "total_amount": _tot, "currency": asset_cur, "tob_tax": 0.0,
+                    "notes": "Stockdividend / kapitalisatie in aandelen (automatisch gekoppeld)",
+                    "account": d_account, "costs": 0.0, "costs_currency": "EUR",
+                    "fx_rate": _fx, "total_amount_eur": _tot_eur, "costs_eur": 0.0,
+                    "is_stock_dividend": 1, "fx_manual": int(bool(fx_override)),
+                    "lock_until": (str(d_stock_lock) if d_stock_lock else None),
+                }
 
             mode = st.radio("Invoerwijze", ["Eenvoudig", "Gedetailleerd (bronbelasting + RV)"],
                             horizontal=True, key="div_mode")
@@ -3745,17 +3747,22 @@ def page_dividends():
                                      "zonder koers zou het EUR-bedrag fout zijn.")
                         else:
                             _details = {"kind": d_kind, "net_eur": gross_eur - wh_eur}
+                            _div_kwargs = dict(
+                                ticker=d_ticker, date=str(d_date), gross_amount=g,
+                                withholding_tax=w, currency=currency, notes=notes or None,
+                                fx_rate=fx_rate, gross_eur=gross_eur, withholding_eur=wh_eur,
+                                belgian_rv_withheld=1 if w > 0 else 0, account=d_account,
+                                fx_manual=s_fx_manual, details=_details)
                             if d_stock:
                                 _details.update({"cash_basis": "none", "cash_eur": 0.0,
                                                  "paid_in_shares": 1,
                                                  "shares_received": float(d_shares)})
-                                if not _book_stock_dividend_txn(s_fx_override):
+                                _txn_kwargs = _stock_txn_kwargs(s_fx_override)
+                                if _txn_kwargs is None:
                                     st.stop()
-                            db.add_dividend(d_ticker, str(d_date), g, w, currency, notes or None,
-                                            fx_rate=fx_rate, gross_eur=gross_eur, withholding_eur=wh_eur,
-                                            belgian_rv_withheld=1 if w > 0 else 0, account=d_account,
-                                            fx_manual=s_fx_manual,
-                                            details=_details)
+                                db.add_stock_dividend(_txn_kwargs, _div_kwargs)
+                            else:
+                                db.add_dividend(**_div_kwargs)
                             clear_cache()
                             st.session_state["div_amt_nonce"] = dn + 1
                             _lbl = d_ticker or "algemeen (niet gekoppeld)"
@@ -3948,18 +3955,24 @@ def page_dividends():
                             "cash_eur":         cash_eur_v,
                             "kind":             d_kind,
                         }
+                        _div_kwargs = dict(
+                            ticker=d_ticker, date=str(d_date), gross_amount=prim_v,
+                            withholding_tax=wh_native, currency=prim_cur, notes=notes or None,
+                            fx_rate=fx_prim, gross_eur=gross_eur, withholding_eur=wh_eur,
+                            foreign_wht_withheld=1 if (rB and rB > 0) else 0,
+                            belgian_rv_withheld=1 if (rRV and rRV > 0) else 0,
+                            account=d_account, details=details,
+                            fx_manual=int(bool(_ov)))
                         if d_stock:
                             details["paid_in_shares"] = 1
                             details["shares_received"] = float(d_shares)
                             _stk_fx_ov = d_fx_override if (d_fx_manual and asset_cur in _fx_curs) else None
-                            if not _book_stock_dividend_txn(_stk_fx_ov):
+                            _txn_kwargs = _stock_txn_kwargs(_stk_fx_ov)
+                            if _txn_kwargs is None:
                                 st.stop()
-                        db.add_dividend(d_ticker, str(d_date), prim_v, wh_native, prim_cur, notes or None,
-                                        fx_rate=fx_prim, gross_eur=gross_eur, withholding_eur=wh_eur,
-                                        foreign_wht_withheld=1 if (rB and rB > 0) else 0,
-                                        belgian_rv_withheld=1 if (rRV and rRV > 0) else 0,
-                                        account=d_account, details=details,
-                                        fx_manual=int(bool(_ov)))
+                            db.add_stock_dividend(_txn_kwargs, _div_kwargs)
+                        else:
+                            db.add_dividend(**_div_kwargs)
                         clear_cache()
                         st.session_state["div_amt_nonce"] = dn + 1
                         _lbl = d_ticker or "algemeen (niet gekoppeld)"
@@ -4284,7 +4297,13 @@ def page_dividends():
         # Verwijderen (meerdere tegelijk, met bevestiging)
         st.divider()
         del_opts = {d["id"]: f"#{d['id']} · {d['date'][:10]} · {asset_label(d['ticker'], names_map)} "
-                             f"· netto {eur(_neur(d))}" for d in divs}
+                             f"· netto {eur(_neur(d))}"
+                             + (" · 📦 met gekoppelde aanwastransactie" if d.get("linked_txn_id") else "")
+                    for d in divs}
+        if any(d.get("linked_txn_id") for d in divs):
+            st.caption("📦 Bij een stockdividend verdwijnt de automatisch aangemaakte "
+                       "aanwastransactie mee — anders blijven er stukken in je positie "
+                       "staan waarvan de aanleiding weg is.")
         multiselect_delete("confirm_del_div", del_opts,
                            lambda i: db.delete_dividend(i), noun="dividend")
 
@@ -4671,7 +4690,7 @@ def render_market_opportunities():
 def page_ai_advisor():
     st.title("🤖 AI Beleggingsadviseur")
 
-    api_key = db.get_setting("openai_api_key", "")
+    api_key = ai_advisor.openai_key()
     if not api_key:
         st.warning("⚠️ Voeg uw OpenAI API-sleutel toe in **⚙️ Instellingen** om AI-functies te gebruiken.")
         return
@@ -4729,7 +4748,7 @@ def page_ai_advisor():
             pr1.caption("Richtprijzen per model (USD per 1M tokens). Worden maandelijks automatisch "
                         "ververst." + (f" Laatste verversing: {last}." if last else ""))
             if pr2.button("💲 Ververs nu", key="refresh_prices"):
-                if not db.get_setting("openai_api_key", ""):
+                if not ai_advisor.openai_key():
                     st.warning("Geen OpenAI-sleutel — stel die in via ⚙️ Instellingen.")
                 else:
                     with st.spinner("Actuele modelprijzen opzoeken via AI..."):
@@ -4849,8 +4868,44 @@ def page_settings():
     if _ssec == "🔑 API-sleutel":
         st.subheader("OpenAI API & AI-instellingen")
         current = db.get_setting("openai_api_key", "")
-        new_key = st.text_input("API-sleutel", value=current, type="password",
-                                help="Beschikbaar via platform.openai.com/api-keys")
+        _env_key = (os.environ.get("OPENAI_API_KEY") or "").strip()
+        if _env_key:
+            st.info("🔐 Er staat een sleutel in de omgevingsvariabele **OPENAI_API_KEY**. "
+                    "Die heeft voorrang op wat hier is opgeslagen — en is veiliger, want ze "
+                    "belandt niet in `portfolio.db` (dat bestand staat in `/share` en is "
+                    "voor andere add-ons leesbaar).")
+        # De opgeslagen sleutel wordt NOOIT als waarde in het invoerveld gezet.
+        # 'type=password' maskeert enkel visueel: de echte waarde reist mee naar de
+        # browser en staat daar gewoon in de paginastatus. Wie het scherm kan openen,
+        # kan de sleutel dan kopiëren. We tonen daarom alleen een herkenningsvorm
+        # (eerste en laatste tekens) en laten het veld leeg; leeg laten = ongewijzigd.
+        def _mask(k: str) -> str:
+            k = (k or "").strip()
+            if len(k) <= 12:
+                return "•" * len(k)
+            return f"{k[:6]}{'•' * 12}{k[-4:]}"
+
+        if current:
+            kc1, kc2 = st.columns([3, 1])
+            kc1.success(f"✅ API-sleutel geconfigureerd: `{_mask(current)}`")
+            with kc2:
+                st.write("")
+                if st.button("🗑️ Verwijderen", key="api_key_clear",
+                             help="Wist de sleutel uit de database. De AI-functies vallen "
+                                  "dan stil tot je een nieuwe invult."):
+                    db.set_setting("openai_api_key", "")
+                    st.success("✅ API-sleutel verwijderd.")
+                    st.rerun()
+        else:
+            st.warning("⚠️ Geen API-sleutel — AI-functies niet beschikbaar.")
+
+        new_key = st.text_input(
+            "Nieuwe API-sleutel" if current else "API-sleutel", value="", type="password",
+            key="api_key_input",
+            help="Beschikbaar via platform.openai.com/api-keys. "
+                 + ("Laat leeg om de bestaande sleutel te behouden — ze wordt om "
+                    "veiligheidsredenen niet in dit veld getoond."
+                    if current else "Wordt opgeslagen in je eigen database."))
 
         model_keys = list(ai_advisor.AVAILABLE_MODELS.keys())
         def _model_idx(setting, default):
@@ -4965,7 +5020,12 @@ def page_settings():
                                      "ondersteunt.")
 
         if st.button("💾 Opslaan", key="save_api"):
-            db.set_setting("openai_api_key", new_key.strip())
+            # Leeg veld = sleutel ongewijzigd laten. Zou hier onvoorwaardelijk
+            # weggeschreven worden, dan wiste elke wijziging aan een modelkeuze
+            # stilzwijgend je sleutel.
+            _k = (new_key or "").strip()
+            if _k:
+                db.set_setting("openai_api_key", _k)
             db.set_setting("openai_model", model)
             db.set_setting("openai_market_model", mk_model)
             db.set_setting("openai_price_target_model", pt_model)
@@ -4976,11 +5036,10 @@ def page_settings():
             db.set_setting("ai_enable_daily", "1" if enable_daily else "0")
             db.set_setting("ai_enable_market", "1" if enable_market else "0")
             db.set_setting("ai_market_websearch", "1" if enable_ws else "0")
-            st.success("✅ Instellingen opgeslagen!")
-        if current:
-            st.success("✅ API-sleutel is geconfigureerd.")
-        else:
-            st.warning("⚠️ Geen API-sleutel — AI-functies niet beschikbaar.")
+            st.success("✅ Instellingen opgeslagen!"
+                       + (" Nieuwe API-sleutel bewaard." if _k else ""))
+            if _k:
+                st.rerun()
 
     if _ssec == "🏦 Rekeningen":
         st.subheader("Rekeningen / oorsprong")

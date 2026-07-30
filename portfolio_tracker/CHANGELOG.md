@@ -2,6 +2,84 @@
 
 Alle noemenswaardige wijzigingen aan de Portfolio Tracker add-on.
 
+## 1.3.1
+Een beveiligingsronde plus vier correcties die uit een volledige doorlichting van de
+codebase kwamen. **Lees het eerste punt: het raakt iedereen die de add-on draait.**
+
+### 🔴 De app hing onbeveiligd aan je thuisnetwerk
+
+`config.yaml` publiceerde poort 8501 rechtstreeks op de host:
+
+```yaml
+ports:
+  8501/tcp: 8501
+```
+
+Daardoor was de app bereikbaar op `http://<ip-van-je-server>:8501`, **buiten de
+aanmelding van Home Assistant om**. De app zelf heeft geen login, dus iedereen op
+hetzelfde netwerk — een gast op de wifi, een slecht beveiligd IoT-apparaat — kon de
+volledige portefeuille lezen én bewerken. Het `ports`-blok is verwijderd; de app loopt
+nu uitsluitend via ingress, dat wél achter de authenticatie van Home Assistant zit.
+Wie bewust rechtstreekse toegang wil, voegt de poort zelf toe in de
+add-on-configuratie.
+
+Daarbij hoorde ook `--server.enableXsrfProtection=false`. Zonder die bescherming kan
+een kwaadaardige pagina in je browser meeliften op je geopende sessie. Ze staat nu
+aan, in `run.sh` én `config.toml`. Loopt de bulk-import daardoor vast op een
+403-fout, dan kan je ze tijdelijk terugzetten met de omgevingsvariabele
+`XSRF_PROTECTION=false` — liefst niet permanent.
+
+### 🔴 De OpenAI-sleutel was uitleesbaar in de browser
+
+Het invoerveld kreeg de opgeslagen sleutel als beginwaarde mee. `type="password"`
+maskeert enkel visueel: de echte waarde reisde mee naar de browser en stond daar
+gewoon in de paginastatus, klaar om gekopieerd te worden. Het veld start nu leeg
+(leeg laten = sleutel ongewijzigd); je ziet alleen nog een herkenningsvorm
+(`sk-pro••••••••••••abcd`), met een aparte knop om de sleutel te wissen.
+
+Nieuw is ook `OPENAI_API_KEY` als omgevingsvariabele. Die krijgt voorrang op de
+instelling in de app, waardoor de sleutel helemaal buiten `portfolio.db` kan blijven —
+dat bestand staat in `/share` en is voor andere add-ons leesbaar. De instellingenpagina
+zegt het wanneer de variabele actief is.
+
+### Verkeerde beurskalender voor effecten zonder beurssuffix
+
+`market_of()` gaf **US** terug voor elke ticker zonder punt en zonder ingevulde beurs,
+óók bij een EUR-notering. Alles wat je zelf een naam gaf — werkgeversfondsen, warrants,
+niet-genoteerde stukken — werd dus tegen de kalender van de NYSE gehouden. Gevolg:
+een vals *geen koersbeweging*-alarm op 1 mei en Paasmaandag, en een echt stilstaande
+koers die op Thanksgiving ten onrechte werd weggemasseerd. Een Europese munt (EUR,
+GBP, CHF, SEK, NOK, DKK, PLN, CZK) telt nu als bewijs voor de Europese kalender; een
+kale ticker zonder munt en zonder beurs blijft US, want dat is dan de waarschijnlijkste
+lezing.
+
+### Statuscontrole bevroeg activa die per definitie nergens noteren
+
+De dagelijkse controle van 22:45 deed een volledige online probe voor élke open
+positie, ook voor activa met een **afgeleide koers** of op **enkel handmatig**. Voor
+zulke ISIN's is elke bron bij voorbaat blind: dat leverde alleen netwerkcalls en
+logruis op, met het risico op een valse *tickerwijziging* uit een toevallige
+naamgelijkenis. Die activa worden nu overgeslagen (het onderliggende activum wordt wél
+gewoon gecontroleerd), en eerder geopende netwerkmeldingen worden netjes gesloten.
+
+### Stockdividend en aanwastransactie horen nu echt bij elkaar
+
+De aanwastransactie van een stockdividend werd los geboekt: verwijderde je het
+dividend, dan bleven de stukken in je positie staan zonder aanleiding, en faalde de
+tweede helft van de boeking, dan bleef de eerste als wees achter. Nieuwe kolom
+`linked_txn_id` op `dividends` en een nieuwe functie `add_stock_dividend()` die beide
+helften als één geheel boekt, met terugdraaien bij een fout. Verwijder je het dividend,
+dan verdwijnt de gekoppelde transactie mee — de verwijderlijst zegt dat er ook op.
+
+### Overige
+
+- `config.toml` werd stilzwijgend genegeerd: Streamlit leest die alleen uit
+  `.streamlit/config.toml`, en het bestand stond in de repowortel. De Dockerfile en
+  `start.bat` zetten het nu op de juiste plek, waardoor het donkere thema en de
+  uploadlimiet effectief worden. **Let op:** het uiterlijk kan hierdoor voor het eerst
+  wijzigen (donker thema) — dat is de instelling die al die tijd bedoeld was.
+- `add_transaction()` en `add_dividend()` geven voortaan het nieuwe ID terug.
+
 ## 1.3.0
 Werkgeversfondsen (FCPE, zoals de Amundi/ENGIE Link-fondsen) worden nu volwaardig
 ondersteund via drie nieuwe bouwstenen: afgeleide koersen, stockdividenden en
