@@ -430,6 +430,9 @@ def _fifo_core(transactions: list[dict], snapshots: dict | None = None):
                 "price_per_unit":     price_eur,   # EUR
                 "total_cost":         eur_total,
                 "currency":           "EUR",
+                # Blokkering (bv. werkgeversplan/FCPE): dit lot is pas VANAF deze
+                # datum vrij verhandelbaar. None/leeg = nooit geblokkeerd.
+                "lock_until":         txn.get("lock_until"),
             })
             pos["total_quantity"] += qty
             pos["total_cost"]     += eur_total
@@ -508,6 +511,47 @@ def build_fifo_positions_by_account(transactions: list[dict]) -> dict:
     for (ticker, acct), pos in pos_by_key.items():
         out.setdefault(acct, {})[ticker] = pos
     return out
+
+
+def locked_summary(transactions: list[dict], on_date: str | None = None) -> dict:
+    """Geblokkeerd (nog niet vrij verhandelbaar) deel van de OPEN posities.
+
+    Een lot met een lock_until-datum is geblokkeerd zolang die datum in de toekomst
+    ligt: 'vrij vanaf'-semantiek, dus op de dag zelf is het lot al vrij. De blokkering
+    volgt de resterende FIFO-hoeveelheid van het lot: verkoop je (van een vrij lot)
+    stukken, dan verandert dat niets aan wat elders nog vastzit.
+
+    In de praktijk (werkgeversplannen zoals FCPE) lopen FIFO-volgorde en
+    deblokkeringsvolgorde gelijk: de oudste toekenningen komen het eerst vrij. De
+    FIFO-verwerking zelf blijft dan ook ongewijzigd — dit is een RAPPORTERING, geen
+    verkoopbeperking (de app detecteert en toont, ze blokkeert niet; zie ook de
+    waarschuwing in het verkoopformulier).
+
+    Returns: {"by_key": {(ticker, account): {"locked_qty", "next_unlock"}},
+              "by_ticker": {ticker: {"locked_qty", "next_unlock"}}}
+    Enkel posities met effectief geblokkeerde stukken komen in het resultaat voor.
+    """
+    from datetime import date as _date
+    on = (str(on_date)[:10] if on_date else _date.today().isoformat())
+    pos_by_key, _, _ = _fifo_core(transactions)
+    by_key: dict[tuple, dict] = {}
+    by_ticker: dict[str, dict] = {}
+    for (tk, acct), pos in pos_by_key.items():
+        locked, nxt = 0.0, None
+        for lot in pos["lots"]:
+            rem = float(lot.get("remaining_quantity") or 0.0)
+            lu  = (lot.get("lock_until") or "")[:10]
+            if rem > 1e-9 and lu and lu > on:
+                locked += rem
+                if nxt is None or lu < nxt:
+                    nxt = lu
+        if locked > 1e-9:
+            by_key[(tk, acct)] = {"locked_qty": locked, "next_unlock": nxt}
+            agg = by_ticker.setdefault(tk, {"locked_qty": 0.0, "next_unlock": None})
+            agg["locked_qty"] += locked
+            if nxt and (agg["next_unlock"] is None or nxt < agg["next_unlock"]):
+                agg["next_unlock"] = nxt
+    return {"by_key": by_key, "by_ticker": by_ticker}
 
 
 def total_costs_eur(transactions: list[dict]) -> float:

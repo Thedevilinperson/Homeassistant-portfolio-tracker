@@ -53,6 +53,7 @@ INSTRUCTIONS = [
     ("Transacties", "koersdoel", "nee", "Optioneel koersdoel (native munt)"),
     ("Transacties", "performance_share", "nee", "ja/nee — toekenning i.p.v. aankoop (geen TOB)"),
     ("Transacties", "personenbelasting_eur", "nee", "Enkel bij performance_share: betaalde belasting in EUR"),
+    ("Transacties", "vrij_vanaf", "nee", "JJJJ-MM-DD — geblokkeerd lot (bv. werkgeversplan/FCPE), pas vanaf deze datum vrij verhandelbaar"),
     ("Transacties", "naam/activumtype/etf_type/be_genoteerd/land", "nee",
      "Enkel gebruikt om een NIEUW activum aan te maken (type=stock/etf/bond, etf_type=distributing/accumulating, be_genoteerd=ja/nee, land=2-letterige code bv. US)"),
     ("Dividenden", "ticker / datum", "ja", "Zoals bij transacties"),
@@ -213,6 +214,8 @@ def parse_workbook(file) -> dict:
                 "price_target": _f(row.get("koersdoel")),
                 "performance_share": perf,
                 "income_tax_eur": _f(row.get("personenbelasting_eur")) or 0.0,
+                # Blokkering (werkgeversplan/FCPE): pas vanaf deze datum vrij verhandelbaar
+                "lock_until": _date(row.get("vrij_vanaf")),
             }
             result["transacties"].append(rec)
             if tk not in known and tk not in result["new_assets"]:
@@ -352,7 +355,7 @@ def apply_import(parsed: dict) -> dict:
                            price_target=r["price_target"],
                            is_performance_share=int(r["performance_share"]),
                            income_tax_eur=r["income_tax_eur"],
-                           fx_manual=fx_manual)
+                           fx_manual=fx_manual, lock_until=r.get("lock_until"))
         summary["transacties"] += 1
 
     # 3) Dividenden (keten aanvullen met tarieven, EUR via fx)

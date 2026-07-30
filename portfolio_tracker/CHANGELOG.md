@@ -2,6 +2,90 @@
 
 Alle noemenswaardige wijzigingen aan de Portfolio Tracker add-on.
 
+## 1.3.0
+Werkgeversfondsen (FCPE, zoals de Amundi/ENGIE Link-fondsen) worden nu volwaardig
+ondersteund via drie nieuwe bouwstenen: afgeleide koersen, stockdividenden en
+blokkeringsperiodes.
+
+### Afgeleide koers: waarde volgt een onderliggend activum
+
+FCPE-fondsen (QS-ISIN's) noteren nergens publiek — geen enkele koersbron kent ze, en
+Amundi publiceert de VL enkel achter een JavaScript-gedreven pagina. Scrapen zou
+fragiel zijn én overbodig: voor 1:1-fondsen zoals Link Classic/Liberty is de koers
+per definitie die van het ENGIE-aandeel, dat de app al perfect ophaalt.
+
+Een activum kan daarom gekoppeld worden aan een **onderliggende waarde** (nieuwe
+uitklapper **🧮 Afgeleide koers** op de Activa-pagina, sectie Overzicht):
+
+    koers = basis + multiplicator × (koers onderliggend − referentiekoers)
+
+optioneel met een **ondergrens** op de basis (kapitaalgarantie van hefboomfondsen
+zoals Link Multiple). 1:1-fonds: basis 0, multiplicator 1, referentie 0.
+
+- `get_current_price`, `get_close_on_date` (fotomoment 31/12/2025!) en
+  `get_market_state` volgen automatisch de onderliggende waarde. De koershistoriek
+  (dagresultaat) loopt gewoon mee via de scheduler.
+- De hele bronnenketen wordt voor zo'n activum overgeslagen: geen nutteloze
+  netwerkcalls, geen logruis, en de **faalteller loopt nooit op** — een falende
+  onderliggende koers blijft een fout van het onderliggende activum, met zijn eigen
+  teller en log.
+- Ketens van afgeleide activa mogen, maar stoppen na 3 stappen — dat vangt ook
+  circulaire verwijzingen af (getest).
+- Laatste redmiddel blijft de handmatige koers; er is géén stille terugval.
+- Nieuw in `database.py`: `set_derived_pricing()`, `clear_derived_pricing()`,
+  `get_derived_pricing()`; nieuw in `market_data.py`: `derived_value()`.
+
+### Stockdividend: kapitalisatie uitgekeerd in aandelen
+
+Nieuwe optie **📦 Uitgekeerd in aandelen** in het dividendformulier (beide
+invoerwijzen): aantal toegekende stukken × waarde per stuk voedt de volledige
+fiscale keten (bronbelasting, RV, €833-vrijstelling) zoals elk dividend, maar:
+
+- **Cash-boeking = geen** (nieuw cash_basis-type `none`): er beweegt niets in het
+  cash-grootboek, ook niet na een herberekening. Beide herberekenpaden zijn expliciet
+  beveiligd tegen de valkuil dat 0,0 'falsy' is en stilzwijgend door het netto
+  vervangen zou worden.
+- Tegelijk wordt automatisch een **gekoppelde aanwastransactie** geboekt
+  (`is_stock_dividend=1`): brutowaarde als kostbasis, geen cash-effect, geen TOB,
+  optioneel meteen geblokkeerd (zie hieronder). In het cash-grootboek verschijnt ze
+  als 'Stockdividend' à €0, analoog aan toekenningen.
+- De vlag staat bewust los van `is_performance_share`, zodat de
+  vesting-zienswijzen (personenbelasting als kost/investering) er niet door
+  vervuild raken.
+- Zonder wisselkoers wordt de boeking geweigerd — nooit stilzwijgend koers 1,0.
+- In de dividendtabel toont de Cash-kolom '📦 In aandelen (geen cash)'.
+
+### Blokkering: vrij vs. niet vrij verhandelbaar kapitaal
+
+Aankooploten kunnen een **'vrij vanaf'-datum** krijgen (op de datum zelf al vrij):
+
+- In het transactieformulier (vinkje '🔒 (Nog) niet vrij verhandelbaar'), in de
+  inline-transactietabel (nieuwe kolom **Vrij vanaf**, JJJJ-MM-DD of leeg) en in de
+  bulk-import (nieuwe optionele kolom `vrij_vanaf`).
+- De blokkering reist mee met de FIFO-loten (`lock_until` in `_fifo_core`); nieuw in
+  `belgian_tax.py`: `locked_summary()` — het geblokkeerde restant per positie, met de
+  eerstvolgende deblokkeringsdatum.
+- De **portefeuillepagina** toont per positie de kolommen Vrij / 🔒 Geblokkeerd /
+  🔓 Vrij vanaf (enkel als er effectief iets geblokkeerd is) plus het geblokkeerde
+  en vrij beschikbare kapitaal onder de totalen. Het **dashboard** toont het
+  geblokkeerde totaal naast de beschikbare cash.
+- Het **verkoopformulier waarschuwt** (maar blokkeert niet — detectie zonder
+  automatische toepassing) wanneer een verkoop aan geblokkeerde stukken zou raken:
+  in de praktijk wijst dat op een vergeten of verouderde 'vrij vanaf'-datum.
+- FIFO zelf blijft ongewijzigd: bij werkgeversplannen komen de oudste toekenningen
+  het eerst vrij, dus FIFO-volgorde en deblokkeringsvolgorde lopen gelijk.
+
+### Migraties (automatisch, idempotent)
+
+`assets`: `pricing_mode`, `underlying_ticker`, `derived_multiplier`, `derived_base`,
+`derived_ref_price`, `derived_floor`. `transactions`: `lock_until`,
+`is_stock_dividend`. `dividends`: `paid_in_shares`, `shares_received`.
+
+Alles functioneel getest tegen een echte SQLite-database (afgeleide koersen incl.
+hefboom/ondergrens/circulaire keten, blokkering incl. FIFO-verkoop en deblokkering,
+stockdividend incl. cash-invariantie) en de gewijzigde pagina's gerenderd via
+Streamlit AppTest, inclusief de nieuwe vinkjes aangevinkt.
+
 ## 1.2.0
 Drie punten: het beheer van de sectoren verhuist naar een volwaardige plek, dividenden
 krijgen dezelfde bescherming van je eigen wisselkoers als transacties, en de

@@ -31,6 +31,38 @@ def _store(ticker: str, price: float, currency: str):
     _CACHE[ticker] = (time.time(), price, currency)
 
 
+# ── Afgeleide koers (FCPE/werkgeversfondsen) ─────────────────────────────────
+# Effecten zonder eigen publieke notering (bv. ENGIE Link Classic/Liberty/Multiple
+# via Amundi — QS-ISIN's die op geen enkele koersbron staan) waarvan de waarde een
+# formule op een ONDERLIGGEND activum is:
+#   koers = basis + multiplicator × (koers onderliggend − referentiekoers)
+# optioneel met een ondergrens op 'basis' (kapitaalgarantie van hefboomfondsen).
+# 1:1-fondsen: basis 0, multiplicator 1, referentie 0 → exact de onderliggende koers.
+# Maximale ketendiepte: een afgeleid activum mag op zijn beurt naar een afgeleid
+# activum verwijzen, maar na 3 stappen stoppen we — dat vangt ook circulaire
+# verwijzingen af zonder dat er iets kan blijven hangen.
+_DERIVED_MAX_DEPTH = 3
+
+
+def _derived_cfg(ticker: str) -> dict | None:
+    try:
+        import database as _db
+        return _db.get_derived_pricing(ticker)
+    except Exception:
+        return None
+
+
+def derived_value(underlying_price: float, cfg: dict) -> float:
+    """Pas de afgeleide-koersformule toe op de koers van de onderliggende waarde."""
+    base = float(cfg.get("base") or 0.0)
+    mult = float(cfg.get("multiplier") if cfg.get("multiplier") is not None else 1.0)
+    ref  = float(cfg.get("ref_price") or 0.0)
+    p = base + mult * (float(underlying_price) - ref)
+    if cfg.get("floor"):
+        p = max(base, p)
+    return round(p, 6)
+
+
 # ── Publieke API ─────────────────────────────────────────────────────────────
 
 def _lookup_isin(tkr, info: dict, ticker: str) -> str:
@@ -1928,7 +1960,7 @@ FAIL_CACHE_TTL = 1800  # 30 min — genoeg om herhaling elke 5 min te vermijden,
                        # kort genoeg om een terugkerende bron snel op te pikken
 
 
-def get_current_price(ticker: str) -> tuple[float | None, str | None]:
+def get_current_price(ticker: str, _depth: int = 0) -> tuple[float | None, str | None]:
     """Actuele koers + munt. De ISIN is de bron van waarheid voor koersopzoeking
     (uniek en ondubbelzinnig, i.t.t. een Yahoo-ticker met beurssuffix). Volgorde:
     1) ISIN → (gecachet) Yahoo-symbool, 2) ISIN → externe niet-Yahoo-bronnen,
@@ -1942,6 +1974,36 @@ def get_current_price(ticker: str) -> tuple[float | None, str | None]:
     cached_price, cached_cur = _cached(ticker)
     if cached_price is not None:
         return cached_price, cached_cur
+
+    # Afgeleide koers: dit activum (bv. een FCPE-werkgeversfonds met een QS-ISIN)
+    # heeft géén eigen notering; zijn waarde is een formule op een onderliggend
+    # activum. De hele bronnenketen overslaan is hier correct én essentieel — elke
+    # onlinepoging voor zo'n ISIN is bij voorbaat zinloos, en de faalteller van dit
+    # activum mag niet oplopen door iets wat geen fout is. Faalt de ONDERLIGGENDE
+    # koers, dan blijft die fout bij het onderliggende activum (eigen teller/log).
+    dcfg = _derived_cfg(ticker)
+    if dcfg:
+        if _depth >= _DERIVED_MAX_DEPTH:
+            logger.warning(f"get_current_price({ticker}): afgeleide-koersketen dieper dan "
+                           f"{_DERIVED_MAX_DEPTH} stappen (mogelijk circulair) — gestopt.")
+            return None, None
+        up, ucur = get_current_price(dcfg["underlying_ticker"], _depth=_depth + 1)
+        if up is not None:
+            p = derived_value(up, dcfg)
+            _store(ticker, p, ucur or "EUR")
+            return p, ucur or "EUR"
+        # Onderliggende zonder koers: laatste redmiddel = handmatige koers. NOOIT
+        # stilzwijgend een oude of verzonnen waarde — liever geen koers dan een foute.
+        try:
+            import database as _db
+            mp = _db.get_manual_price(ticker)
+            if mp:
+                return mp["price"], mp["currency"]
+        except Exception:
+            pass
+        logger.warning(f"get_current_price({ticker}): geen koers voor onderliggende waarde "
+                       f"{dcfg['underlying_ticker']} en geen handmatige koers.")
+        return None, None
 
     # Enkel-handmatig: dit effect is nergens publiek genoteerd (bv. een niet-beursgenoteerde
     # warrant). Sla álle onlinebronnen over — anders kost elke koersverversing vijf mislukte
@@ -2152,7 +2214,7 @@ def convert_to_eur(amount: float, currency: str) -> float | None:
 
 # ── Historische data ─────────────────────────────────────────────────────────
 
-def get_close_on_date(ticker: str, on_date: str) -> float | None:
+def get_close_on_date(ticker: str, on_date: str, _depth: int = 0) -> float | None:
     """Slotkoers (native valuta) op of vlak vóór 'YYYY-MM-DD'. Voor het fotomoment
     (31/12/2025). auto_adjust=False zodat de koers de werkelijke slotkoers van die
     dag is (zonder latere split-/dividendcorrectie). Is het ticker een ISIN zonder
@@ -2164,6 +2226,16 @@ def get_close_on_date(ticker: str, on_date: str) -> float | None:
     invoeren. Geen resultaat betekent meestal gewoon dat dit effect op 31/12/2025
     nog niet bestond of niet verhandeld werd (bv. een pas in 2026 uitgegeven
     warrant) — dan is er sowieso geen fotomomentwaarde nodig."""
+    # Afgeleid activum (bv. FCPE): de historische slotkoers is per definitie de
+    # formule toegepast op de historische slotkoers van de ONDERLIGGENDE waarde.
+    dcfg = _derived_cfg(ticker)
+    if dcfg:
+        if _depth >= _DERIVED_MAX_DEPTH:
+            logger.warning(f"get_close_on_date({ticker}): afgeleide-koersketen te diep "
+                           "(mogelijk circulair) — gestopt.")
+            return None
+        up = get_close_on_date(dcfg["underlying_ticker"], on_date, _depth=_depth + 1)
+        return derived_value(up, dcfg) if up is not None else None
     cand = (ticker or "").strip().upper()
     if _isin_valid(cand):
         sym = _yahoo_symbol_for_isin(cand)
@@ -2326,7 +2398,12 @@ def is_market_open(exchange: str) -> bool:
     return open_mins <= current_mins < close_mins
 
 
-def get_market_state(ticker: str) -> str:
+def get_market_state(ticker: str, _depth: int = 0) -> str:
+    # Afgeleid activum: de 'markt' van een FCPE is die van zijn onderliggende waarde
+    # (bv. ENGIE op Euronext). Zo blijven de valse-vlakke-koersalarmen correct.
+    dcfg = _derived_cfg(ticker)
+    if dcfg and _depth < _DERIVED_MAX_DEPTH:
+        return get_market_state(dcfg["underlying_ticker"], _depth=_depth + 1)
     sym = _yf_symbol(ticker)
     if not sym:
         return "UNKNOWN"

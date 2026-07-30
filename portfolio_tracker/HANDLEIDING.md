@@ -1,6 +1,6 @@
 # Portfolio Tracker - Handleiding
 
-Versie 1.2.0
+Versie 1.3.0
 
 ---
 
@@ -259,6 +259,49 @@ Omdat er geen enkel juist antwoord bestaat op de vraag wat zulke aandelen je nu
 De eerste twee geven hetzelfde nettoresultaat; ze verschillen alleen in hoe het
 uitgesplitst wordt. De keuze verschijnt alleen als je zulke producten hebt.
 
+### 3.10 Werkgeversfondsen (FCPE): afgeleide koers, stockdividend en blokkering
+
+Fondsen uit aandelenplannen van je werkgever — zoals de Amundi/ENGIE Link-fondsen
+(Classic, Liberty, Multiple) — gedragen zich op drie punten anders dan gewone
+effecten, en de app heeft voor elk punt een eigen bouwsteen.
+
+**Ze noteren nergens.** Hun QS-ISIN staat bij geen enkele koersbron; Amundi
+publiceert de waarde enkel op zijn eigen portaal. Maar de waarde ís een formule op
+een gewoon beursgenoteerd aandeel. Koppel het fonds daarom aan een **onderliggende
+waarde** via `🏢 Activa → Overzicht → 🧮 Afgeleide koers`:
+
+    koers = basis + multiplicator × (koers onderliggend − referentiekoers)
+
+Voor een 1:1-fonds (Classic, Liberty: één deelbewijs = één aandeel ENGIE) is dat
+basis 0, multiplicator 1, referentie 0. Voor een hefboomfonds (Multiple) haal je de
+parameters uit je plandocumentatie: het gegarandeerde bedrag per deelbewijs als
+basis, de hefboomfactor als multiplicator, de referentiekoers van het plan, en de
+ondergrens aangevinkt zodat de koers nooit onder de garantie zakt. Het onderliggende
+activum moet in de app bestaan; heb je het losse aandeel niet in portefeuille, voeg
+het dan gewoon toe zonder transacties. Vanaf dan volgen de actuele koers, het
+dagresultaat, de koershistoriek én de fotomomentwaarde automatisch de onderliggende
+waarde — zonder één netwerkcall voor het fonds zelf.
+
+**Ze keren dividenden uit in deelbewijzen.** De kapitalisatie van het onderliggende
+dividend is fiscaal gewoon een dividend (roerende voorheffing, €833-vrijstelling),
+maar er komt geen cent cash binnen: je krijgt er stukken bij. Vink daarvoor in het
+dividendformulier **📦 Uitgekeerd in aandelen** aan en geef het aantal toegekende
+stukken en de waarde per stuk in. De app rekent de volledige fiscale keten, boekt
+niets in het cash-grootboek, en maakt automatisch een gekoppelde aanwastransactie
+aan: brutowaarde als kostbasis, geen cash, geen TOB, en desgewenst meteen
+geblokkeerd.
+
+**Delen ervan zijn nog geblokkeerd.** Geef een aankooplot een **'vrij vanaf'-datum**
+mee (vinkje in het transactieformulier, kolom *Vrij vanaf* in de transactietabel, of
+kolom `vrij_vanaf` in de bulk-import). Op de datum zelf telt het lot al als vrij. De
+portefeuillepagina splitst elke positie dan in vrij en geblokkeerd (met de
+eerstvolgende deblokkeringsdatum) en toont het geblokkeerde kapitaal onder de
+totalen; het dashboard toont hetzelfde totaal naast de beschikbare cash. Het
+verkoopformulier waarschuwt als een verkoop aan geblokkeerde stukken zou raken, maar
+houdt je niet tegen — de app detecteert, jij beslist. Bij werkgeversplannen komen de
+oudste toekenningen het eerst vrij, waardoor de deblokkeringsvolgorde vanzelf
+samenvalt met de FIFO-volgorde van de verkopen.
+
 ---
 
 ## 4. De interface: wat Streamlit zelf kan
@@ -477,6 +520,9 @@ Hier zitten ook de gereedschappen:
 - De kolom **Sector** met een keuzelijst. `—` betekent nog niet toegewezen.
 - `🏭 Sectoren beheren en in één keer ophalen`, zie hieronder.
 - `📸 Fotomoment ophalen` voor de slotkoers van 31/12/2025.
+- `🧮 Afgeleide koers` voor effecten zonder eigen notering waarvan de waarde een
+  formule op een ander activum is (werkgeversfondsen/FCPE); zie
+  [3.10](#310-werkgeversfondsen-fcpe-afgeleide-koers-stockdividend-en-blokkering).
 - `🔬 Bronnen diagnose` als een koers niet gevonden wordt: dit test elke bron apart en
   toont wat er precies terugkomt.
 - De FSMA-lijst van in België aangeboden fondsen, om het TOB-tarief van je fondsen
@@ -522,6 +568,11 @@ medeweten. Pas na je bevestiging worden de transacties en de kostbasis aangepast
   meer mee — het is dan jouw waarde. De app toont in dat geval wat de berekening zou
   geven, zodat je bewust kunt kiezen.
 - **Performance share**: voor toegekende in plaats van gekochte stukken.
+- **🔒 (Nog) niet vrij verhandelbaar**: geef een aankooplot een 'vrij vanaf'-datum
+  mee (werkgeversplannen/FCPE). Het lot telt tot die datum als geblokkeerd kapitaal;
+  zie [3.10](#310-werkgeversfondsen-fcpe-afgeleide-koers-stockdividend-en-blokkering).
+  In de overzichtstabel is dit de kolom **Vrij vanaf** (JJJJ-MM-DD, leeg = nooit
+  geblokkeerd).
 - **Koersdoel**: optioneel, handmatig of via AI.
 
 De app waarschuwt als ze de historische wisselkoers niet vindt, en weigert de
@@ -570,6 +621,14 @@ voorheffing. **Gedetailleerd** toont de volledige keten:
 
 Je vult in wat je op je afschrift ziet; de app leidt de rest af en waarschuwt als de
 onderdelen elkaar tegenspreken.
+
+**Uitgekeerd in aandelen (stockdividend).** Voor kapitalisaties die als extra stukken
+worden toegekend in plaats van cash (bv. FCPE-werkgeversfondsen): vink
+**📦 Uitgekeerd in aandelen** aan en geef het aantal stukken en de waarde per stuk in.
+De fiscale keten loopt zoals bij elk dividend, maar er wordt niets in het
+cash-grootboek geboekt en er verschijnt automatisch een gekoppelde aanwastransactie
+(brutowaarde als kostbasis, geen cash, geen TOB, desgewenst meteen geblokkeerd). Zie
+[3.10](#310-werkgeversfondsen-fcpe-afgeleide-koers-stockdividend-en-blokkering).
 
 **Eigen wisselkoers.** Keert een aandeel uit in een vreemde munt, dan rekent je broker
 om tegen *zijn* koers — vaak met een wisselmarge erin verwerkt. Vink

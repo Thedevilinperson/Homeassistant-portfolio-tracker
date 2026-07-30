@@ -289,6 +289,13 @@ def _migrate(conn):
         ("price_target",     "REAL"),       # koersdoel (native munt), optioneel
         ("is_performance_share", "INTEGER DEFAULT 0"),  # toegekend (vesting) i.p.v. gekocht
         ("income_tax_eur",       "REAL DEFAULT 0"),     # personenbelasting bij vesting (EUR)
+        # Blokkering (bv. werkgeversplannen/FCPE): dit lot is pas VANAF deze datum vrij
+        # verhandelbaar. Leeg = nooit geblokkeerd.
+        ("lock_until",           "TEXT"),
+        # Stockdividend/kapitalisatie: aanwas van stukken zonder cash-uitgave. Aparte
+        # vlag naast is_performance_share, zodat de vesting-zienswijzen (personen-
+        # belasting als kost/investering) er niet door vervuild raken.
+        ("is_stock_dividend",    "INTEGER DEFAULT 0"),
     ]
     for col, ddl in txn_cols:
         if not _column_exists(cur, "transactions", col):
@@ -319,6 +326,11 @@ def _migrate(conn):
         # eigen koers (soms met auto-FX-marge). Staat dit op 1, dan is fx_rate JOUW
         # koers en mag geen enkele herberekening ze door de marktkoers vervangen.
         ("fx_manual",            "INTEGER DEFAULT 0"),
+        # Uitkering in aandelen (stockdividend/kapitalisatie): de fiscale keten geldt
+        # zoals bij elk dividend, maar er beweegt geen cash — de tegenwaarde is een
+        # AANWAS van stukken (aparte gekoppelde transactie met is_stock_dividend=1).
+        ("paid_in_shares",       "INTEGER DEFAULT 0"),
+        ("shares_received",      "REAL"),
     ]
     new_div_cols = []
     for col, ddl in div_cols:
@@ -377,6 +389,21 @@ def _migrate(conn):
 
     if not _column_exists(cur, "assets", "manual_only"):
         cur.execute("ALTER TABLE assets ADD COLUMN manual_only INTEGER DEFAULT 0")
+
+    # Afgeleide koers — voor effecten zonder eigen (publieke) notering waarvan de
+    # waarde een formule op een ONDERLIGGEND activum is, zoals FCPE-werkgeversfondsen
+    # (bv. ENGIE Link Classic/Liberty = 1 × ENGIE; Link Multiple = hefboomformule):
+    #   koers = basis + multiplicator × (koers onderliggend − referentiekoers)
+    # met optionele ondergrens op 'basis' (kapitaalgarantie van hefboomfondsen).
+    # Classic/Liberty: basis 0, multiplicator 1, referentie 0 → exact de ENGIE-koers.
+    for _col, _ddl in [("pricing_mode",       "TEXT DEFAULT 'auto'"),
+                       ("underlying_ticker",  "TEXT"),
+                       ("derived_multiplier", "REAL DEFAULT 1"),
+                       ("derived_base",       "REAL DEFAULT 0"),
+                       ("derived_ref_price",  "REAL DEFAULT 0"),
+                       ("derived_floor",      "INTEGER DEFAULT 0")]:
+        if not _column_exists(cur, "assets", _col):
+            cur.execute(f"ALTER TABLE assets ADD COLUMN {_col} {_ddl}")
 
     # Aantal opeenvolgende mislukte koersophalingen. Na een grens (10) stopt de app met
     # proberen: blijven vijf bronnen tien keer op rij niets vinden, dan is dat geen
@@ -601,6 +628,54 @@ def get_manual_price(ticker) -> dict | None:
     return None
 
 
+def set_derived_pricing(ticker, underlying_ticker, multiplier=1.0, base=0.0,
+                        ref_price=0.0, floor=0):
+    """Koppel een activum aan een onderliggende waarde (afgeleide koers):
+    koers = base + multiplier × (koers onderliggend − ref_price), met optionele
+    ondergrens op base. Voor 1:1-fondsen (FCPE Classic/Liberty): multiplier=1,
+    base=0, ref_price=0."""
+    conn = get_connection()
+    conn.execute(
+        "UPDATE assets SET pricing_mode='derived', underlying_ticker=?, "
+        "derived_multiplier=?, derived_base=?, derived_ref_price=?, derived_floor=? "
+        "WHERE ticker=?",
+        (underlying_ticker.strip().upper(), float(multiplier or 1.0), float(base or 0.0),
+         float(ref_price or 0.0), 1 if floor else 0, ticker.upper()))
+    conn.commit()
+    conn.close()
+
+
+def clear_derived_pricing(ticker):
+    """Verwijder de afgeleide-koerskoppeling: het activum volgt weer de gewone
+    bronnenketen (Yahoo/onvista/Euronext/... of handmatige koers)."""
+    conn = get_connection()
+    conn.execute("UPDATE assets SET pricing_mode='auto', underlying_ticker=NULL "
+                 "WHERE ticker=?", (ticker.upper(),))
+    conn.commit()
+    conn.close()
+
+
+def get_derived_pricing(ticker) -> dict | None:
+    """Afgeleide-koersconfiguratie voor een activum, of None als het gewoon de
+    bronnenketen volgt."""
+    conn = get_connection()
+    row = conn.execute(
+        "SELECT pricing_mode, underlying_ticker, derived_multiplier, derived_base, "
+        "derived_ref_price, derived_floor FROM assets WHERE ticker=?",
+        (ticker.upper(),)).fetchone()
+    conn.close()
+    if not row or (row["pricing_mode"] or "auto") != "derived":
+        return None
+    und = (row["underlying_ticker"] or "").strip().upper()
+    if not und:
+        return None
+    return {"underlying_ticker": und,
+            "multiplier": float(row["derived_multiplier"] if row["derived_multiplier"] is not None else 1.0),
+            "base":       float(row["derived_base"] or 0.0),
+            "ref_price":  float(row["derived_ref_price"] or 0.0),
+            "floor":      bool(row["derived_floor"])}
+
+
 def set_manual_only(ticker, enabled: bool):
     """Zet/wis 'enkel handmatige koers' voor een activum: alle onlinebronnen worden dan
     overgeslagen."""
@@ -771,7 +846,10 @@ def _div_net_eur(d: dict) -> float:
 def _div_cash_eur(d: dict) -> float:
     """Cashbedrag (EUR) van een dividend voor het cash-grootboek.
     Gebruikt het bij invoer gekozen veld (cash_basis: net/gross_after/gross_before);
-    valt terug op het netto-bedrag voor oudere rijen."""
+    valt terug op het netto-bedrag voor oudere rijen. 'none' (uitkering in aandelen,
+    stockdividend/kapitalisatie) boekt per definitie GEEN cash."""
+    if (d.get("cash_basis") or "") == "none":
+        return 0.0
     if d.get("cash_eur") is not None:
         return d["cash_eur"]
     return _div_net_eur(d)
@@ -814,8 +892,8 @@ def compute_cash_positions(accounts=None) -> dict:
         tot = t.get("total_amount_eur") or 0.0
         fees = (t.get("costs_eur") or 0.0) + (t.get("tob_tax") or 0.0)
         if t["transaction_type"] == "buy":
-            if t.get("is_performance_share"):
-                continue                     # toekenning: geen cash-uitgave
+            if t.get("is_performance_share") or t.get("is_stock_dividend"):
+                continue                     # toekenning/stockdividend: geen cash-uitgave
             r["buys"] += tot + fees          # cash uit
         else:
             r["sells"] += tot - fees         # cash in
@@ -871,6 +949,10 @@ def cash_ledger(accounts=None) -> list[dict]:
             if t.get("is_performance_share"):
                 items.append({"date": t["date"][:10], "account": acc, "label": "Toekenning",
                               "delta": 0.0, "desc": desc + " (geen cash)", "source": "txn", "ref": t["id"]})
+            elif t.get("is_stock_dividend"):
+                items.append({"date": t["date"][:10], "account": acc, "label": "Stockdividend",
+                              "delta": 0.0, "desc": desc + " (aanwas, geen cash)",
+                              "source": "txn", "ref": t["id"]})
             else:
                 items.append({"date": t["date"][:10], "account": acc, "label": "Aankoop",
                               "delta": -(tot + fees), "desc": desc, "source": "txn", "ref": t["id"]})
@@ -1927,7 +2009,7 @@ def add_transaction(ticker, transaction_type, date, quantity, price_per_unit,
                     account=DEFAULT_ACCOUNT, costs=0.0, costs_currency="EUR",
                     fx_rate=1.0, total_amount_eur=None, costs_eur=None,
                     price_target=None, is_performance_share=0, income_tax_eur=0.0,
-                    fx_manual=0, tob_manual=0):
+                    fx_manual=0, tob_manual=0, lock_until=None, is_stock_dividend=0):
     if total_amount_eur is None:
         total_amount_eur = total_amount * (fx_rate or 1.0)
     if costs_eur is None:
@@ -1938,13 +2020,14 @@ def add_transaction(ticker, transaction_type, date, quantity, price_per_unit,
            (ticker,transaction_type,date,quantity,price_per_unit,total_amount,
             currency,tob_tax,notes,account,costs,costs_currency,costs_eur,
             total_amount_eur,fx_rate,price_target,is_performance_share,income_tax_eur,
-            fx_manual,tob_manual)
-           VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+            fx_manual,tob_manual,lock_until,is_stock_dividend)
+           VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
         (ticker.upper(), transaction_type, date, quantity, price_per_unit,
          total_amount, currency, tob_tax, notes, account, costs, costs_currency,
          costs_eur, total_amount_eur, fx_rate, price_target,
          int(is_performance_share or 0), income_tax_eur or 0.0,
-         int(fx_manual or 0), int(tob_manual or 0))
+         int(fx_manual or 0), int(tob_manual or 0),
+         (str(lock_until)[:10] if lock_until else None), int(is_stock_dividend or 0))
     )
     conn.commit()
     conn.close()
@@ -1959,7 +2042,7 @@ def update_transaction(txn_id: int, **fields):
                "total_amount", "currency", "tob_tax", "notes", "account", "costs",
                "costs_currency", "costs_eur", "total_amount_eur", "fx_rate",
                "price_target", "is_performance_share", "income_tax_eur",
-               "fx_manual", "tob_manual"}
+               "fx_manual", "tob_manual", "lock_until", "is_stock_dividend"}
     sets, vals = [], []
     for k, v in fields.items():
         if k in allowed:
@@ -2115,7 +2198,8 @@ def add_dividend(ticker, date, gross_amount, withholding_tax=0.0,
             "gross_before_wht", "gross_before_wht_cur", "foreign_wht_amt",
             "foreign_wht_cur", "gross_after_wht", "gross_after_wht_cur",
             "belgian_rv_amt", "net_received", "net_received_cur", "net_eur",
-            "cash_basis", "cash_eur", "kind", "fx_manual"]
+            "cash_basis", "cash_eur", "kind", "fx_manual",
+            "paid_in_shares", "shares_received"]
     vals = [ticker.strip().upper() if ticker else None, date, gross_amount, withholding_tax, currency, notes,
             fx_rate, gross_eur, withholding_eur,
             int(foreign_wht_withheld), int(belgian_rv_withheld), account,
@@ -2124,7 +2208,8 @@ def add_dividend(ticker, date, gross_amount, withholding_tax=0.0,
             d.get("gross_after_wht"), d.get("gross_after_wht_cur"),
             d.get("belgian_rv_amt"), d.get("net_received"),
             d.get("net_received_cur"), d.get("net_eur"),
-            d.get("cash_basis"), d.get("cash_eur"), d.get("kind"), int(fx_manual)]
+            d.get("cash_basis"), d.get("cash_eur"), d.get("kind"), int(fx_manual),
+            int(d.get("paid_in_shares") or 0), d.get("shares_received")]
     conn = get_connection()
     conn.execute(f"INSERT INTO dividends ({','.join(cols)}) VALUES ({','.join('?'*len(cols))})",
                  vals)

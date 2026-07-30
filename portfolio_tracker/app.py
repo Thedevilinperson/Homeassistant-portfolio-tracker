@@ -246,8 +246,8 @@ def daily_pl(pv: dict, accounts=None) -> dict:
                 continue
             if accounts is not None and (t.get("account") or db.DEFAULT_ACCOUNT) not in accounts:
                 continue
-            if t.get("is_performance_share"):
-                continue      # toekenning: geen aan- of verkoop op de markt
+            if t.get("is_performance_share") or t.get("is_stock_dividend"):
+                continue      # toekenning/stockdividend: geen aan- of verkoop op de markt
             todays.setdefault(t["ticker"].upper(), []).append(t)
     except Exception as exc:
         logger.warning(f"daily_pl: transacties van vandaag niet opgehaald ({exc})")
@@ -754,7 +754,15 @@ def _recompute_dividend_chain(divs, rv_rate: float, include_manual: bool = False
             continue
         wh_eur = max(0.0, gross_eur - net_eur)
         cbk = d.get("cash_basis") or "net"
-        cash_eur = {"gross_before": a_eur, "gross_after": c_eur, "net": net_eur}.get(cbk) or net_eur
+        if cbk == "none":
+            # Uitkering in aandelen (stockdividend): per definitie geen cash-boeking.
+            # Let op de valkuil: 0.0 is 'falsy', dus de dict-lookup met 'or'-terugval
+            # hieronder zou 0.0 stilzwijgend door het netto vervangen.
+            cash_eur = 0.0
+        else:
+            cash_eur = {"gross_before": a_eur, "gross_after": c_eur, "net": net_eur}.get(cbk)
+            if cash_eur is None:
+                cash_eur = net_eur
 
         # Idempotent: enkel overslaan als zowel de keten áls de EUR/cash-velden al
         # kloppen. Zo herstelt een klik ook een stale cash-boeking (bv. na een eerdere
@@ -831,7 +839,7 @@ def _recompute_tob_preview(txns: list[dict], ainfo: dict) -> tuple[list[dict], i
     Geeft (wijzigingen, aantal_verdacht) terug; schrijft niets weg."""
     changes, suspect = [], 0
     for t in txns:
-        if t.get("tob_manual") or t.get("is_performance_share"):
+        if t.get("tob_manual") or t.get("is_performance_share") or t.get("is_stock_dividend"):
             continue
         cur = t.get("currency") or "EUR"
         if cur == "EUR":
@@ -1037,9 +1045,12 @@ def backfill_eur(force: bool = False) -> int:
             prim       = A if A is not None else (C if C is not None else Dv)
             net_native = Dv if Dv is not None else (C if C is not None else prim)
             cbk        = d.get("cash_basis") or "net"
-            cash_native = {"gross_before": A, "gross_after": C, "net": net_native}.get(cbk)
-            if cash_native is None:
-                cash_native = net_native
+            if cbk == "none":
+                cash_native = 0.0
+            else:
+                cash_native = {"gross_before": A, "gross_after": C, "net": net_native}.get(cbk)
+                if cash_native is None:
+                    cash_native = net_native
             gross_eur = (prim or 0.0) * fx
             net_eur   = (net_native or 0.0) * fx
             cash_eur  = (cash_native or 0.0) * fx
@@ -1161,6 +1172,25 @@ def page_dashboard():
     _cash_avail = db.compute_cash_positions(accset)["totals"]["available"]
     st.caption(f"💶 **Beschikbare cash** (deze selectie): **{eur(_cash_avail)}** — om aandelen mee te "
                "kopen. Stortingen/opnames beheer je op de **💶 Cash**-pagina.")
+    # Blokkering (werkgeversplannen/FCPE): toon het niet-vrij-verhandelbare deel van de
+    # portefeuille — enkel als er effectief iets geblokkeerd is, anders geen ruis.
+    try:
+        _lk_txns_d = [t for t in db.get_transactions()
+                      if accset is None or (t.get("account") or db.DEFAULT_ACCOUNT) in accset]
+        _lk_d = tax_mod.locked_summary(_lk_txns_d)["by_ticker"]
+        if _lk_d:
+            _lk_val = 0.0
+            for _t, _info in _lk_d.items():
+                _p = pv.get(_t)
+                if _p and (_p.get("quantity") or 0) > 0:
+                    _lk_val += (_p.get("current_value") or 0.0) * \
+                               min(1.0, _info["locked_qty"] / _p["quantity"])
+            if _lk_val > 0:
+                st.caption(f"🔒 **Geblokkeerd kapitaal** (deze selectie): **{eur(_lk_val)}** is "
+                           "(nog) niet vrij verhandelbaar (bv. werkgeversplannen). Detail per "
+                           "positie op de **💼 Portefeuille**-pagina.")
+    except Exception:
+        pass
 
     st.divider()
 
@@ -1593,6 +1623,13 @@ def page_portfolio():
             st.caption(f"📂 Gefilterd op **{', '.join(acct)}** — ook de kolom *Dividend* volgt "
                        "die filter. Heb je hetzelfde aandeel op meerdere rekeningen gehad, dan "
                        "tellen enkel de dividenden van de geselecteerde rekening(en) mee.")
+        # Blokkering (werkgeversplannen/FCPE): vrij vs. geblokkeerd deel per positie.
+        # Zelfde rekeningfilter als de rest van de tabel.
+        _lk_txns = [t for t in db.get_transactions()
+                    if accset is None or (t.get("account") or db.DEFAULT_ACCOUNT) in accset]
+        _lk_by = tax_mod.locked_summary(_lk_txns)["by_ticker"]
+        any_locked = bool(_lk_by)
+        locked_val_total = 0.0
         rows = []
         for ticker, pos in pv.items():
             asset = assets_map.get(ticker, {})
@@ -1603,13 +1640,23 @@ def page_portfolio():
             if tgt and pos["current_price"]:
                 upside = (tgt - pos["current_price"]) / pos["current_price"] * 100
             rec = synth.get(ticker, {}).get("consensus")
-            rows.append({
+            _qty = pos["quantity"] or 0.0
+            _lqty = min(_lk_by.get(ticker, {}).get("locked_qty", 0.0), _qty)
+            if _lqty and _qty:
+                locked_val_total += (pos["current_value"] or 0.0) * (_lqty / _qty)
+            row = {
                 "":             sign_icon(pos["unrealized_gain_loss"]),
                 "Ticker":       ticker,
                 "Naam":         (asset.get("name") or ticker)[:20],
                 "Sector":       sec_map.get(ticker) or "—",
                 "Munt":         pos["current_price_currency"] or "EUR",
                 "Aantal":       pos["quantity"],
+            }
+            if any_locked:
+                row["Vrij"] = round(_qty - _lqty, 6)
+                row["🔒 Geblokkeerd"] = round(_lqty, 6) if _lqty else None
+                row["🔓 Vrij vanaf"] = _lk_by.get(ticker, {}).get("next_unlock") if _lqty else None
+            row.update({
                 "Gem.kostpr.(€)":  pos["avg_cost"],
                 "Koers (native)":  pos["current_price"] if pos["current_price"] else None,
                 "Koersdoel":    tgt,
@@ -1620,7 +1667,8 @@ def page_portfolio():
                 "Tot. rendement": total_return,
                 "AI-advies":    ai_badge(rec, changes.get(ticker)),
             })
-        show_df(pd.DataFrame(rows), width="stretch", hide_index=True, height=420, column_config={
+            rows.append(row)
+        _pos_cfg = {
             "Sector":           st.column_config.TextColumn(
                 help="Domein/sector van dit activum. Toewijzen doe je op de pagina "
                      "🏢 Activa (kolom Sector); '—' betekent nog niet toegewezen."),
@@ -1639,7 +1687,22 @@ def page_portfolio():
             "W/V (%)":          st.column_config.NumberColumn(format="%+.10g%%"),
             "Dividend":         st.column_config.NumberColumn(format="€ %.10g"),
             "Tot. rendement":   st.column_config.NumberColumn(format="€ %.10g"),
-        })
+        }
+        if any_locked:
+            _pos_cfg["Vrij"] = st.column_config.NumberColumn(
+                format="%.10g",
+                help="Aantal stukken dat vandaag vrij verhandelbaar is (aantal − geblokkeerd).")
+            _pos_cfg["🔒 Geblokkeerd"] = st.column_config.NumberColumn(
+                format="%.10g",
+                help="Aantal stukken dat nog geblokkeerd is (bv. werkgeversplan/FCPE). "
+                     "Volgt de 'vrij vanaf'-datum van de aankooploten (in te stellen bij het "
+                     "toevoegen van een transactie of in de transactietabel, kolom "
+                     "'Vrij vanaf').")
+            _pos_cfg["🔓 Vrij vanaf"] = st.column_config.TextColumn(
+                help="Eerstvolgende datum waarop (een deel van) de geblokkeerde stukken "
+                     "vrijkomt.")
+        show_df(pd.DataFrame(rows), width="stretch", hide_index=True, height=420,
+                column_config=_pos_cfg)
 
         total_val  = overview["total_portfolio_value"]
         total_cost = overview["total_cost_basis"]
@@ -1662,6 +1725,12 @@ def page_portfolio():
         st.caption(f"💡 Nettorendement na kosten: **{eur(net_return)}**  "
                    f"(ongerealiseerde W/V + dividenden − kosten). "
                    f"Waarvan transactiekosten {eur(txn_costs)} en rekeningkosten {eur(acct_costs)}.")
+        if any_locked:
+            st.caption(f"🔒 **Geblokkeerd kapitaal** (deze selectie): **{eur(locked_val_total)}** "
+                       f"van de totale waarde is (nog) niet vrij verhandelbaar — vrij "
+                       f"beschikbaar: **{eur(max(0.0, total_val - locked_val_total))}**. "
+                       "Zie de kolommen 'Vrij' / '🔒 Geblokkeerd' hierboven; de 'vrij "
+                       "vanaf'-datum stel je in per aankooplot op de transactiepagina.")
         _cash = db.compute_cash_positions(accset)["totals"]["available"]
         st.caption(f"💶 **Beschikbare cash** (deze selectie): **{eur(_cash)}** — beheer stortingen en "
                    "opnames via de **💶 Cash**-pagina.")
@@ -2322,6 +2391,105 @@ def page_assets():
                 st.success(f"✅ Koersophaling opnieuw actief voor {len(_rsel)} activum/activa.")
                 st.rerun()
 
+        with st.expander("🧮 Afgeleide koers — koppel aan een onderliggende waarde (FCPE / werkgeversfondsen)"):
+            st.caption(
+                "Voor effecten **zonder eigen publieke notering** waarvan de waarde een formule "
+                "op een ander activum is — typisch werkgeversfondsen zoals de Amundi/ENGIE "
+                "Link-fondsen (QS-ISIN's, bij geen enkele koersbron te vinden). De koers wordt "
+                "dan berekend als:  \n"
+                "**koers = basis + multiplicator × (koers onderliggend − referentiekoers)**, "
+                "optioneel met een ondergrens op de basis (kapitaalgarantie van "
+                "hefboomfondsen).  \n"
+                "• **1:1-fonds** (bv. Link Classic/Liberty = 1 aandeel ENGIE): basis 0, "
+                "multiplicator 1, referentie 0.  \n"
+                "• **Hefboomfonds** (bv. Link Multiple): basis = gegarandeerd bedrag per "
+                "deelbewijs, multiplicator en referentiekoers uit je plandocumentatie, en "
+                "vink de ondergrens aan.  \n"
+                "Koersen, dagresultaat, fotomoment en koershistoriek volgen dan automatisch "
+                "de onderliggende waarde — de bronnenketen wordt volledig overgeslagen (geen "
+                "nutteloze netwerkcalls of faaltellers voor een ISIN die nergens noteert). "
+                "Het onderliggende activum moet in de app bestaan; heb je het zelf niet in "
+                "portefeuille (bv. het losse ENGIE-aandeel), voeg het dan gewoon toe zonder "
+                "transacties.")
+            _all_tk = [a["ticker"] for a in assets]
+            dp_sel = st.selectbox("Activum met afgeleide koers", _all_tk,
+                                  format_func=lambda t: asset_label(t, a_names),
+                                  key="dp_asset")
+            _cur_cfg = db.get_derived_pricing(dp_sel) or {}
+            if _cur_cfg:
+                st.info(f"🔗 **{asset_label(dp_sel, a_names)}** volgt momenteel "
+                        f"**{asset_label(_cur_cfg['underlying_ticker'], a_names)}**: "
+                        f"koers = {_cur_cfg['base']:g} + {_cur_cfg['multiplier']:g} × "
+                        f"(koers − {_cur_cfg['ref_price']:g})"
+                        + (" — met ondergrens op de basis." if _cur_cfg.get("floor") else "."))
+            _und_opts = [t for t in _all_tk if t != dp_sel]
+            if not _und_opts:
+                st.warning("Er is geen ander activum om als onderliggende waarde te kiezen.")
+            else:
+                _und_def = _cur_cfg.get("underlying_ticker")
+                dp_und = st.selectbox(
+                    "Onderliggende waarde", _und_opts,
+                    index=_und_opts.index(_und_def) if _und_def in _und_opts else 0,
+                    format_func=lambda t: asset_label(t, a_names), key="dp_underlying")
+                if db.get_derived_pricing(dp_und):
+                    st.warning("⚠️ De gekozen onderliggende waarde heeft zélf een afgeleide "
+                               "koers. Dat mag (de app volgt de keten, met een maximum van "
+                               "3 stappen tegen circulaire verwijzingen), maar kies bij "
+                               "voorkeur rechtstreeks het genoteerde activum.")
+                dc1, dc2, dc3, dc4 = st.columns(4)
+                dp_mult = dc1.number_input("Multiplicator", value=float(_cur_cfg.get("multiplier", 1.0)),
+                                           step=0.01, format="%.10g", key="dp_mult",
+                                           help="1 voor een 1:1-fonds; de hefboomfactor voor een "
+                                                "Multiple-achtig fonds.")
+                dp_base = dc2.number_input("Basisbedrag", value=float(_cur_cfg.get("base", 0.0)),
+                                           step=0.01, format="%.10g", key="dp_base",
+                                           help="Vast bedrag per deelbewijs (bv. de kapitaalgarantie "
+                                                "van een hefboomfonds). 0 voor een 1:1-fonds.")
+                dp_ref = dc3.number_input("Referentiekoers", value=float(_cur_cfg.get("ref_price", 0.0)),
+                                          step=0.01, format="%.10g", key="dp_ref",
+                                          help="De koers van de onderliggende waarde waartegen de "
+                                               "hefboom gemeten wordt (uit je plandocumentatie). "
+                                               "0 voor een 1:1-fonds.")
+                with dc4:
+                    st.write(""); st.write("")
+                    dp_floor = st.checkbox("Ondergrens", value=bool(_cur_cfg.get("floor")),
+                                           key="dp_floor",
+                                           help="Aan = de koers zakt nooit onder het basisbedrag "
+                                                "(kapitaalgarantie). Uit = de formule geldt ook "
+                                                "onder de referentiekoers.")
+                # Voorbeeld op de laatst gekende koers van de onderliggende waarde — geen
+                # netwerkcall; de scheduler houdt price_history toch al elke 5 min bij.
+                _ulp = db.get_latest_price(dp_und)
+                if _ulp:
+                    _prev = md.derived_value(_ulp["price"], {
+                        "base": dp_base, "multiplier": dp_mult,
+                        "ref_price": dp_ref, "floor": dp_floor})
+                    st.caption(f"🔎 Voorbeeld met de laatst gekende koers van "
+                               f"{asset_label(dp_und, a_names)} ({_ulp['price']:g} "
+                               f"{_ulp.get('currency') or 'EUR'}): afgeleide koers = "
+                               f"**{_prev:g} {_ulp.get('currency') or 'EUR'}**.")
+                else:
+                    st.caption("🔎 Nog geen opgeslagen koers voor de onderliggende waarde — het "
+                               "voorbeeld verschijnt zodra de achtergrondplanner er een heeft "
+                               "vastgelegd (of na '🔄 Ververs prijzen' op de portefeuillepagina).")
+                bp1, bp2 = st.columns([1, 1])
+                if bp1.button("💾 Koppeling opslaan", type="primary", key="dp_save"):
+                    db.set_derived_pricing(dp_sel, dp_und, multiplier=dp_mult,
+                                           base=dp_base, ref_price=dp_ref,
+                                           floor=int(dp_floor))
+                    md._CACHE.pop(dp_sel, None)
+                    clear_cache()
+                    st.success(f"✅ {asset_label(dp_sel, a_names)} volgt voortaan "
+                               f"{asset_label(dp_und, a_names)}.")
+                    st.rerun()
+                if _cur_cfg and bp2.button("🗑️ Koppeling verwijderen", key="dp_clear"):
+                    db.clear_derived_pricing(dp_sel)
+                    md._CACHE.pop(dp_sel, None)
+                    clear_cache()
+                    st.success(f"✅ Koppeling verwijderd — {asset_label(dp_sel, a_names)} volgt "
+                               "weer de gewone bronnenketen (of de handmatige koers).")
+                    st.rerun()
+
         with st.expander("🔬 Bronnen diagnose — waarom vindt de app geen koers?"):
             st.caption("Vraagt élke koersbron apart wat ze van deze ISIN weet en toont het "
                        "antwoord. Zo zie je of een effect ergens gekend is, in plaats van enkel "
@@ -2924,6 +3092,22 @@ def page_transactions():
                                "mee — het is nu jouw waarde. Klopt je broker's afrekening met "
                                "dit bedrag, dan is dat prima; anders zet je het vinkje even uit "
                                "en weer aan om de berekende waarde over te nemen.")
+        # Blokkering (bv. werkgeversplan/FCPE): dit lot is pas vanaf een bepaalde
+        # datum vrij verhandelbaar. Enkel bij aankopen/toekenningen relevant.
+        lock_until = None
+        if txn_type == "buy":
+            if st.checkbox("🔒 (Nog) niet vrij verhandelbaar — geblokkeerd tot een datum",
+                           key=kk("lock_chk"),
+                           help="Voor stukken uit werkgeversplannen (bv. FCPE-fondsen) met een "
+                                "resterende blokkeringsperiode. De portefeuille toont ze dan "
+                                "apart als geblokkeerd kapitaal, en het verkoopformulier "
+                                "waarschuwt als je meer wil verkopen dan er vrij is."):
+                lock_until = st.date_input(
+                    "🔓 Vrij verhandelbaar vanaf", value=date.today(),
+                    min_value=date(2000, 1, 1), max_value=date(2100, 12, 31),
+                    key=kk("lock_date"),
+                    help="Vanaf deze datum (inbegrepen) telt dit lot als vrij. Tot de dag "
+                         "ervoor verschijnt het als geblokkeerd kapitaal.")
         notes = st.text_area("Notities (optioneel)", height=60, key=kk("notes"))
 
         if st.button("✅ Transactie toevoegen", type="primary", key=kk("submit")):
@@ -2963,6 +3147,20 @@ def page_transactions():
                             st.error(f"Onvoldoende positie op '{account}' op {txn_date}. "
                                      f"Beschikbaar: {available:.4f}.")
                         proceed = False
+                    else:
+                        # Blokkering: waarschuwen (niet blokkeren) als de verkoop het VRIJE
+                        # deel overschrijdt — detectie zonder automatische toepassing. In de
+                        # praktijk kan zo'n verkoop niet bij de beheerder, dus dit wijst
+                        # meestal op een vergeten of foute 'vrij vanaf'-datum.
+                        _lk = tax_mod.locked_summary(upto, on_date=str(txn_date))
+                        _lqty = _lk["by_key"].get((ticker, account), {}).get("locked_qty", 0.0)
+                        if _lqty and quantity - (available - _lqty) > 1e-6:
+                            st.warning(
+                                f"⚠️ Op {txn_date} is **{_lqty:.4f}** stuk(s) van deze positie "
+                                f"nog geblokkeerd (vrij: {max(0.0, available - _lqty):.4f}). "
+                                "Deze verkoop raakt dus (deels) aan geblokkeerde stukken. De "
+                                "transactie wordt wél opgeslagen — controleer of de 'vrij "
+                                "vanaf'-datum van je aankooploten nog klopt.")
                 if proceed:
                     db.add_transaction(ticker, txn_type, str(txn_date), quantity,
                                        price_unit, total_amount, currency, tob_amount,
@@ -2973,7 +3171,8 @@ def page_transactions():
                                        is_performance_share=int(is_perf),
                                        income_tax_eur=income_tax_eur,
                                        fx_manual=fx_manual,
-                                       tob_manual=int(bool(st.session_state.get(kk("tob_man")))))
+                                       tob_manual=int(bool(st.session_state.get(kk("tob_man")))),
+                                       lock_until=(str(lock_until) if lock_until else None))
                     clear_cache()
                     # Volledige reset: bump formulier-nonce + koersdoel-staging leeg
                     st.session_state["txn_add_nonce"] = txn_n + 1
@@ -3040,6 +3239,7 @@ def page_transactions():
                 "Koersdoel": t.get("price_target"),
                 "Perf?":    bool(t.get("is_performance_share")),
                 "Personenbel. €": round(t.get("income_tax_eur") or 0, 2),
+                "Vrij vanaf": (t.get("lock_until") or "")[:10],
                 "FX-koers": round(float(t.get("fx_rate") or 1.0), 6),
                 "FX eigen": bool(t.get("fx_manual")),
                 "€ Totaal": round(t.get("total_amount_eur") or t["total_amount"], 2),
@@ -3066,6 +3266,10 @@ def page_transactions():
                 "Perf?":     cc.CheckboxColumn(help="Performance shares (toekenning): geen TOB."),
                 "Personenbel. €": cc.NumberColumn(min_value=0.0, format="%.10g",
                                                   help="Personenbelasting bij toekenning (enkel bij Perf?)."),
+                "Vrij vanaf": cc.TextColumn(
+                    help="Blokkering (bv. werkgeversplan/FCPE): dit lot is pas VANAF deze datum "
+                         "(JJJJ-MM-DD) vrij verhandelbaar. Leeg = nooit geblokkeerd. De "
+                         "portefeuille toont geblokkeerde stukken apart als niet-vrij kapitaal."),
                 "€ Totaal":  cc.NumberColumn(disabled=True, format="%.10g"),
                 "FX-koers":  cc.NumberColumn(
                     format="%.10g",
@@ -3097,12 +3301,23 @@ def page_transactions():
                     if all(_cell_eq(r[k], orig[k]) for k in
                            ("Datum", "Type", "Aantal", "Prijs", "Munt", "Rekening",
                             "Kosten €", "Koersdoel", "Perf?", "Personenbel. €", "Notities",
-                            "FX-koers", "FX eigen", "TOB €", "TOB eigen")):
+                            "FX-koers", "FX eigen", "TOB €", "TOB eigen", "Vrij vanaf")):
                         continue
                     nd = _date_or_none(str(r["Datum"]))
                     if nd is None:
                         problems.append(f"#{t['id']}: datum '{r['Datum']}' ongeldig (JJJJ-MM-DD).")
                         continue
+                    _lock_raw = "" if (r["Vrij vanaf"] is None or pd.isna(r["Vrij vanaf"])) \
+                                else str(r["Vrij vanaf"]).strip()
+                    if _lock_raw:
+                        _lock_d = _date_or_none(_lock_raw)
+                        if _lock_d is None:
+                            problems.append(f"#{t['id']}: 'Vrij vanaf' '{_lock_raw}' ongeldig "
+                                            "(JJJJ-MM-DD, of leeg voor niet geblokkeerd).")
+                            continue
+                        new_lock = str(_lock_d)
+                    else:
+                        new_lock = None
                     ttype = TYPE_KEY.get(str(r["Type"]), t["transaction_type"])
                     try:
                         qty = float(r["Aantal"]); price = float(r["Prijs"])
@@ -3144,7 +3359,7 @@ def page_transactions():
                     # EUR-tegenwaarde (nooit op het bedrag in vreemde munt).
                     tob_edited = not _cell_eq(r["TOB €"], orig["TOB €"])
                     tob_man = int(bool(r["TOB eigen"]) or tob_edited)
-                    if perf:
+                    if perf or t.get("is_stock_dividend"):
                         tob, tob_man = 0.0, 0
                     elif tob_man:
                         tob = float(r["TOB €"] or 0)
@@ -3161,7 +3376,7 @@ def page_transactions():
                         account=str(r["Rekening"]), costs=costs_v, costs_currency="EUR",
                         fx_rate=fx, total_amount_eur=tot_eur, costs_eur=costs_v,
                         price_target=tgt, is_performance_share=int(perf), income_tax_eur=inctax,
-                        fx_manual=fx_man, tob_manual=tob_man)
+                        fx_manual=fx_man, tob_manual=tob_man, lock_until=new_lock)
                     n_upd += 1
             except Exception as exc:
                 problems.append(f"Onverwachte fout: {exc}")
@@ -3418,16 +3633,91 @@ def page_dividends():
             asset_cur = amap.get(d_ticker, {}).get("currency", "EUR") if d_ticker else "EUR"
             cur_opts  = CURS if asset_cur in CURS else CURS + [asset_cur]
 
+            # ── Uitkering in aandelen (stockdividend / kapitalisatie) ─────────
+            # Bv. FCPE-werkgeversfondsen: het dividend van de onderliggende aandelen
+            # wordt niet uitbetaald maar als extra deelbewijzen toegekend. Fiscaal is
+            # en blijft dit een dividend (RV, €833-vrijstelling), maar er beweegt
+            # GEEN cash — de tegenwaarde is een aanwas van stukken, die als een
+            # gekoppelde transactie zonder cash-effect wordt geboekt.
+            d_stock, d_shares, d_shareval, d_stock_lock = False, None, None, None
+            if d_kind == "dividend" and d_ticker:
+                d_stock = st.checkbox(
+                    "📦 Uitgekeerd in aandelen (aanwas — geen cash)", key=sk("stockdiv"),
+                    help="Voor kapitalisaties/stockdividenden (bv. FCPE-fondsen): het bruto "
+                         "dividend = aantal toegekende stukken × waarde per stuk. De fiscale "
+                         "keten (bronbelasting, RV, €833-vrijstelling) geldt zoals bij elk "
+                         "dividend, maar er wordt niets in het cash-grootboek geboekt. "
+                         "Tegelijk wordt automatisch een gekoppelde AANKOOP zonder "
+                         "cash-effect en zonder TOB aangemaakt, zodat de nieuwe stukken "
+                         "met hun brutowaarde als kostbasis in je positie zitten.")
+                if d_stock:
+                    _lastp = db.get_latest_price(d_ticker)
+                    sdc1, sdc2, sdc3 = st.columns(3)
+                    d_shares = sdc1.number_input(
+                        "Aantal toegekende stukken *", min_value=0.0, step=0.0001,
+                        format="%.10g", value=None, key=dk("stk_qty"))
+                    d_shareval = sdc2.number_input(
+                        f"Waarde per stuk * ({asset_cur})", min_value=0.0, step=0.0001,
+                        format="%.10g", value=None, key=dk("stk_val"),
+                        help=("De waarde waartegen de stukken zijn toegekend (uit je "
+                              "afrekening). Ter info, de laatst gekende koers: "
+                              f"{_lastp['price']:g} {_lastp.get('currency') or 'EUR'}."
+                              if _lastp else
+                              "De waarde waartegen de stukken zijn toegekend (uit je afrekening)."))
+                    with sdc3:
+                        if st.checkbox("🔒 Nieuwe stukken geblokkeerd", key=sk("stk_lock_chk"),
+                                       help="Bij werkgeversplannen zijn ook de aangegroeide "
+                                            "stukken vaak nog een tijd geblokkeerd."):
+                            d_stock_lock = st.date_input(
+                                "🔓 Vrij vanaf", value=date.today(),
+                                min_value=date(2000, 1, 1), max_value=date(2100, 12, 31),
+                                key=sk("stk_lock_date"))
+                    if d_shares and d_shareval:
+                        st.caption(f"➡️ Bruto dividend = {d_shares:g} × {d_shareval:g} = "
+                                   f"**{asset_cur} {d_shares * d_shareval:,.2f}** — "
+                                   "cash-boeking: geen (aanwas van stukken).")
+
+            def _book_stock_dividend_txn(fx_override) -> bool:
+                """Boek de gekoppelde aanwastransactie (aankoop zonder cash, zonder TOB)
+                voor een stockdividend. Kostbasis = brutowaarde van de toegekende
+                stukken. Geeft False (en toont een fout) als er geen wisselkoers is —
+                NOOIT stilzwijgend naar koers 1,0 terugvallen."""
+                _tot = float(d_shares) * float(d_shareval)
+                _fx, _tot_eur = compute_eur(_tot, asset_cur, d_date, fx_override)
+                if _fx is None or _tot_eur is None:
+                    st.error(f"Geen wisselkoers beschikbaar voor {asset_cur} op {d_date}. "
+                             "Vink '💱 Eigen wisselkoers gebruiken' aan en vul de koers in — "
+                             "zonder koers zou de kostbasis van de nieuwe stukken fout zijn.")
+                    return False
+                db.add_transaction(
+                    d_ticker, "buy", str(d_date), float(d_shares), float(d_shareval),
+                    _tot, asset_cur, 0.0,
+                    "Stockdividend / kapitalisatie in aandelen (automatisch gekoppeld)",
+                    account=d_account, costs=0.0, costs_currency="EUR",
+                    fx_rate=_fx, total_amount_eur=_tot_eur, costs_eur=0.0,
+                    is_stock_dividend=1, fx_manual=int(bool(fx_override)),
+                    lock_until=(str(d_stock_lock) if d_stock_lock else None))
+                return True
+
             mode = st.radio("Invoerwijze", ["Eenvoudig", "Gedetailleerd (bronbelasting + RV)"],
                             horizontal=True, key="div_mode")
 
             if mode == "Eenvoudig":
                 sc1, sc2 = st.columns(2)
                 with sc1:
-                    gross    = st.number_input("Bruto dividend *", min_value=0.0, step=0.01,
-                                               format="%.10g", value=None, key=dk("s_gross"))
-                    currency = st.selectbox("Munt", cur_opts, index=cur_opts.index(asset_cur),
-                                            key=sk(f"s_cur_{d_ticker}"))
+                    if d_stock:
+                        gross = ((d_shares or 0.0) * (d_shareval or 0.0)) or None
+                        st.number_input("Bruto dividend (= stukken × waarde)",
+                                        value=float(gross) if gross else 0.0,
+                                        disabled=True, format="%.10g", key=dk("s_gross_ro"))
+                        currency = asset_cur
+                        st.caption(f"Munt: **{asset_cur}** (volgt het activum bij een "
+                                   "uitkering in aandelen).")
+                    else:
+                        gross = st.number_input("Bruto dividend *", min_value=0.0, step=0.01,
+                                                format="%.10g", value=None, key=dk("s_gross"))
+                        currency = st.selectbox("Munt", cur_opts, index=cur_opts.index(asset_cur),
+                                                key=sk(f"s_cur_{d_ticker}"))
                 with sc2:
                     wh_amt = st.number_input("Ingehouden voorheffing (bedrag)", min_value=0.0,
                                              step=0.01, format="%.10g", value=None, key=dk("s_wh"))
@@ -3441,7 +3731,9 @@ def page_dividends():
                         + ("" if currency == "EUR" or _fxs is None else
                            f"  ≈  €{(g - w) * _fxs:,.2f}  (koers {_fxs:.6g})"))
                 if st.button("✅ Dividend toevoegen", type="primary", key=dk("s_submit")):
-                    if not gross or gross <= 0:
+                    if d_stock and (not d_shares or not d_shareval):
+                        st.error("Vul het aantal toegekende stukken én de waarde per stuk in.")
+                    elif not gross or gross <= 0:
                         st.error("Vul een bruto dividend in.")
                     else:
                         fx_rate, gross_eur = compute_eur(g, currency, d_date, s_fx_override)
@@ -3452,16 +3744,30 @@ def page_dividends():
                                      "gebruiken' aan en vul de koers van je broker in — "
                                      "zonder koers zou het EUR-bedrag fout zijn.")
                         else:
+                            _details = {"kind": d_kind, "net_eur": gross_eur - wh_eur}
+                            if d_stock:
+                                _details.update({"cash_basis": "none", "cash_eur": 0.0,
+                                                 "paid_in_shares": 1,
+                                                 "shares_received": float(d_shares)})
+                                if not _book_stock_dividend_txn(s_fx_override):
+                                    st.stop()
                             db.add_dividend(d_ticker, str(d_date), g, w, currency, notes or None,
                                             fx_rate=fx_rate, gross_eur=gross_eur, withholding_eur=wh_eur,
                                             belgian_rv_withheld=1 if w > 0 else 0, account=d_account,
                                             fx_manual=s_fx_manual,
-                                            details={"kind": d_kind, "net_eur": gross_eur - wh_eur})
+                                            details=_details)
                             clear_cache()
                             st.session_state["div_amt_nonce"] = dn + 1
                             _lbl = d_ticker or "algemeen (niet gekoppeld)"
-                            st.session_state["div_added_msg"] = (
-                                f"✅ Dividend {currency} {g - w:.2f} netto voor {_lbl} op {d_account} toegevoegd!")
+                            if d_stock:
+                                st.session_state["div_added_msg"] = (
+                                    f"✅ Stockdividend voor {_lbl} op {d_account} toegevoegd: "
+                                    f"{d_shares:g} stuk(s) à {currency} {d_shareval:g} "
+                                    f"(bruto {currency} {g:,.2f}) — geen cash-boeking, wel een "
+                                    "gekoppelde aanwastransactie (zonder cash en zonder TOB).")
+                            else:
+                                st.session_state["div_added_msg"] = (
+                                    f"✅ Dividend {currency} {g - w:.2f} netto voor {_lbl} op {d_account} toegevoegd!")
                             st.rerun()
 
             else:  # Gedetailleerd
@@ -3541,6 +3847,17 @@ def page_dividends():
                             _fx_curs[0], d_date, key_prefix=dk("d"), context="deze keten")
 
                 # Keten aanvullen met de tarieven (land + RV%)
+                # Stockdividend: is de keten leeg, veranker ze dan op stukken × waarde
+                # (bij een buitenlands activum als ① bruto, anders als ③).
+                if d_stock and d_shares and d_shareval and all(v is None for v in (A, B, C, D)):
+                    _anchor = round(float(d_shares) * float(d_shareval), 2)
+                    if is_foreign:
+                        A = _anchor
+                    else:
+                        C = _anchor
+                    st.caption(f"📦 Keten verankerd op de aandelenuitkering: "
+                               f"{'①' if is_foreign else '③'} = {d_shares:g} × {d_shareval:g} "
+                               f"= {asset_cur} {_anchor:,.2f}.")
                 res = tax_mod.resolve_dividend_chain(
                     A, B, C, D,
                     rv_rate=(rv_pct / 100.0),
@@ -3572,14 +3889,20 @@ def page_dividends():
                     st.session_state["div_amt_nonce"] = dn + 1
                     st.rerun()
 
-                cash_choice = bc2.radio(
-                    "Cash-boeking op basis van", ["④ Netto", "③ Bruto na bronbelasting", "① Bruto vóór bronbelasting"],
-                    horizontal=True, key=sk("cashbasis"),
-                    index=["④ Netto", "③ Bruto na bronbelasting", "① Bruto vóór bronbelasting"].index(pre["cash_basis"]) if pre.get("cash_basis") in ("④ Netto", "③ Bruto na bronbelasting", "① Bruto vóór bronbelasting") else 0,
-                    help="Welk bedrag als dividend in het cash-grootboek (💶 Cash) geboekt wordt. "
-                         "Standaard het netto (④) — wat je broker effectief stort. Kies ③ of ① als je "
-                         "broker bruto uitkeert en de belasting later apart afhoudt. Er kan er maar één "
-                         "gekozen worden.")
+                if d_stock:
+                    cash_choice = "📦 Geen (uitkering in aandelen)"
+                    bc2.caption("💶 **Cash-boeking: geen** — dit dividend wordt in aandelen "
+                                "uitgekeerd; er beweegt niets in het cash-grootboek. De "
+                                "tegenwaarde wordt als aanwastransactie geboekt.")
+                else:
+                    cash_choice = bc2.radio(
+                        "Cash-boeking op basis van", ["④ Netto", "③ Bruto na bronbelasting", "① Bruto vóór bronbelasting"],
+                        horizontal=True, key=sk("cashbasis"),
+                        index=["④ Netto", "③ Bruto na bronbelasting", "① Bruto vóór bronbelasting"].index(pre["cash_basis"]) if pre.get("cash_basis") in ("④ Netto", "③ Bruto na bronbelasting", "① Bruto vóór bronbelasting") else 0,
+                        help="Welk bedrag als dividend in het cash-grootboek (💶 Cash) geboekt wordt. "
+                             "Standaard het netto (④) — wat je broker effectief stort. Kies ③ of ① als je "
+                             "broker bruto uitkeert en de belasting later apart afhoudt. Er kan er maar één "
+                             "gekozen worden.")
 
                 if st.button("✅ Dividend toevoegen", type="primary", key=dk("d_submit")):
                     # EUR per veld (elk in zijn eigen munt op de dividenddatum). Een eigen
@@ -3593,12 +3916,16 @@ def page_dividends():
                     gross_eur = a_eur if a_eur is not None else (c_eur if c_eur is not None else d_eur)
                     net_eur   = d_eur if d_eur is not None else (c_eur if c_eur is not None else
                                 (a_eur - b_eur if (a_eur is not None and b_eur is not None) else None))
-                    if gross_eur is None or net_eur is None:
+                    if d_stock and (not d_shares or not d_shareval):
+                        st.error("Vul het aantal toegekende stukken én de waarde per stuk in.")
+                    elif gross_eur is None or net_eur is None:
                         st.error("Geef minstens een bruto- én een nettowaarde in (of voldoende velden om ze te berekenen).")
                     else:
                         wh_eur = max(0.0, gross_eur - net_eur)
                         # Cash-boeking op basis van het gekozen veld
-                        if cash_choice.startswith("①"):
+                        if d_stock:
+                            cash_basis, cash_eur_v = "none", 0.0
+                        elif cash_choice.startswith("①"):
                             cash_basis, cash_eur_v = "gross_before", (a_eur if a_eur is not None else net_eur)
                         elif cash_choice.startswith("③"):
                             cash_basis, cash_eur_v = "gross_after", (c_eur if c_eur is not None else net_eur)
@@ -3621,6 +3948,12 @@ def page_dividends():
                             "cash_eur":         cash_eur_v,
                             "kind":             d_kind,
                         }
+                        if d_stock:
+                            details["paid_in_shares"] = 1
+                            details["shares_received"] = float(d_shares)
+                            _stk_fx_ov = d_fx_override if (d_fx_manual and asset_cur in _fx_curs) else None
+                            if not _book_stock_dividend_txn(_stk_fx_ov):
+                                st.stop()
                         db.add_dividend(d_ticker, str(d_date), prim_v, wh_native, prim_cur, notes or None,
                                         fx_rate=fx_prim, gross_eur=gross_eur, withholding_eur=wh_eur,
                                         foreign_wht_withheld=1 if (rB and rB > 0) else 0,
@@ -3630,9 +3963,16 @@ def page_dividends():
                         clear_cache()
                         st.session_state["div_amt_nonce"] = dn + 1
                         _lbl = d_ticker or "algemeen (niet gekoppeld)"
-                        st.session_state["div_added_msg"] = (
-                            f"✅ Dividend voor {_lbl} op {d_account} toegevoegd (netto ≈ {eur(net_eur)}; "
-                            f"cash-boeking: {cash_choice}).")
+                        if d_stock:
+                            st.session_state["div_added_msg"] = (
+                                f"✅ Stockdividend voor {_lbl} op {d_account} toegevoegd: "
+                                f"{d_shares:g} stuk(s) à {asset_cur} {d_shareval:g} "
+                                f"(netto ≈ {eur(net_eur)}) — geen cash-boeking, wel een gekoppelde "
+                                "aanwastransactie (zonder cash en zonder TOB).")
+                        else:
+                            st.session_state["div_added_msg"] = (
+                                f"✅ Dividend voor {_lbl} op {d_account} toegevoegd (netto ≈ {eur(net_eur)}; "
+                                f"cash-boeking: {cash_choice}).")
                         st.rerun()
 
     else:  # 📋 Overzicht
@@ -3684,7 +4024,8 @@ def page_dividends():
 
         names_map = asset_name_map()
         a_by_tk   = {a["ticker"]: a for a in db.get_assets()}
-        CASH_LBL  = {"net": "④ Netto", "gross_after": "③ Bruto na", "gross_before": "① Bruto vóór"}
+        CASH_LBL  = {"net": "④ Netto", "gross_after": "③ Bruto na", "gross_before": "① Bruto vóór",
+                     "none": "📦 In aandelen (geen cash)"}
         CASH_KEY  = {v: k for k, v in CASH_LBL.items()}
         KIND_LBL  = {"dividend": "Dividend", "interest": "Interest", "securities_lending": "Securities lending"}
         KIND_KEY  = {v: k for k, v in KIND_LBL.items()}
@@ -3822,9 +4163,14 @@ def page_dividends():
                         problems.append(f"#{d['id']}: " + "; ".join(issues) + " — niet opgeslagen.")
                         continue
                     cbk = CASH_KEY.get(str(r["Cash"]), "net")
-                    cash_eur_v = {"gross_before": a_eur, "gross_after": c_eur, "net": net_eur}.get(cbk)
-                    if cash_eur_v is None:
-                        cash_eur_v = net_eur
+                    if cbk == "none":
+                        # Uitkering in aandelen: nooit cash boeken (0.0 is falsy, dus geen
+                        # 'or'-terugval gebruiken — die zou het netto stilzwijgend invullen).
+                        cash_eur_v = 0.0
+                    else:
+                        cash_eur_v = {"gross_before": a_eur, "gross_after": c_eur, "net": net_eur}.get(cbk)
+                        if cash_eur_v is None:
+                            cash_eur_v = net_eur
                     wh_eur = max(0.0, gross_eur - net_eur)
                     prim_v = rA if rA is not None else (rC if rC is not None else rD)
                     fx_prim = fx_ov or (compute_eur(prim_v, ncur, nd)[0] or 1.0)
