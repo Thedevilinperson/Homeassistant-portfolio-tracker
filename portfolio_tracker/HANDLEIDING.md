@@ -1,6 +1,6 @@
 # Portfolio Tracker - Handleiding
 
-Versie 1.3.1
+Versie 1.4.0
 
 ---
 
@@ -1223,29 +1223,105 @@ het internet via een poortdoorschakeling.
 
 **De OpenAI-sleutel.** Die wordt na het opslaan niet meer teruggetoond: je ziet alleen
 nog een herkenningsvorm zoals `sk-pro••••••••••••abcd`. Het invoerveld leeg laten
-betekent "ongewijzigd". Standaard staat de sleutel in `portfolio.db`, en dat bestand
-staat bij Home Assistant in `/share`, waar ook andere add-ons bij kunnen. Wil je dat
-vermijden, zet dan de omgevingsvariabele `OPENAI_API_KEY`: die krijgt voorrang en houdt
-de sleutel volledig buiten de database.
+betekent "ongewijzigd".
 
-### 11.2 Back-up
+Er zijn drie plekken waar de sleutel kan staan, in volgorde van veiligheid:
 
-De volledige toestand zit in `portfolio.db` in je datamap. Dat ene bestand kopiëren is
-een volledige back-up. Doe het bij voorkeur met de app gesloten; anders bestaan er ook
-`-wal` en `-shm` bestanden die je mee moet nemen.
+| Plek | Wie kan erbij | Aanrader |
+|---|---|---|
+| Add-on-configuratie (HA) of `config.bat` (Windows) | alleen deze add-on / deze PC | ✅ beste keuze |
+| Omgevingsvariabele `OPENAI_API_KEY` | het proces zelf | ✅ gelijkwaardig |
+| Instellingen in de app (`portfolio.db`) | elke add-on die bij `/share` kan | ⚠️ standaard, minder afgeschermd |
 
-Waar die datamap staat:
+De eerste twee komen op hetzelfde neer: de add-on-configuratie wordt door `run.sh`
+omgezet in die omgevingsvariabele. Staat er een sleutel in de omgeving, dan krijgt die
+altijd voorrang op wat in de app is opgeslagen, en zegt de instellingenpagina dat ook.
+Het stappenplan om over te schakelen staat hieronder.
+
+### 11.2 De API-sleutel afschermen — stap voor stap
+
+Vijf minuten werk. Sla dit over als je de AI-functies niet gebruikt.
+
+**Home Assistant**
+
+1. Open **Instellingen → Add-ons → Portfolio Tracker** en ga naar het tabblad
+   **Configuratie**.
+2. Plak je sleutel in het veld **openai_api_key**. Home Assistant toont dat veld
+   gemaskeerd, want het is als wachtwoordveld gedefinieerd.
+3. Klik **Opslaan**. Home Assistant vraagt om de add-on te herstarten — doe dat.
+4. Open de app en ga naar **⚙️ Instellingen → 🔑 API-sleutel**. Staat er een blauw
+   bericht *"Er staat een sleutel in de omgevingsvariabele OPENAI_API_KEY"*, dan werkt
+   het.
+5. Controleer dat de AI ook echt antwoordt: klik op **🤖 Bepaal via AI** bij een
+   activum, of genereer een advies op de portefeuillepagina.
+6. **Pas daarna** wis je de oude sleutel uit de database, met de knop
+   **🗑️ Verwijderen** naast de gemaskeerde sleutel. Niet eerder — anders sta je zonder
+   werkende sleutel als er in stap 3 iets misging.
+
+**Windows**
+
+1. Open `config.bat` (of `config.local.bat`) in Kladblok.
+2. Voeg onderaan een regel toe: `set "OPENAI_API_KEY=sk-jouw-sleutel"`
+3. Bewaar en start de app opnieuw met `start.bat`.
+4. Volg dan stap 4 tot en met 6 hierboven.
+
+> Zet `config.bat` met je sleutel erin niet in een publieke Git-repository. Gebruik
+> `config.local.bat`, dat niet mee gecommit wordt.
+
+**Waarom dit uitmaakt.** De database staat bij Home Assistant in `/share`. Die map is
+gedeeld: elke andere add-on die je installeert, kan er in principe in lezen. Een
+API-sleutel is geld — wie hem heeft, verbruikt op jouw rekening. De add-on-configuratie
+zit daarentegen in de privéopslag van deze add-on.
+
+**Vermoed je dat de sleutel gelekt is?** Ga naar `platform.openai.com/api-keys`,
+verwijder de oude sleutel daar en maak een nieuwe aan. Dat is het enige wat echt
+afdoende is; hem uit de app halen volstaat niet, want een kopie werkt gewoon verder.
+
+### 11.3 Back-up en herstel
+
+De volledige toestand zit in één bestand, `portfolio.db`, in je datamap:
 
 | Omgeving | Pad |
 |---|---|
 | Home Assistant add-on | `/share/portfolio_tracker` |
 | Windows | `%LOCALAPPDATA%\PortfolioTracker\data`, of wat je in `config.bat` instelde |
 
-Terugzetten is het bestand terugkopiëren en de app starten. Het schema wordt bij het
-opstarten automatisch bijgewerkt, dus een oudere back-up openen met een nieuwere versie
-werkt.
+De app maakt daar zelf kopieën van, in de submap `backups`. Je regelt alles via
+`⚙️ Instellingen → 🗃️ Data → 💾 Back-up en herstel`.
 
-### 11.3 Twee installaties, twee databases
+**Wanneer er automatisch een kopie gemaakt wordt.** Elke nacht om 02:30, én telkens
+wanneer de app start. Dat tweede moment is het belangrijkste: het gebeurt vlak vóór
+een nieuwe versie de database bijwerkt, dus precies wanneer je terug zou willen kunnen.
+Je stelt in hoeveel kopieën bewaard blijven (standaard veertien); de oudste worden
+opgeruimd, zodat je datamap niet volloopt.
+
+**Waarom geen gewone bestandskopie.** De app gebruikt WAL-journaling: de recentste
+wijzigingen staan tijdelijk in een apart `-wal`-bestand. Kopieer je `portfolio.db`
+terwijl de app draait, dan mis je die wijzigingen, of erger, je vangt een halve
+transactie. De app gebruikt daarom `VACUUM INTO`: SQLite schrijft zelf een consistente,
+compacte kopie weg terwijl alles gewoon doordraait. Het resultaat is één bestand dat je
+meteen kunt openen — geen losse `-wal` of `-shm` nodig.
+
+**Kopieën van de server af halen.** Met de knop `⬇️` download je een back-up naar je PC
+of telefoon. Doe dat af en toe: een back-up die naast het origineel staat, helpt je niet
+wanneer de schijf van je server het begeeft. Vijftien seconden werk, en het is het enige
+wat je beschermt tegen hardwarepech.
+
+**Herstellen.** Onder `♻️ Herstellen vanaf een back-up` kies je een bewaarde kopie, of
+je uploadt een bestand dat je eerder gedownload hebt. De app controleert eerst of het
+wel een geldige portfolio-database is, toont hoeveel activa, transacties en dividenden
+erin zitten naast wat je nu hebt, en vraagt om een expliciete bevestiging. Vóór het
+overschrijven maakt ze automatisch een veiligheidskopie van je huidige toestand
+(`voor-herstel`), zodat ook een verkeerd herstel terug te draaien is.
+
+> **Herstart de add-on na een herstel.** De draaiende app en de achtergrondplanner
+> hebben de oude database nog open. Zonder herstart kan je een mengeling van beide te
+> zien krijgen.
+
+Een oudere back-up openen met een nieuwere versie van de app werkt: het schema wordt
+bij het opstarten automatisch bijgewerkt.
+
+### 11.4 Twee installaties, twee databases
 
 Wil je een tweede portefeuille volledig gescheiden houden, geef die installatie dan een
 eigen datamap. Dat is de bedoelde manier om met de Windows-versie een zuivere tweede
@@ -1254,7 +1330,7 @@ portefeuille te draaien.
 Wat je niet moet doen: twee installaties op dezelfde database laten werken via een
 netwerkschijf.
 
-### 11.4 Veelvoorkomende situaties
+### 11.5 Veelvoorkomende situaties
 
 **Een positie heeft geen koers.** Kijk eerst op `🩺 Status`, gebruik dan
 `🔬 Bronnen diagnose` op de Activa-pagina. Werkt geen enkele bron, dan is een
@@ -1320,7 +1396,7 @@ Gebruik `Ververs prijzen` of Rerun in het menu rechtsboven.
 **De AI antwoordt niet.** Controleer je API-sleutel, en of het luik ingeschakeld staat
 in de instellingen. Was het antwoord afgekapt, dan meldt de app dat expliciet.
 
-### 11.5 Bijwerken
+### 11.6 Bijwerken
 
 Home Assistant: de nieuwe bestanden in de repo zetten en de add-on **herbouwen**, niet
 herstarten. Een herstart alleen gebruikt de oude Docker-laag.

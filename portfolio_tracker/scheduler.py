@@ -142,6 +142,43 @@ def job_track_idea_prices():
     db.cleanup_old_market_ideas(keep_days=400)
 
 
+def job_backup():
+    """Dagelijkse back-up van de database, met opruiming van de oudste.
+
+    Bewust een echte back-up (VACUUM INTO) en geen bestandskopie: die laatste is bij
+    een draaiende database met WAL niet betrouwbaar. Draait 's nachts, wanneer er
+    zeker niets ingevoerd wordt, en vóór de koersopruiming van de volgende dag.
+    Het aantal te bewaren back-ups staat in de instellingen ('backup_keep').
+    """
+    if db.get_setting("backup_auto", "1") == "0":
+        logger.info("Automatische back-up staat uit — overgeslagen.")
+        return
+    try:
+        keep = int(db.get_setting("backup_keep", "14") or 14)
+    except (TypeError, ValueError):
+        keep = 14
+    try:
+        b = db.create_backup("auto")
+    except Exception as exc:
+        logger.error(f"❌ Automatische back-up MISLUKT: {exc}")
+        try:
+            db.record_status_event(
+                "—", "backup_failed", "warning",
+                f"De automatische back-up is mislukt: {exc}",
+                {"error": str(exc)})
+        except Exception:
+            pass
+        return
+    removed = db.prune_backups(keep)
+    logger.info(f"💾 Back-up gemaakt: {b['name']} ({b['size'] / 1_000_000:.1f} MB) — "
+                f"{removed} oude opgeruimd, {keep} worden bewaard.")
+    try:
+        db.set_setting("backup_last_run", datetime.now().strftime("%Y-%m-%d %H:%M:00"))
+        db.resolve_status_event("—", "backup_failed")
+    except Exception:
+        pass
+
+
 def job_tax_optimization():
     """Genereer en sla het belastingadvies op (maandelijks)."""
     logger.info("💡 Maandelijks belastingadvies genereren...")
@@ -276,6 +313,15 @@ def main():
         id="status_checks",
         replace_existing=True,
         misfire_grace_time=3600,
+    )
+
+    # ── Dagelijkse back-up: 02:30, wanneer er zeker niets ingevoerd wordt ──
+    scheduler.add_job(
+        job_backup,
+        trigger=CronTrigger(hour=2, minute=30, timezone=BRUSSELS),
+        id="daily_backup",
+        replace_existing=True,
+        misfire_grace_time=7200,
     )
 
     logger.info("🚀 Scheduler gestart. Geplande jobs:")

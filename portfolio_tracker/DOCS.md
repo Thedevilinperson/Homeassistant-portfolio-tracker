@@ -60,21 +60,24 @@ Docker pikt een gewone herstart de gewijzigde bestanden niet op.
   aanmelding van Home Assistant. Er wordt bewust geen poort gepubliceerd: dat zou de
   app rechtstreeks op je thuisnetwerk zetten, buiten die aanmelding om, en dan kan
   iedereen op hetzelfde netwerk je portefeuille lezen én bewerken.
-- **De OpenAI-sleutel** staat standaard in `portfolio.db`, in `/share` — waar ook
-  andere add-ons bij kunnen. Wil je dat vermijden, zet dan de omgevingsvariabele
-  `OPENAI_API_KEY`: die krijgt voorrang en houdt de sleutel buiten de database.
+- **De OpenAI-sleutel** hoort bij voorkeur in het tabblad **Configuratie** van deze
+  add-on (veld `openai_api_key`, gemaskeerd): dan blijft ze in de privéopslag van de
+  add-on. Vul je ze in de app zelf in, dan staat ze in `portfolio.db` in `/share`,
+  waar ook andere add-ons bij kunnen. Stappenplan: hoofdstuk 11.2 van de handleiding.
+- **Back-ups** maakt de app zelf: elke nacht om 02:30 én bij elke start, dus vlak
+  vóór een nieuwe versie de database bijwerkt. Je beheert ze via
+  **⚙️ Instellingen → 🗃️ Data**. Download er af en toe één naar je eigen toestel —
+  een kopie naast het origineel helpt niet bij een defecte schijf.
 - **Draai nooit twee instanties tegen dezelfde database.** SQLite is niet gemaakt
   voor twee schrijvers; je riskeert gegevensverlies. Gebruik de add-on óf de
   Windows-versie, niet allebei op dezelfde databank.
-- **Maak een back-up** van `/share/portfolio_tracker/` voor je een grote wijziging
-  doorvoert. Hoofdstuk 11 van de handleiding beschrijft hoe.
 - Deze app is een hulpmiddel voor je eigen administratie. Ze is **geen
   aangiftesoftware en geen beleggingsadvies**. Controleer fiscale cijfers voor je
   ze gebruikt.
 
 ## Hulp nodig?
 
-Hoofdstuk 11.4 van de handleiding (**📖 Handleiding → 11. Onderhoud, back-up en
+Hoofdstuk 11.5 van de handleiding (**📖 Handleiding → 11. Onderhoud, back-up en
 probleemoplossing**) behandelt de veelvoorkomende situaties: een positie zonder
 koers, een TOB die niet klopt met je afschrift, een negatief cashsaldo, een AI die
 niet antwoordt, en meer.

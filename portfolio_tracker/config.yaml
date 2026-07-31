@@ -1,5 +1,5 @@
 name: "Portfolio Tracker"
-version: "1.3.1"
+version: "1.4.0"
 slug: "portfolio_tracker"
 description: "Streamlit app voor aandelen, ETF's en Belgische meerwaardebelasting met AI-advies"
 ingress: true
@@ -22,5 +22,14 @@ arch:
   - amd64
 startup: application
 boot: auto
-options: {}
-schema: {}
+# De OpenAI-sleutel kan hier ingevuld worden in plaats van in de app zelf.
+# Waarom dat beter is: een sleutel die je in de app opslaat, belandt in
+# portfolio.db — en die staat in /share, waar ook ándere add-ons bij kunnen. Wat je
+# hier invult, blijft in de privéopslag van deze add-on en wordt door Home Assistant
+# gemaskeerd getoond (type 'password'). run.sh geeft ze door als de omgevings-
+# variabele OPENAI_API_KEY, die in de app voorrang krijgt op de opgeslagen waarde.
+# Leeg laten is prima: dan gebruikt de app gewoon de sleutel uit haar instellingen.
+options:
+  openai_api_key: ""
+schema:
+  openai_api_key: "password?"

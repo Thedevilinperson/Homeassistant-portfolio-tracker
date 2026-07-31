@@ -11,6 +11,7 @@ import sqlite3
 import os
 import json
 import logging
+import shutil
 from datetime import datetime, date as _date, timedelta
 from pathlib import Path
 
@@ -2583,3 +2584,222 @@ def cleanup_old_prices(keep_days: int = 90):
     )
     conn.commit()
     conn.close()
+
+# ── Back-up en herstel ────────────────────────────────────────────────────────
+# De volledige toestand van de app zit in één SQLite-bestand. Een back-up is dus
+# een kopie van dat bestand — maar een RUWE bestandskopie van een draaiende
+# database is niet betrouwbaar: met WAL staan de recentste wijzigingen in een
+# apart -wal-bestand, en een kopie tijdens een schrijfactie kan halverwege een
+# transactie vallen. Daarom gebruiken we 'VACUUM INTO': SQLite schrijft zelf een
+# consistente, compacte kopie weg terwijl de app gewoon doordraait. Geen
+# aparte -wal/-shm-bestanden nodig, en het resultaat is meteen een geldige
+# database die je zo kunt openen.
+
+BACKUP_DIRNAME = "backups"
+BACKUP_PREFIX  = "portfolio-"
+BACKUP_SUFFIX  = ".db"
+
+
+def backup_dir() -> str:
+    """Map waarin de back-ups staan (naast de database, in de datamap)."""
+    return os.path.join(DATA_DIR, BACKUP_DIRNAME)
+
+
+def _backup_name(tag: str = "auto") -> str:
+    stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
+    safe = "".join(c for c in tag if c.isalnum() or c in "-_") or "auto"
+    return f"{BACKUP_PREFIX}{stamp}-{safe}{BACKUP_SUFFIX}"
+
+
+def _free_backup_path(directory: str, tag: str) -> str:
+    """Een nog niet bestaand pad voor een nieuwe back-up.
+
+    De naam bevat de tijd tot op de seconde, maar twee back-ups binnen dezelfde
+    seconde zijn best mogelijk (herstellen maakt er zelf één, en een dubbele klik
+    op de knop ook). VACUUM INTO weigert te schrijven naar een bestaand bestand —
+    het overschrijft nooit, en dat is maar goed ook. Vandaar een oplopend
+    volgnummer in plaats van een fout.
+    """
+    base = _backup_name(tag)
+    path = os.path.join(directory, base)
+    if not os.path.exists(path):
+        return path
+    stem = base[:-len(BACKUP_SUFFIX)]
+    for i in range(2, 100):
+        path = os.path.join(directory, f"{stem}-{i}{BACKUP_SUFFIX}")
+        if not os.path.exists(path):
+            return path
+    raise RuntimeError("Kon geen vrije bestandsnaam voor de back-up vinden.")
+
+
+def create_backup(tag: str = "auto") -> dict:
+    """Maak een consistente back-up van de database. Geeft
+    {'path', 'name', 'size', 'created'} terug; gooit bij een fout.
+
+    tag komt in de bestandsnaam terecht ('auto' voor de geplande back-up,
+    'handmatig' voor de knop, 'voor-herstel' voor de veiligheidskopie).
+    """
+    d = backup_dir()
+    os.makedirs(d, exist_ok=True)
+    path = _free_backup_path(d, tag)
+    conn = get_connection()
+    try:
+        # VACUUM INTO vereist SQLite 3.27+ (Python 3.11 levert ruim nieuwer).
+        conn.execute("VACUUM INTO ?", (path,))
+    finally:
+        conn.close()
+    st = os.stat(path)
+    logger.info(f"Back-up gemaakt: {path} ({st.st_size} bytes)")
+    return {"path": path, "name": os.path.basename(path), "size": st.st_size,
+            "created": datetime.fromtimestamp(st.st_mtime)}
+
+
+def list_backups() -> list[dict]:
+    """Alle aanwezige back-ups, nieuwste eerst."""
+    d = backup_dir()
+    if not os.path.isdir(d):
+        return []
+    out = []
+    for fn in os.listdir(d):
+        if not (fn.startswith(BACKUP_PREFIX) and fn.endswith(BACKUP_SUFFIX)):
+            continue
+        p = os.path.join(d, fn)
+        try:
+            st = os.stat(p)
+        except OSError:
+            continue
+        out.append({"path": p, "name": fn, "size": st.st_size,
+                    "created": datetime.fromtimestamp(st.st_mtime)})
+    return sorted(out, key=lambda b: b["created"], reverse=True)
+
+
+def delete_backup(name: str) -> bool:
+    """Verwijder één back-up op naam. Alleen bestanden uit de back-upmap met het
+    verwachte voor- en achtervoegsel — zo kan een verkeerde naam nooit iets anders
+    wissen."""
+    if not (name.startswith(BACKUP_PREFIX) and name.endswith(BACKUP_SUFFIX)):
+        return False
+    if os.path.basename(name) != name:      # geen paden, geen '..'
+        return False
+    p = os.path.join(backup_dir(), name)
+    if not os.path.isfile(p):
+        return False
+    os.remove(p)
+    logger.info(f"Back-up verwijderd: {p}")
+    return True
+
+
+def prune_backups(keep: int = 10) -> int:
+    """Behoud de 'keep' nieuwste back-ups, verwijder de rest. Geeft het aantal
+    verwijderde bestanden terug. Zonder opruimen loopt de datamap vol — een
+    portefeuille-database groeit vooral door de koershistoriek."""
+    if keep < 1:
+        keep = 1
+    backups = list_backups()
+    removed = 0
+    for b in backups[keep:]:
+        try:
+            os.remove(b["path"])
+            removed += 1
+        except OSError as exc:
+            logger.warning(f"Back-up opruimen faalde ({b['name']}): {exc}")
+    if removed:
+        logger.info(f"{removed} oude back-up(s) opgeruimd (behouden: {keep}).")
+    return removed
+
+
+def validate_database_file(path: str) -> dict:
+    """Is dit een bruikbare portfolio-database? Geeft
+    {'ok': bool, 'reason': str, 'tables': [...], 'counts': {...}} terug.
+
+    Wordt gebruikt vóór een herstel: een willekeurig bestand terugzetten zou de
+    app onherstelbaar stukmaken. We controleren de SQLite-handtekening, of het
+    bestand leesbaar is, en of de kerntabellen aanwezig zijn.
+    """
+    need = {"assets", "transactions", "dividends", "settings"}
+    try:
+        with open(path, "rb") as fh:
+            if fh.read(16) != b"SQLite format 3\x00":
+                return {"ok": False, "reason": "Dit is geen SQLite-databasebestand.",
+                        "tables": [], "counts": {}}
+    except OSError as exc:
+        return {"ok": False, "reason": f"Bestand niet leesbaar: {exc}",
+                "tables": [], "counts": {}}
+    try:
+        conn = sqlite3.connect(f"file:{path}?mode=ro", uri=True)
+        conn.row_factory = sqlite3.Row
+        rows = conn.execute(
+            "SELECT name FROM sqlite_master WHERE type='table'").fetchall()
+        tables = sorted(r["name"] for r in rows)
+        missing = need - set(tables)
+        counts = {}
+        if not missing:
+            for t in ("assets", "transactions", "dividends"):
+                counts[t] = conn.execute(f"SELECT COUNT(*) c FROM {t}").fetchone()["c"]
+        conn.close()
+    except sqlite3.Error as exc:
+        return {"ok": False, "reason": f"Kon de database niet lezen: {exc}",
+                "tables": [], "counts": {}}
+    if missing:
+        return {"ok": False,
+                "reason": ("Dit lijkt geen portfolio-database: de tabel(len) "
+                           + ", ".join(sorted(missing)) + " ontbreken."),
+                "tables": tables, "counts": {}}
+    return {"ok": True, "reason": "", "tables": tables, "counts": counts}
+
+
+def restore_backup(source_path: str) -> dict:
+    """Zet een back-up terug over de huidige database.
+
+    Werkwijze, in deze volgorde, want elke stap beschermt de vorige:
+      1. het bronbestand valideren (geen willekeurig bestand terugzetten),
+      2. een veiligheidskopie van de HUIDIGE database maken — die staat gewoon bij
+         de andere back-ups, dus een verkeerd herstel is zelf ook terug te draaien,
+      3. de WAL samenvoegen en de nieuwe database op zijn plaats zetten,
+      4. de losse -wal/-shm-bestanden opruimen: die horen bij de OUDE database en
+         zouden na het vervangen niet meer kloppen.
+
+    Belangrijk: draaiende processen (de app in je browser, de achtergrondplanner)
+    houden nog verbindingen naar het oude bestand. Na een herstel hoort de add-on
+    dan ook herstart te worden; de aanroeper moet dat aan de gebruiker zeggen.
+    """
+    info = validate_database_file(source_path)
+    if not info["ok"]:
+        raise ValueError(info["reason"])
+
+    safety = create_backup("voor-herstel")
+
+    # WAL netjes afsluiten zodat er geen wijzigingen in een los bestand blijven
+    # hangen die straks over de teruggezette database heen zouden worden gespeeld.
+    try:
+        conn = get_connection()
+        conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+        conn.close()
+    except sqlite3.Error as exc:
+        logger.warning(f"wal_checkpoint vóór herstel faalde (niet blokkerend): {exc}")
+
+    shutil.copyfile(source_path, DB_PATH)
+    for ext in ("-wal", "-shm"):
+        p = DB_PATH + ext
+        if os.path.exists(p):
+            try:
+                os.remove(p)
+            except OSError as exc:
+                logger.warning(f"Opruimen van {p} faalde: {exc}")
+
+    logger.info(f"Database hersteld vanaf {source_path}; veiligheidskopie: {safety['name']}")
+    return {"restored_from": source_path, "safety_backup": safety, "counts": info["counts"]}
+
+
+def database_size() -> int:
+    """Grootte van de database in bytes (0 als ze nog niet bestaat)."""
+    try:
+        total = os.path.getsize(DB_PATH)
+    except OSError:
+        return 0
+    for ext in ("-wal", "-shm"):
+        try:
+            total += os.path.getsize(DB_PATH + ext)
+        except OSError:
+            pass
+    return total

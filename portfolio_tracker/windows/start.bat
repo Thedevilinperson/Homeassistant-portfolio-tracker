@@ -28,8 +28,13 @@ if not exist "%DATA_DIR%" mkdir "%DATA_DIR%"
 if not exist "%LOG_DIR%" mkdir "%LOG_DIR%"
 echo Datamap: %DATA_DIR%
 
-rem --- Database bijwerken; de migraties zijn idempotent -----------------------
+rem --- Veiligheidskopie vooraf ------------------------------------------------
+rem  Dit is het risicomoment: een nieuwe versie voegt kolommen toe. Gaat daar
+rem  iets mis, dan wil je de toestand van vlak daarvoor terug.
 pushd "%APP_DIR%"
+"%PYTHON%" -c "import os, database as db; b=db.create_backup('voor-start') if os.path.exists(db.DB_PATH) else None; db.prune_backups(int(db.get_setting('backup_keep','14') or 14)); print('Veiligheidskopie: '+b['name'] if b else 'Nog geen database - kopie overgeslagen.')"
+
+rem --- Database bijwerken; de migraties zijn idempotent -----------------------
 "%PYTHON%" -c "import database; database.init_db()"
 if !ERRORLEVEL! EQU 0 goto :db_ok
 echo [FOUT] De database kon niet geopend of bijgewerkt worden.

@@ -5459,10 +5459,168 @@ def page_settings():
         assets = db.get_assets()
         txns   = db.get_transactions()
         divs   = db.get_dividends()
-        c1, c2, c3 = st.columns(3)
+        c1, c2, c3, c4 = st.columns(4)
         c1.metric("Activa", len(assets))
         c2.metric("Transacties", len(txns))
         c3.metric("Dividenden", len(divs))
+        c4.metric("Database", f"{db.database_size() / 1_000_000:.1f} MB")
+        st.divider()
+
+        # ── Back-up ──────────────────────────────────────────────────────────
+        st.subheader("💾 Back-up en herstel")
+        _backups = db.list_backups()
+        _last_auto = db.get_setting("backup_last_run")
+        st.caption(
+            "Je volledige administratie zit in één databasebestand. Een back-up is een "
+            "consistente kopie daarvan, gemaakt terwijl de app doordraait (`VACUUM INTO`) "
+            "— dus niet zomaar een bestandskopie, die bij een draaiende database "
+            f"onbetrouwbaar is. De kopieën staan in `{db.backup_dir()}`. "
+            "Er wordt automatisch een kopie gemaakt telkens de app start, dus vlak vóór "
+            "een nieuwe versie de database bijwerkt: precies het moment waarop je terug "
+            "wil kunnen.")
+
+        if not _backups:
+            st.warning("⚠️ Er is nog **geen enkele back-up**. Maak er nu één — het duurt "
+                       "een seconde en het scheelt je een reconstructie van jaren "
+                       "invoerwerk als er iets misgaat.")
+        else:
+            _newest = _backups[0]
+            _age_h = (datetime.now() - _newest["created"]).total_seconds() / 3600
+            _msg = (f"Nieuwste back-up: **{_newest['name']}** "
+                    f"({_newest['created'].strftime('%d/%m/%Y %H:%M')}, "
+                    f"{_newest['size'] / 1_000_000:.1f} MB) · {len(_backups)} bewaard")
+            if _age_h > 48:
+                st.warning("⚠️ " + _msg + f" — dat is {_age_h / 24:.0f} dagen geleden.")
+            else:
+                st.success("✅ " + _msg)
+
+        bc1, bc2, bc3 = st.columns([1, 1, 2])
+        if bc1.button("💾 Nu back-uppen", type="primary", key="bk_now"):
+            try:
+                b = db.create_backup("handmatig")
+                db.prune_backups(int(db.get_setting("backup_keep", "14") or 14))
+                st.success(f"✅ Back-up gemaakt: **{b['name']}** "
+                           f"({b['size'] / 1_000_000:.1f} MB)")
+                st.rerun()
+            except Exception as exc:
+                st.error(f"❌ Back-up mislukt: {exc}")
+        with bc2:
+            if _backups:
+                try:
+                    with open(_backups[0]["path"], "rb") as _fh:
+                        st.download_button("⬇️ Nieuwste ophalen", data=_fh.read(),
+                                           file_name=_backups[0]["name"],
+                                           mime="application/vnd.sqlite3",
+                                           key="bk_dl_latest",
+                                           help="Bewaar deze kopie ergens ANDERS dan op dit "
+                                                "toestel — een back-up naast het origineel "
+                                                "helpt niet bij een defecte schijf.")
+                except OSError as exc:
+                    st.error(f"Kon de back-up niet lezen: {exc}")
+        with bc3:
+            _auto_on = db.get_setting("backup_auto", "1") != "0"
+            _keep_cur = int(db.get_setting("backup_keep", "14") or 14)
+            ac1, ac2 = st.columns([2, 1])
+            _auto_new = ac1.checkbox("Automatische back-up (dagelijks 02:30 + bij elke start)",
+                                     value=_auto_on, key="bk_auto")
+            _keep_new = ac2.number_input("Bewaren", min_value=1, max_value=200,
+                                         value=_keep_cur, step=1, key="bk_keep",
+                                         help="Aantal back-ups dat bewaard blijft; de oudste "
+                                              "worden opgeruimd.")
+            if _auto_new != _auto_on or int(_keep_new) != _keep_cur:
+                db.set_setting("backup_auto", "1" if _auto_new else "0")
+                db.set_setting("backup_keep", str(int(_keep_new)))
+                st.caption("✅ Opgeslagen.")
+        if _last_auto:
+            st.caption(f"Laatste automatische back-up: {_short_ts(_last_auto)}.")
+
+        with st.expander(f"📂 Alle back-ups ({len(_backups)})"):
+            if not _backups:
+                st.info("Nog geen back-ups.")
+            else:
+                for b in _backups:
+                    r1, r2, r3 = st.columns([3, 1, 1])
+                    r1.write(f"**{b['name']}**  \n"
+                             f"{b['created'].strftime('%d/%m/%Y %H:%M')} · "
+                             f"{b['size'] / 1_000_000:.1f} MB")
+                    with r2:
+                        try:
+                            with open(b["path"], "rb") as _fh:
+                                st.download_button("⬇️", data=_fh.read(), file_name=b["name"],
+                                                   mime="application/vnd.sqlite3",
+                                                   key=f"bk_dl_{b['name']}")
+                        except OSError:
+                            st.caption("onleesbaar")
+                    if r3.button("🗑️", key=f"bk_del_{b['name']}",
+                                 help="Deze back-up verwijderen"):
+                        if db.delete_backup(b["name"]):
+                            st.success(f"✅ {b['name']} verwijderd.")
+                            st.rerun()
+                        else:
+                            st.error("Verwijderen mislukt.")
+
+        with st.expander("♻️ Herstellen vanaf een back-up"):
+            st.warning(
+                "Een herstel **overschrijft je huidige database volledig**. Alles wat je "
+                "sinds die back-up hebt ingevoerd, is dan weg. Er wordt automatisch eerst "
+                "een veiligheidskopie van de huidige toestand gemaakt (`voor-herstel`), "
+                "zodat ook een verkeerd herstel nog terug te draaien is.")
+            st.caption("Na het herstel moet de add-on **herstart** worden: de draaiende "
+                       "app en de achtergrondplanner hebben de oude database nog open.")
+
+            _rsrc = st.radio("Herstellen vanaf", ["Een bewaarde back-up", "Een geüpload bestand"],
+                             horizontal=True, key="bk_restore_src")
+            _path, _label = None, ""
+            if _rsrc == "Een bewaarde back-up":
+                if not _backups:
+                    st.info("Er zijn geen bewaarde back-ups.")
+                else:
+                    _pick = st.selectbox(
+                        "Back-up", _backups,
+                        format_func=lambda b: (f"{b['name']} · "
+                                               f"{b['created'].strftime('%d/%m/%Y %H:%M')} · "
+                                               f"{b['size'] / 1_000_000:.1f} MB"),
+                        key="bk_restore_pick")
+                    _path, _label = _pick["path"], _pick["name"]
+            else:
+                _up = st.file_uploader("Databasebestand (.db)", type=["db", "sqlite", "sqlite3"],
+                                       key="bk_restore_upload")
+                if _up is not None:
+                    import tempfile
+                    _tmp = os.path.join(tempfile.gettempdir(), "restore_upload.db")
+                    with open(_tmp, "wb") as _fh:
+                        _fh.write(_up.getbuffer())
+                    _path, _label = _tmp, _up.name
+
+            if _path:
+                _chk = db.validate_database_file(_path)
+                if not _chk["ok"]:
+                    st.error(f"❌ {_chk['reason']}")
+                else:
+                    _c = _chk["counts"]
+                    st.info(f"📋 **{_label}** bevat: {_c.get('assets', 0)} activa · "
+                            f"{_c.get('transactions', 0)} transacties · "
+                            f"{_c.get('dividends', 0)} dividenden.  \n"
+                            f"Je huidige database: {len(assets)} activa · {len(txns)} "
+                            f"transacties · {len(divs)} dividenden.")
+                    _rn = st.session_state.get("bk_restore_nonce", 0)
+                    if st.checkbox("Ja, ik begrijp dat mijn huidige gegevens overschreven worden",
+                                   key=f"bk_restore_confirm_{_rn}"):
+                        if st.button("♻️ Herstel nu uitvoeren", type="primary",
+                                     key="bk_restore_go"):
+                            try:
+                                res = db.restore_backup(_path)
+                                clear_cache()
+                                st.session_state["bk_restore_nonce"] = _rn + 1
+                                st.success(
+                                    f"✅ Hersteld vanaf **{_label}**. Veiligheidskopie van je "
+                                    f"vorige toestand: **{res['safety_backup']['name']}**.  \n"
+                                    "**Herstart nu de add-on** (Home Assistant → add-on → "
+                                    "Herstarten) zodat alle processen de herstelde database "
+                                    "gebruiken.")
+                            except Exception as exc:
+                                st.error(f"❌ Herstel mislukt: {exc}")
+
         st.divider()
 
         st.subheader("📥 Bulk-import via Excel")

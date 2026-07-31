@@ -2,6 +2,62 @@
 
 Alle noemenswaardige wijzigingen aan de Portfolio Tracker add-on.
 
+## 1.4.0
+De app maakt vanaf nu zelf back-ups, en de OpenAI-sleutel kan buiten de database
+gehouden worden.
+
+### 💾 Back-up en herstel
+
+Tot nu toe bestond er geen enkele back-upvoorziening: één corrupte SQLite of een
+verkeerde handeling en jaren fiscale historiek was weg. Nieuw blok onder
+**⚙️ Instellingen → 🗃️ Data**:
+
+- **Automatisch**, op twee momenten: elke nacht om 02:30, en telkens wanneer de app
+  start. Dat tweede moment is het belangrijkste — het gebeurt vlak vóór een nieuwe
+  versie de database bijwerkt, precies wanneer je terug zou willen kunnen. Beide zijn
+  uit te schakelen; het aantal te bewaren kopieën is instelbaar (standaard veertien,
+  de oudste worden opgeruimd).
+- **Handmatig**, met de knop *Nu back-uppen*.
+- **Downloaden** van elke kopie naar je eigen toestel. Een back-up die naast het
+  origineel staat, helpt niet bij een defecte schijf.
+- **Herstellen** vanaf een bewaarde kopie of een geüpload bestand, met een
+  validatiestap (is dit wel een portfolio-database?), een vergelijking van de inhoud
+  met je huidige database, een expliciete bevestiging, en een automatische
+  veiligheidskopie vooraf — zodat ook een verkeerd herstel terug te draaien is.
+
+Technisch gebruikt de back-up `VACUUM INTO` in plaats van een bestandskopie. Bij een
+draaiende WAL-database is een gewone kopie onbetrouwbaar: de recentste wijzigingen
+staan in een apart `-wal`-bestand en je kunt halverwege een transactie vallen.
+`VACUUM INTO` laat SQLite zelf een consistente, compacte kopie wegschrijven terwijl
+alles doordraait, en levert één bestand op dat je meteen kunt openen.
+
+Nieuw in `database.py`: `create_backup()`, `list_backups()`, `delete_backup()`,
+`prune_backups()`, `validate_database_file()`, `restore_backup()`, `database_size()`.
+Nieuwe scheduler-job `daily_backup`. Mislukt de automatische back-up, dan verschijnt
+dat als waarschuwing op de statuspagina — een stille faalmodus is hier het gevaarlijkst.
+
+Het verwijderen van een back-up accepteert alleen bestandsnamen uit de back-upmap met
+het verwachte voor- en achtervoegsel, dus een pad als `../portfolio.db` doet niets.
+
+### 🔐 De API-sleutel hoeft niet meer in de database
+
+De add-on heeft nu een configuratieoptie `openai_api_key` van het type `password`:
+Home Assistant toont ze gemaskeerd en bewaart ze in de privéopslag van de add-on, niet
+in `/share`. `run.sh` zet ze om in de omgevingsvariabele `OPENAI_API_KEY`, die in de
+app voorrang krijgt op de opgeslagen waarde. Op Windows doe je hetzelfde met een regel
+in `config.bat`.
+
+Waarom dit uitmaakt: `portfolio.db` staat in `/share`, en die map is gedeeld met andere
+add-ons. Een API-sleutel is geld. Het stappenplan staat in hoofdstuk 11.2 van de
+handleiding — inclusief de volgorde die ertoe doet: eerst instellen en controleren dat
+de AI antwoordt, en **pas daarna** de oude sleutel uit de app wissen.
+
+### Overige
+
+- De datapagina toont nu ook de grootte van de database.
+- Back-upnamen krijgen een volgnummer als er al één met dezelfde tijdstempel bestaat
+  (`VACUUM INTO` overschrijft nooit een bestaand bestand — terecht).
+
 ## 1.3.1
 Een beveiligingsronde plus vier correcties die uit een volledige doorlichting van de
 codebase kwamen. **Lees het eerste punt: het raakt iedereen die de add-on draait.**
