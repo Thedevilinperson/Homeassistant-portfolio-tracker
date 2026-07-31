@@ -25,11 +25,16 @@ RUN pip install --no-cache-dir -r requirements.txt
 # Alle applicatiebestanden kopiëren
 COPY . .
 
-# Streamlit leest zijn configuratie ALLEEN uit .streamlit/config.toml (naast de
-# CLI-vlaggen). Het bestand stond in de repowortel en werd daardoor stilzwijgend
-# genegeerd — inclusief het donkere thema, dat de eigen CSS van de app wél
-# veronderstelt. Deze kopie maakt het effectief.
-RUN mkdir -p /app/.streamlit && cp /app/config.toml /app/.streamlit/config.toml
+# Streamlit leest zijn configuratie uit .streamlit/config.toml, relatief aan de
+# werkmap. Dat bestand staat in deze repo al op de juiste plek
+# (portfolio_tracker/.streamlit/config.toml) en komt met de COPY hierboven meteen
+# goed terecht op /app/.streamlit/config.toml. Er valt dus niets te verplaatsen.
+# Deze regel controleert dat alleen en drukt het resultaat af in het bouwlogboek;
+# ze eindigt bewust op 'true', zodat een ontbrekend configuratiebestand nooit de
+# hele build kan laten mislukken.
+RUN ls -l /app/.streamlit/config.toml \
+    && echo "Streamlit-configuratie staat goed." \
+    || echo "Let op: geen /app/.streamlit/config.toml - run.sh geeft de essentiele instellingen als vlaggen mee."
 
 # Omgevingsvariabelen
 ENV DATA_DIR=/share/portfolio_tracker \

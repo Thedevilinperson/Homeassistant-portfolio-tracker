@@ -1,6 +1,6 @@
 # Portfolio Tracker - Handleiding
 
-Versie 1.4.0
+Versie 1.4.2
 
 ---
 

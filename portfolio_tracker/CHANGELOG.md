@@ -2,6 +2,38 @@
 
 Alle noemenswaardige wijzigingen aan de Portfolio Tracker add-on.
 
+## 1.4.2
+Draait een overbodige wijziging uit 1.3.1 terug die de add-on sinds 1.4.0 onbouwbaar
+maakte.
+
+De Dockerfile bevatte deze regel:
+
+```dockerfile
+RUN mkdir -p /app/.streamlit && cp /app/config.toml /app/.streamlit/config.toml
+```
+
+Die faalde met `cp: cannot stat '/app/config.toml'`, en daarmee de volledige build.
+De aanname erachter was fout. `config.toml` staat in deze repo op
+`portfolio_tracker/.streamlit/config.toml` — dus al precies waar Streamlit kijkt.
+`COPY . .` zet het bestand meteen goed op `/app/.streamlit/config.toml`, er valt niets
+te verplaatsen, en de kopieerregel zocht naar een bestand dat er terecht niet was.
+
+De regel is vervangen door een controle die het pad in het bouwlogboek afdrukt en
+nooit kan mislukken. De gelijkaardige toevoeging in `start.bat` is volledig
+teruggedraaid: op Windows draait Streamlit al vanuit de app-map, dus ook daar wordt
+`.streamlit\config.toml` gewoon gevonden.
+
+**Twee eerdere mededelingen die hiermee vervallen:**
+
+- De waarschuwing bij 1.3.1 dat het uiterlijk kon veranderen. `config.toml` werd altijd
+  al gelezen; het donkere thema was nooit weg.
+- De bewering dat het bestand genegeerd werd. Dat was verkeerd, en het is precies
+  daarom een goede zaak dat de XSRF-instelling van 1.3.1 óók in `config.toml` staat:
+  die werd dus wel degelijk toegepast.
+
+Geen enkele wijziging aan de toepassing zelf; 1.4.0 kwam simpelweg nooit voorbij stap 9
+van de build.
+
 ## 1.4.0
 De app maakt vanaf nu zelf back-ups, en de OpenAI-sleutel kan buiten de database
 gehouden worden.
