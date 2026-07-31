@@ -2,6 +2,67 @@
 
 Alle noemenswaardige wijzigingen aan de Portfolio Tracker add-on.
 
+## 1.5.0
+Opschoning onder de motorkap. Aan wat je op het scherm ziet, verandert niets — dit gaat
+over hoe de code in elkaar zit, zodat elke volgende wijziging goedkoper en veiliger
+wordt.
+
+### `app.py` opgesplitst: van 6.414 naar 141 regels
+
+De volledige interface zat in één bestand, met pagina's van 700 tot 900 regels. Elke
+pagina heeft nu een eigen module in `views/`:
+
+```
+app.py                 opzet, zijbalk, doorgeven aan de gekozen pagina   (141)
+views/common.py        gedeeld fundament: opmaak, gecachet overzicht,   (1018)
+                       blijvende filters, herberekeningen, widgets
+views/assets.py        (950)   views/settings.py     (870)
+views/dividends.py     (762)   views/transactions.py (731)
+views/portfolio.py     (475)   views/dashboard.py    (437)
+views/ai.py            (370)   views/evolution.py    (272)
+views/status.py        (236)   views/tax.py          (217)
+views/simulation.py    (165)   views/docs.py         (148)
+views/cash.py          (135)
+```
+
+Twee bewuste keuzes daarbij:
+
+- **De map heet `views`, niet `pages`.** Streamlit bouwt uit een map met de naam
+  `pages` automatisch een eigen navigatiemenu, wat zou botsen met de zijbalk die de app
+  zelf opbouwt. Het lag voor de hand om `pages` te kiezen — en het zou stilletjes een
+  tweede menu hebben opgeleverd.
+- **De afhankelijkheid loopt één kant op.** Pagina's gebruiken `views/common.py`, maar
+  `common` kent geen enkele pagina en pagina's kennen elkaar niet. Dat is nagemeten,
+  niet aangenomen: geen enkele pagina gebruikte een functie van een andere pagina, wat
+  de opsplitsing mechanisch en risicoloos maakte.
+
+De code zelf is niet herschreven: functies zijn als exacte tekstblokken verplaatst.
+Gecontroleerd is dat alle 61 functies precies één keer voorkomen, dat elke module elke
+naam die ze gebruikt ook echt kent, en dat de app en alle dertien pagina's foutloos
+renderen.
+
+### Vier bijna-identieke dividendberekeningen samengevoegd
+
+Het netto- en cashbedrag van een dividend werd op vier plaatsen berekend
+(`dividend_net_eur` en een lokale `_neur` in `app.py`, `_div_net_eur` en `_div_cash_eur`
+in `database.py`). Ze waren al uit elkaar gegroeid: één ving geen `None`-waarden op en
+één kende de 'geen cash'-regel voor stockdividenden niet. Zulke kopieën leveren vroeg of
+laat een ander cijfer op de ene pagina dan op de andere.
+
+Er is nu één bron in `database.py`: `dividend_gross_eur()`, `dividend_net_eur()`,
+`dividend_cash_eur()` en `dividends_net_eur()`, elk in de veiligste variant van de vier.
+De oude interne namen blijven als verwijzing bestaan, dus bestaande aanroepen werken
+gewoon door.
+
+### Blokkering verhuisd naar het gecachete overzicht
+
+`locked_summary()` deed een volledige extra FIFO-pass over alle transacties, ongecacht,
+bij élke render van zowel het dashboard als de portefeuille — precies het werk dat de
+cache van `get_overview()` moest vermijden. Het resultaat zit nu in dat gecachete
+overzicht (`overview["locked"]`), met dezelfde rekeningfilter als de rest. De
+waarschuwing in het verkoopformulier rekent nog wel apart: die kijkt naar een specifieke
+datum en kan dus niet uit de cache komen.
+
 ## 1.4.2
 Draait een overbodige wijziging uit 1.3.1 terug die de add-on sinds 1.4.0 onbouwbaar
 maakte.

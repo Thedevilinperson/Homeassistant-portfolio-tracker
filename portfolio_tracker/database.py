@@ -840,24 +840,54 @@ def delete_cash_movement(mov_id: int):
     conn.close()
 
 
-def _div_net_eur(d: dict) -> float:
+# ── Bedragen van een dividend (de enige plek waar dit gerekend wordt) ────────
+# Deze drie functies zijn de ENIGE bron voor het bruto-, netto- en cashbedrag van
+# een dividend. Ze stonden ooit in vier bijna-identieke varianten verspreid over
+# database.py en app.py, waarvan er één geen None-waarden opving en één de
+# 'geen cash'-regel voor stockdividenden niet kende. Zulke kopieën lopen vroeg of
+# laat uiteen, en dan verschilt het cijfer op de ene pagina van dat op de andere.
+# Voeg hier dus toe, kopieer niet.
+
+def dividend_gross_eur(d: dict) -> float:
+    """Brutobedrag (EUR) vóór alle voorheffingen."""
+    g = d.get("gross_eur") if d.get("gross_eur") is not None else d.get("gross_amount")
+    return g or 0.0
+
+
+def dividend_net_eur(d: dict) -> float:
+    """Netto ontvangen bedrag (EUR), na alle voorheffingen."""
     if d.get("net_eur") is not None:
-        return d["net_eur"]
-    g = d.get("gross_eur") if d.get("gross_eur") is not None else d["gross_amount"]
-    w = d.get("withholding_eur") if d.get("withholding_eur") is not None else d["withholding_tax"]
-    return (g or 0) - (w or 0)
+        return d["net_eur"] or 0.0
+    w = d.get("withholding_eur") if d.get("withholding_eur") is not None else d.get("withholding_tax")
+    return dividend_gross_eur(d) - (w or 0.0)
 
 
-def _div_cash_eur(d: dict) -> float:
-    """Cashbedrag (EUR) van een dividend voor het cash-grootboek.
-    Gebruikt het bij invoer gekozen veld (cash_basis: net/gross_after/gross_before);
-    valt terug op het netto-bedrag voor oudere rijen. 'none' (uitkering in aandelen,
+def dividend_cash_eur(d: dict) -> float:
+    """Cashbedrag (EUR) voor het cash-grootboek.
+
+    Gebruikt het bij invoer gekozen veld (cash_basis: net/gross_after/gross_before)
+    en valt terug op het netto voor oudere rijen. 'none' (uitkering in aandelen —
     stockdividend/kapitalisatie) boekt per definitie GEEN cash."""
     if (d.get("cash_basis") or "") == "none":
         return 0.0
     if d.get("cash_eur") is not None:
-        return d["cash_eur"]
-    return _div_net_eur(d)
+        return d["cash_eur"] or 0.0
+    return dividend_net_eur(d)
+
+
+def dividends_net_eur(divs, accounts=None) -> float:
+    """Som van de netto dividenden (EUR), optioneel beperkt tot een set rekeningen."""
+    total = 0.0
+    for d in divs:
+        if accounts is not None and (d.get("account") or DEFAULT_ACCOUNT) not in accounts:
+            continue
+        total += dividend_net_eur(d)
+    return total
+
+
+# Oude interne namen, behouden zodat bestaande aanroepen blijven werken.
+_div_net_eur  = dividend_net_eur
+_div_cash_eur = dividend_cash_eur
 
 
 def compute_cash_positions(accounts=None) -> dict:
