@@ -97,6 +97,74 @@ def page_dashboard():
                        else overview.get("selection_realized_year", 0.0))
     period_lbl = "sinds start" if all_time else "YTD"
 
+    # Wijzigingen in de AI-adviezen: één keer ophalen, zowel het bezoekblok als de
+    # ratingsynthese verderop gebruiken deze uitkomst.
+    dash_changes = ai_advisor.rating_changes(list(pv.keys())) if pv else {}
+
+    # ── Sinds je vorige bezoek ───────────────────────────────────────────────
+    # Bewust vastgeklikt per sessie: bij elke rerun binnen dezelfde sessie zou een
+    # 'sinds vorige keer' die zichzelf blijft bijwerken altijd nul tonen. We lezen de
+    # vorige stand één keer uit, schrijven meteen de nieuwe weg, en houden de vorige
+    # in de sessie vast zolang je in de app blijft.
+    def _visit_block():
+        if not st.session_state.get("_visit_loaded"):
+            st.session_state["_visit_prev_at"] = db.get_setting("last_visit_at")
+            _pv = db.get_setting("last_visit_value")
+            try:
+                st.session_state["_visit_prev_value"] = float(_pv) if _pv else None
+            except (TypeError, ValueError):
+                st.session_state["_visit_prev_value"] = None
+            st.session_state["_visit_loaded"] = True
+            db.set_setting("last_visit_at", datetime.now().strftime("%Y-%m-%d %H:%M:%S"))
+            db.set_setting("last_visit_value", str(round(total_val, 2)))
+
+        prev_at = st.session_state.get("_visit_prev_at")
+        prev_val = st.session_state.get("_visit_prev_value")
+        if not prev_at:
+            return
+        try:
+            prev_dt = datetime.strptime(prev_at[:19], "%Y-%m-%d %H:%M:%S")
+        except ValueError:
+            return
+        mins = (datetime.now() - prev_dt).total_seconds() / 60
+        if mins < 30:
+            return                      # zelfde zitting: niets nieuws te melden
+
+        if mins < 60 * 24:
+            ago = f"{mins / 60:.0f} uur geleden"
+        elif mins < 60 * 24 * 14:
+            ago = f"{mins / 1440:.0f} dagen geleden"
+        else:
+            ago = f"op {prev_dt.strftime('%d/%m/%Y')}"
+
+        bits = []
+        if prev_val is not None and total_val:
+            delta = total_val - prev_val
+            if abs(delta) >= 0.01:
+                pctd = (delta / prev_val * 100) if prev_val else 0.0
+                bits.append(f"je portefeuille ging **{eur(delta)}** "
+                            f"({pctd:+.2f}%) {'vooruit' if delta > 0 else 'achteruit'}")
+            else:
+                bits.append("je portefeuillewaarde is vrijwel gelijk gebleven")
+        # Openstaande meldingen die na je vorige bezoek zijn ontstaan
+        try:
+            _new_ev = [e for e in db.get_status_events()
+                       if str(e.get("detected_at") or "") > prev_at]
+        except Exception:
+            _new_ev = []
+        if _new_ev:
+            bits.append(f"er {'is' if len(_new_ev) == 1 else 'zijn'} **{len(_new_ev)}** "
+                        f"nieuwe melding{'' if len(_new_ev) == 1 else 'en'} op 🩺 Status")
+        _chg = dash_changes or {}
+        if _chg:
+            bits.append(f"**{len(_chg)}** AI-advies{'' if len(_chg) == 1 else 'zen'} "
+                        "gewijzigd")
+        if not bits:
+            return
+        st.info(f"👋 **Sinds je vorige bezoek** ({ago}): " + ", ".join(bits) + ".")
+
+    _visit_block()
+
     # ── KPI-rij ──────────────────────────────────────────────────────────────
     c1, c2, c3, c4, c5 = st.columns(5)
     c1.metric("💼 Portefeuillewaarde", eur(total_val),
@@ -266,7 +334,7 @@ def page_dashboard():
 
     # AI-ratingsynthese + wijzigingen sinds de vorige ronde (gedeeld door beide kolommen)
     dash_synth   = ai_advisor.rating_synthesis(list(pv.keys()), n_batches=9) if pv else {}
-    dash_changes = ai_advisor.rating_changes(list(pv.keys())) if pv else {}
+    # dash_changes is hierboven al berekend (voor het bezoekblok) en wordt hier hergebruikt.
 
     col_l, col_r = st.columns([3, 2])
 

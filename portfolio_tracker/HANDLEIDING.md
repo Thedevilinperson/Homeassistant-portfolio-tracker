@@ -1,6 +1,6 @@
 # Portfolio Tracker - Handleiding
 
-Versie 1.6.0
+Versie 1.7.0
 
 ---
 
@@ -444,6 +444,12 @@ verbruikt hebt en wat er eventueel verschuldigd is.
 
 **AI-kooptips en gerealiseerde historiek** sluiten de pagina af.
 
+**Sinds je vorige bezoek.** Kom je terug na een dag of langer, dan staat er bovenaan in
+één zin wat er intussen veranderd is: hoeveel je portefeuille voor- of achteruitging,
+of er meldingen bijkwamen op de statuspagina, en hoeveel AI-adviezen wijzigden. Binnen
+dezelfde zitting blijft die zin staan zoals hij was — anders zou hij bij elke klik naar
+nul kruipen.
+
 ### 5.2 💼 Portefeuille
 
 De detailweergave van je posities, in deze volgorde: open posities, spreiding per
@@ -477,6 +483,22 @@ sinds de vorige ronde. De volledige tekst zit in een uitklapbaar blok.
 
 **Prijsgeschiedenis** tekent de koers van een gekozen positie over een instelbaar
 aantal dagen, opgebouwd uit wat de scheduler verzameld heeft.
+
+**Blootstelling per onderliggende waarde** telt samen wat economisch aan dezelfde koers
+hangt. Een activum met een afgeleide koers wordt toegerekend aan zijn onderliggende
+waarde, dus het aandeel én de fondsen erop verschijnen als één regel. Hangt meer dan 20%
+aan één waarde, dan zegt de app dat — een vaststelling, geen advies.
+
+In dezelfde sectie duid je aan welke activa **werkgeversgebonden** zijn: aandelen uit een
+aandelenplan, FCPE-fondsen, bonusaandelen. De app kan dat niet zelf weten. Duid je iets
+aan, dan meldt ze welk deel van je vermogen aan dezelfde partij hangt als je inkomen.
+Dat is een ander soort risico dan gewone concentratie: valt die koers, dan is dat vaak
+net het moment waarop ook je loon onder druk staat, en zit een deel er mogelijk nog
+geblokkeerd.
+
+Let op wat dit niet is: een doorkijk naar de inhoud van fondsen. Een wereldindextracker
+met een paar procent Apple telt hier niet als Apple-blootstelling. Alleen expliciete
+koerskoppelingen worden gevolgd.
 
 **Deblokkeringskalender** beantwoordt de vraag die telt wanneer je stukken uit een
 werkgeversplan aanhoudt: niet *hoeveel zit vast*, maar *wanneer kan ik eraan en wat is
@@ -578,6 +600,12 @@ medeweten. Pas na je bevestiging worden de transacties en de kostbasis aangepast
   met rust gelaten. Wijzig je daarna nog de wisselkoers, dan volgt het TOB-veld niet
   meer mee — het is dan jouw waarde. De app toont in dat geval wat de berekening zou
   geven, zodat je bewust kunt kiezen.
+Bovenaan het formulier staat **📄 Overnemen van een eerdere transactie**: kies een
+vorige aankoop en activum, type, rekening en desgewenst het aantal worden alvast
+ingevuld. Prijs, kosten en TOB blijven leeg, want die verschillen per keer. Handig voor
+een maandelijkse aankoop die alleen in datum en koers verschilt. Er wordt niets
+opgeslagen tot je zelf op toevoegen klikt.
+
 - **Performance share**: voor toegekende in plaats van gekochte stukken.
 - **🔒 (Nog) niet vrij verhandelbaar**: geef een aankooplot een 'vrij vanaf'-datum
   mee (werkgeversplannen/FCPE). Het lot telt tot die datum als geblokkeerd kapitaal;
@@ -1325,7 +1353,23 @@ zit daarentegen in de privéopslag van deze add-on.
 verwijder de oude sleutel daar en maak een nieuwe aan. Dat is het enige wat echt
 afdoende is; hem uit de app halen volstaat niet, want een kopie werkt gewoon verder.
 
-### 11.3 Back-up en herstel
+### 11.3 De prullenbak
+
+Verwijder je een transactie, dividend of rekeningkost, dan verdwijnt die niet meteen: er
+gaat eerst een volledige kopie naar de prullenbak. Meteen na het verwijderen verschijnt
+een knop **↩️ Ongedaan maken** die de hele actie terugdraait. Later terugzetten kan via
+**⚙️ Instellingen → 🗃️ Data → 🗑️ Prullenbak**, per item, met daarnaast de mogelijkheid
+om definitief te wissen of alles ouder dan zestig dagen op te ruimen.
+
+Terugzetten herstelt de rij met haar oorspronkelijke nummer wanneer dat nog vrij is,
+zodat koppelingen weer kloppen — bijvoorbeeld tussen een stockdividend en de
+aanwastransactie die erbij hoort. Is dat nummer intussen ingenomen, dan komt de rij
+terug met een nieuw nummer.
+
+De prullenbak vervangt de back-up niet: ze beschermt tegen een verkeerde beslissing, niet
+tegen een defecte schijf.
+
+### 11.4 Back-up en herstel
 
 De volledige toestand zit in één bestand, `portfolio.db`, in je datamap:
 
@@ -1369,7 +1413,7 @@ overschrijven maakt ze automatisch een veiligheidskopie van je huidige toestand
 Een oudere back-up openen met een nieuwere versie van de app werkt: het schema wordt
 bij het opstarten automatisch bijgewerkt.
 
-### 11.4 Twee installaties, twee databases
+### 11.5 Twee installaties, twee databases
 
 Wil je een tweede portefeuille volledig gescheiden houden, geef die installatie dan een
 eigen datamap. Dat is de bedoelde manier om met de Windows-versie een zuivere tweede
@@ -1378,7 +1422,7 @@ portefeuille te draaien.
 Wat je niet moet doen: twee installaties op dezelfde database laten werken via een
 netwerkschijf.
 
-### 11.5 Veelvoorkomende situaties
+### 11.6 Veelvoorkomende situaties
 
 **Een positie heeft geen koers.** Kijk eerst op `🩺 Status`, gebruik dan
 `🔬 Bronnen diagnose` op de Activa-pagina. Werkt geen enkele bron, dan is een
@@ -1444,7 +1488,7 @@ Gebruik `Ververs prijzen` of Rerun in het menu rechtsboven.
 **De AI antwoordt niet.** Controleer je API-sleutel, en of het luik ingeschakeld staat
 in de instellingen. Was het antwoord afgekapt, dan meldt de app dat expliciet.
 
-### 11.6 Bijwerken
+### 11.7 Bijwerken
 
 Home Assistant: de nieuwe bestanden in de repo zetten en de add-on **herbouwen**, niet
 herstarten. Een herstart alleen gebruikt de oude Docker-laag.

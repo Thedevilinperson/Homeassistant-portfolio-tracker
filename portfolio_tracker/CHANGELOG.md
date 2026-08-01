@@ -2,6 +2,73 @@
 
 Alle noemenswaardige wijzigingen aan de Portfolio Tracker add-on.
 
+## 1.7.0
+Een blinde vlek in de risicoweergave, en drie plekken waar de app onnodig werk van je
+vroeg.
+
+### 🎯 Blootstelling per onderliggende waarde
+
+De sectorgrafiek toont hoe je gespreid bent over sectoren, maar niet dat drie regels in
+je portefeuille economisch aan dezelfde koers kunnen hangen. Wie via een werkgeversplan
+zowel het aandeel als een hefboomfonds op dat aandeel aanhoudt, ziet dat nu bij elkaar
+geteld: activa met een afgeleide koers worden toegerekend aan hun onderliggende waarde,
+en die keten wordt gevolgd.
+
+Nieuwe sectie op de portefeuillepagina, met een tabel per onderliggende waarde en een
+melding wanneer er meer dan 20% aan één waarde hangt (instelbaar via
+`concentration_threshold_pct`).
+
+Daarnaast kan je activa aanduiden als **werkgeversgebonden**: aandelenplannen,
+FCPE-fondsen, bonusaandelen. De app kan dat niet zelf weten, dus jij duidt het aan. Staat
+er iets aangeduid, dan meldt de app welk percentage van je vermogen aan dezelfde partij
+hangt als je inkomen — met de kanttekening die daarbij hoort: valt die koers, dan is dat
+vaak net het moment waarop ook je inkomen onder druk staat, en zit een deel er mogelijk
+nog geblokkeerd. Een vaststelling, geen advies.
+
+Wat dit **niet** doet: doorkijken naar de inhoud van fondsen. Een wereldindextracker met
+4% Apple erin telt hier niet als Apple-blootstelling. Alleen expliciete koerskoppelingen
+worden gevolgd, want alleen die kent de app met zekerheid.
+
+Nieuw in `belgian_tax.py`: `underlying_exposure()`.
+
+### ↩️ Verwijderen kan ongedaan gemaakt worden
+
+Een bevestigingsvraag beschermt tegen de verkeerde klik, maar niet tegen de verkeerde
+beslissing: dat je het verkeerde item koos, zie je meestal pas nadat het weg is.
+
+Elke verwijdering legt nu eerst een volledige kopie van de rij in een prullenbak.
+Onmiddellijk na het verwijderen verschijnt een knop **↩️ Ongedaan maken** die de hele
+actie terugdraait; daarnaast staat er een blijvende prullenbak onder
+**⚙️ Instellingen → 🗃️ Data** waar je per item kunt terugzetten of definitief wissen.
+
+Terugzetten herstelt de rij mét haar oorspronkelijke nummer wanneer dat nog vrij is —
+zo klopt een koppeling als die tussen een stockdividend en zijn aanwastransactie weer.
+Is het nummer intussen bezet, dan komt de rij terug met een nieuw nummer: liever terug
+met een ander nummer dan helemaal niet terug. Het bewaren en het verwijderen gebeuren in
+dezelfde databasetransactie, zodat er nooit iets verdwijnt zonder kopie.
+
+Werkt voor transacties, dividenden (inclusief de gekoppelde aanwastransactie) en
+rekeningkosten. Nieuw in `database.py`: `list_trash()`, `restore_trash()`,
+`purge_trash()`, `last_trash_group()`, `trash_count()`.
+
+### 📄 Transactie overnemen
+
+Een maandelijkse aankoop verschilt meestal alleen in datum en koers van de vorige. In het
+formulier *Nieuwe transactie* kies je nu een eerdere transactie en neem je activum, type,
+rekening en desgewenst het aantal over. Prijs, kosten en TOB blijven leeg, want die
+verschillen per keer, en er wordt niets opgeslagen tot je zelf op toevoegen klikt.
+
+Waarden die geen geldige keuze meer zijn (een verwijderde rekening bijvoorbeeld) worden
+overgeslagen in plaats van stilzwijgend door de eerste optie vervangen.
+
+### 👋 Sinds je vorige bezoek
+
+Kom je terug na een dag of langer, dan staat er bovenaan het dashboard in één zin wat er
+veranderd is: hoeveel je portefeuille voor- of achteruitging, of er nieuwe meldingen op
+de statuspagina bijkwamen, en hoeveel AI-adviezen wijzigden. Binnen dezelfde zitting
+blijft die zin staan zoals hij was — een teller die zichzelf bij elke klik bijwerkt, zou
+altijd nul tonen.
+
 ## 1.6.0
 Twee nieuwe werkinstrumenten, en een fiscale rekenfout die daarbij aan het licht kwam.
 

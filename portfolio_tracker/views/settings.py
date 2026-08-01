@@ -635,6 +635,56 @@ def page_settings():
         c4.metric("Database", f"{db.database_size() / 1_000_000:.1f} MB")
         st.divider()
 
+        # ── Prullenbak ───────────────────────────────────────────────────────
+        _trash = db.list_trash(limit=200)
+        with st.expander(f"🗑️ Prullenbak ({len(_trash)})"):
+            st.caption(
+                "Verwijderde transacties, dividenden en kosten komen hier terecht in "
+                "plaats van meteen te verdwijnen. Terugzetten herstelt de rij zoals ze "
+                "was, met haar oorspronkelijke nummer wanneer dat nog vrij is — zodat "
+                "koppelingen (zoals een stockdividend en zijn aanwastransactie) weer "
+                f"kloppen. Items ouder dan {db.TRASH_KEEP_DAYS} dagen mag je hier "
+                "opruimen.")
+            if not _trash:
+                st.info("De prullenbak is leeg.")
+            else:
+                _tdf = pd.DataFrame([{
+                    "Nr":         t["id"],
+                    "Verwijderd": _short_ts(t["deleted_at"]),
+                    "Soort":      {"transactions": "transactie", "dividends": "dividend",
+                                   "account_costs": "rekeningkost"}.get(
+                                       t["table_name"], t["table_name"]),
+                    "Omschrijving": t.get("label") or f"rij #{t.get('record_id')}",
+                } for t in _trash])
+                show_df(_tdf, width="stretch", hide_index=True, height=260)
+                _sel = st.multiselect(
+                    "Selecteer om terug te zetten of definitief te wissen",
+                    [t["id"] for t in _trash],
+                    format_func=lambda i: next(
+                        (f"#{t['id']} · {t.get('label') or t['table_name']}"
+                         for t in _trash if t["id"] == i), str(i)),
+                    key="trash_sel")
+                tb1, tb2, tb3 = st.columns(3)
+                if tb1.button("↩️ Terugzetten", key="trash_restore",
+                              disabled=not _sel, type="primary"):
+                    res = db.restore_trash(_sel)
+                    clear_cache()
+                    if res["errors"]:
+                        st.error("Niet alles kon terug: " + "; ".join(res["errors"][:3]))
+                    else:
+                        st.success(f"✅ {res['restored']} rij(en) teruggezet.")
+                    st.rerun()
+                if tb2.button("🔥 Definitief wissen", key="trash_purge_sel",
+                              disabled=not _sel):
+                    n = db.purge_trash(_sel)
+                    st.success(f"✅ {n} item(s) definitief gewist.")
+                    st.rerun()
+                if tb3.button(f"🧹 Ouder dan {db.TRASH_KEEP_DAYS} dagen opruimen",
+                              key="trash_purge_old"):
+                    n = db.purge_trash(older_than_days=db.TRASH_KEEP_DAYS)
+                    st.success(f"✅ {n} oud(e) item(s) opgeruimd.")
+                    st.rerun()
+
         # ── Back-up ──────────────────────────────────────────────────────────
         st.subheader("💾 Back-up en herstel")
         _backups = db.list_backups()

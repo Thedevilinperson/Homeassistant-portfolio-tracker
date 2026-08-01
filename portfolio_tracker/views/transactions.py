@@ -16,7 +16,7 @@ import database as db
 
 from views.common import (
     _cell_eq, _date_or_none, _recompute_tob_preview, _section_radio,
-    asset_label, clear_cache, compute_eur, eur, fx_lookup,
+    _ui_save, asset_label, clear_cache, compute_eur, eur, fx_lookup,
     multiselect_delete, num, pct, show_df, sticky_select
 )
 
@@ -52,6 +52,73 @@ def page_transactions():
         # waardoor alle velden verse (lege) widgets worden.
         txn_n = st.session_state.get("txn_add_nonce", 0)
         kk = lambda s: f"add_{s}_{txn_n}"
+
+        # Dupliceren: de knop bij een bestaande transactie legt haar gegevens klaar in
+        # 'txn_prefill' en bumpt de nonce, zodat we hier verse widgets krijgen die we
+        # nog mogen vullen. (Een widget-waarde zetten NADAT de widget bestaat, mag
+        # niet van Streamlit; daarom moet dat via de key gebeuren, vóór de widget.)
+        pre = st.session_state.pop("txn_prefill", None)
+        if pre:
+            st.session_state["txn_prefill_note"] = pre.get("_note", "")
+            # Alleen waarden zetten die ook echt een geldige keuze zijn. Een ticker of
+            # rekening die intussen verdwenen is, zou Streamlit stilzwijgend op de
+            # eerste optie terugzetten — dan lijkt het formulier ingevuld terwijl er
+            # iets anders staat dan je koos.
+            _valid = {"ticker": asset_tickers, "acct": db.get_accounts(),
+                      "type": ["buy", "sell"]}
+            for _k, _v in pre.items():
+                if _k.startswith("_"):
+                    continue
+                if _k in _valid and _v not in _valid[_k]:
+                    continue
+                st.session_state.setdefault(kk(_k), _v)
+        # ── Overnemen van een eerdere transactie ─────────────────────────────
+        # Een maandelijkse aankoop verschilt meestal alleen in datum en koers van de
+        # vorige. Alles opnieuw intikken is overbodig werk — en elke keer opnieuw een
+        # kans om je te vergissen in rekening, munt of activum. Dit staat bewust in
+        # het formulier zelf: een knop die van sectie wisselt, botst met de manier
+        # waarop Streamlit widgetwaarden vasthoudt.
+        _recent = db.get_transactions(adjusted=False)[:200]
+        if _recent:
+            with st.expander("📄 Overnemen van een eerdere transactie"):
+                st.caption(
+                    "Vult activum, type en rekening (en desgewenst het aantal) alvast in. "
+                    "Datum blijft vandaag; prijs, kosten en TOB blijven leeg, want die "
+                    "verschillen per keer. Er wordt niets opgeslagen tot je hieronder op "
+                    "toevoegen klikt.")
+                _dopts = {t["id"]: (f"#{t['id']} · {t['date'][:10]} · "
+                                    f"{'🟢' if t['transaction_type'] == 'buy' else '🔴'} "
+                                    f"{num(t['quantity'], 4)} × {fmt(t['ticker'])} @ "
+                                    f"{num(t['price_per_unit'], 4)} "
+                                    f"{t.get('currency') or 'EUR'} · "
+                                    f"{t.get('account') or db.DEFAULT_ACCOUNT}")
+                          for t in _recent}
+                dc1, dc2 = st.columns([3, 1])
+                _pick = dc1.selectbox("Welke transactie?", list(_dopts.keys()),
+                                      format_func=lambda i: _dopts.get(i, str(i)),
+                                      key="txn_dup_pick")
+                with dc2:
+                    st.write("")
+                    _keep_qty = st.checkbox("Aantal ook", value=True, key="txn_dup_qty")
+                if st.button("📄 Overnemen", key="txn_dup_go"):
+                    _src = next((t for t in _recent if t["id"] == _pick), None)
+                    if _src:
+                        pre = {"ticker": _src["ticker"],
+                               "type":   _src["transaction_type"],
+                               "acct":   _src.get("account") or db.DEFAULT_ACCOUNT,
+                               "_note": (f"Overgenomen van #{_src['id']} "
+                                         f"({_src['date'][:10]} · {fmt(_src['ticker'])}).")}
+                        if _keep_qty:
+                            pre["qty"] = float(_src["quantity"])
+                        st.session_state["txn_prefill"] = pre
+                        # Verse widgets afdwingen: 'txn_add_nonce' bouwt de keys op en is
+                        # zelf geen widget-key, dus die mag hier wel gezet worden.
+                        st.session_state["txn_add_nonce"] = txn_n + 1
+                        st.rerun()
+
+        if st.session_state.get("txn_prefill_note"):
+            st.info("📄 " + st.session_state.pop("txn_prefill_note")
+                    + "  \nPas datum en aantal aan waar nodig; niets is al opgeslagen.")
 
         c1, c2 = st.columns(2)
         with c1:
@@ -379,6 +446,7 @@ def page_transactions():
             st.info("Geen transacties gevonden.")
             return
 
+
         total_tob   = sum(t["tob_tax"] or 0 for t in txns)
         total_costs = sum(t.get("costs_eur") or 0 for t in txns)
         st.caption(f"{len(txns)} transactie(s) | Totale TOB: {eur(total_tob)} | Kosten: {eur(total_costs)}")
@@ -628,7 +696,8 @@ def page_transactions():
                               f"{'Aankoop' if t['transaction_type']=='buy' else 'Verkoop'} · "
                               f"{asset_label(t['ticker'], names)} · {t['quantity']:g}" for t in ordered}
         multiselect_delete("confirm_del_txn", tdel_opts,
-                           lambda i: db.delete_transaction(i), noun="transactie")
+                           lambda i, group=None: db.delete_transaction(i, group=group),
+                           noun="transactie")
 
     if _tsec == "🏦 Rekeningkosten":
         st.subheader("🏦 Algemene rekeningkosten")
@@ -728,4 +797,5 @@ def page_transactions():
                                 f"{c.get('description') or 'kost'} · {eur(c.get('amount_eur') or 0)}"
                        for c in costs}
             multiselect_delete("confirm_del_acct_cost", cd_opts,
-                               lambda i: db.delete_account_cost(i), noun="rekeningkost")
+                               lambda i, group=None: db.delete_account_cost(i, group=group),
+                               noun="rekeningkost")

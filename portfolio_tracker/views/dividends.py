@@ -759,4 +759,5 @@ def page_dividends():
                        "aanwastransactie mee — anders blijven er stukken in je positie "
                        "staan waarvan de aanleiding weg is.")
         multiselect_delete("confirm_del_div", del_opts,
-                           lambda i: db.delete_dividend(i), noun="dividend")
+                           lambda i, group=None: db.delete_dividend(i, group=group),
+                           noun="dividend")

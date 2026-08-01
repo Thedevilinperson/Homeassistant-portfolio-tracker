@@ -848,12 +848,42 @@ def _date_or_none(s: str):
     return None
 
 
+def _undo_banner(c=None):
+    """Toon meteen na een verwijdering een knop om ze terug te draaien.
+
+    Een bevestigingsvraag beschermt tegen de verkeerde klik, maar niet tegen de
+    verkeerde beslissing: dat je het verkeerde item koos, zie je meestal pas nadat het
+    weg is. Vandaar deze knop, en daarnaast een blijvende prullenbak."""
+    c = c or st
+    grp = st.session_state.get("undo_group")
+    if not grp:
+        return
+    lbl = st.session_state.get("undo_label", "de vorige verwijdering")
+    b1, b2 = c.columns([3, 1])
+    b1.success(f"🗑️ {lbl} verwijderd — naar de prullenbak verplaatst.")
+    with b2:
+        if st.button("↩️ Ongedaan maken", key=f"undo_{grp}", width="stretch"):
+            items = db.last_trash_group(grp)
+            res = db.restore_trash([i["id"] for i in items])
+            st.session_state.pop("undo_group", None)
+            st.session_state.pop("undo_label", None)
+            clear_cache()
+            if res["errors"]:
+                st.error("Niet alles kon terug: " + "; ".join(res["errors"][:3]))
+            else:
+                st.session_state["undo_done"] = f"{res['restored']} rij(en) teruggezet."
+            st.rerun()
+    if st.session_state.get("undo_done"):
+        c.info("↩️ " + st.session_state.pop("undo_done"))
+
+
 def multiselect_delete(state_key, options_map, do_delete_one, noun="rij",
                        extra_warning="", container=None):
     """Multiselect om meerdere rijen te kiezen + wis-knop met EXPLICIETE bevestiging.
     options_map: dict {id: label} (invoegvolgorde = weergavevolgorde).
     do_delete_one(id): verwijdert één item."""
     c = container or st
+    _undo_banner(c)
     ids = list(options_map.keys())
     sel = c.multiselect(f"Selecteer {noun}(en) om te verwijderen", ids,
                         format_func=lambda i: options_map.get(i, str(i)),
@@ -863,13 +893,24 @@ def multiselect_delete(state_key, options_map, do_delete_one, noun="rij",
         labels = [options_map.get(i, str(i)) for i in pending if i in options_map] or \
                  [str(i) for i in pending]
         preview = "; ".join(labels[:6]) + (f"  … (+{len(labels) - 6})" if len(labels) > 6 else "")
-        st.warning(f"⚠️ {len(pending)} {noun}(en) definitief verwijderen? Dit kan niet ongedaan "
-                   f"gemaakt worden.\n\n{preview}" + (f"\n\n{extra_warning}" if extra_warning else ""))
+        st.warning(f"⚠️ {len(pending)} {noun}(en) verwijderen?\n\n{preview}"
+                   + (f"\n\n{extra_warning}" if extra_warning else "")
+                   + "\n\nDe rijen gaan naar de prullenbak (⚙️ Instellingen → 🗃️ Data) "
+                     "en blijven daar terug te halen.")
         cc1, cc2 = st.columns(2)
-        if cc1.button("✅ Ja, definitief verwijderen", key=f"{state_key}_yes", width="stretch"):
+        if cc1.button("✅ Ja, verwijderen", key=f"{state_key}_yes", width="stretch"):
+            # Groepssleutel: alles wat in één klik verdwijnt, hoort bij elkaar en komt
+            # met één klik ook weer terug.
+            grp = f"{state_key}-{datetime.now().strftime('%Y%m%d%H%M%S%f')}"
             for i in pending:
-                do_delete_one(i)
+                try:
+                    do_delete_one(i, group=grp)
+                except TypeError:
+                    # Verwijderfuncties die (nog) geen groep kennen: gewoon uitvoeren.
+                    do_delete_one(i)
             st.session_state.pop(state_key, None)
+            st.session_state["undo_group"] = grp
+            st.session_state["undo_label"] = f"{len(pending)} {noun}(en)"
             clear_cache()
             st.rerun()
         if cc2.button("✖️ Annuleren", key=f"{state_key}_no", width="stretch"):

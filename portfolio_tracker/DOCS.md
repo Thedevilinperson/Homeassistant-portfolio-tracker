@@ -77,7 +77,7 @@ Docker pikt een gewone herstart de gewijzigde bestanden niet op.
 
 ## Hulp nodig?
 
-Hoofdstuk 11.5 van de handleiding (**📖 Handleiding → 11. Onderhoud, back-up en
+Hoofdstuk 11.6 van de handleiding (**📖 Handleiding → 11. Onderhoud, back-up en
 probleemoplossing**) behandelt de veelvoorkomende situaties: een positie zonder
 koers, een TOB die niet klopt met je afschrift, een negatief cashsaldo, een AI die
 niet antwoordt, en meer.

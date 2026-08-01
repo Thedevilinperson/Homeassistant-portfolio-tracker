@@ -1248,3 +1248,67 @@ def declaration_lines(year: int, accounts=None) -> dict:
                      "de hand: de fiscus kan de ingehouden bronbelasting laten bewijzen.")
     return {"year": year, "lines": lines, "notes": notes, "codes": codes,
             "benefit": ben, "overview": overview}
+
+
+# ── Blootstelling per onderliggende waarde ────────────────────────────────────
+
+def underlying_exposure(position_values: dict, assets: list[dict] | None = None) -> dict:
+    """Hoeveel van je portefeuille hangt aan ÉÉN onderliggende waarde?
+
+    Sectorspreiding vertelt niet het hele verhaal. Wie via een werkgeversplan zowel
+    het aandeel als een hefboomfonds op datzelfde aandeel aanhoudt, ziet drie regels
+    in zijn portefeuille die economisch aan één en dezelfde koers hangen. Deze functie
+    telt die samen: een activum met een afgeleide koers wordt toegerekend aan zijn
+    onderliggende waarde, en die keten wordt gevolgd (met een harde grens tegen
+    circulaire verwijzingen).
+
+    Let op wat dit NIET doet. Het is geen doorkijk naar de inhoud van fondsen: een
+    wereldindextracker met 4% Apple erin telt hier niet mee als Apple-blootstelling.
+    Alleen expliciete koerskoppelingen worden gevolgd, want alleen die kent de app
+    met zekerheid.
+
+    Returns: {"rows": [{"ticker","label","value","pct","components","employer"}],
+              "total", "employer_value", "employer_pct", "top"}
+    """
+    amap = {a["ticker"]: a for a in (assets if assets is not None else db.get_assets())}
+
+    def root_of(tk: str, depth: int = 0) -> str:
+        a = amap.get(tk) or {}
+        und = (a.get("underlying_ticker") or "").strip().upper()
+        if (a.get("pricing_mode") or "auto") == "derived" and und and depth < 3:
+            return root_of(und, depth + 1)
+        return tk
+
+    agg: dict[str, dict] = {}
+    total = 0.0
+    for tk, pv in (position_values or {}).items():
+        val = float(pv.get("current_value") or 0.0)
+        if val <= 0:
+            continue
+        total += val
+        root = root_of(tk)
+        e = agg.setdefault(root, {"ticker": root, "value": 0.0, "components": [],
+                                  "employer": False})
+        e["value"] += val
+        e["components"].append({"ticker": tk, "value": val, "derived": root != tk})
+        if (amap.get(tk) or {}).get("employer_linked") or \
+           (amap.get(root) or {}).get("employer_linked"):
+            e["employer"] = True
+
+    rows = []
+    for e in agg.values():
+        a = amap.get(e["ticker"]) or {}
+        e["label"] = a.get("name") or e["ticker"]
+        e["pct"] = (e["value"] / total * 100) if total > 0 else 0.0
+        e["components"].sort(key=lambda c: -c["value"])
+        rows.append(e)
+    rows.sort(key=lambda r: -r["value"])
+
+    emp_val = sum(r["value"] for r in rows if r["employer"])
+    return {
+        "rows": rows,
+        "total": total,
+        "employer_value": emp_val,
+        "employer_pct": (emp_val / total * 100) if total > 0 else 0.0,
+        "top": rows[0] if rows else None,
+    }

@@ -461,6 +461,84 @@ def page_portfolio():
                    "je best op *Gediversifieerd (index/fonds)*, anders lijkt je portefeuille "
                    "geconcentreerder dan ze is.")
 
+    def render_concentration():
+        """Blootstelling per onderliggende waarde — een vaststelling, geen advies.
+
+        De sectorgrafiek hieronder toont hoe je over sectoren gespreid bent, maar niet
+        dat drie regels in je portefeuille aan dezelfde koers kunnen hangen. Wie via
+        een werkgeversplan het aandeel én een hefboomfonds op dat aandeel aanhoudt,
+        ziet dat hier bij elkaar geteld.
+        """
+        exp = tax_mod.underlying_exposure(pv, assets)
+        if not exp["rows"]:
+            return
+        st.subheader("🎯 Blootstelling per onderliggende waarde")
+        top = exp["top"]
+        try:
+            thr = float(db.get_setting("concentration_threshold_pct", "20") or 20)
+        except (TypeError, ValueError):
+            thr = 20.0
+
+        multi = [r for r in exp["rows"] if len(r["components"]) > 1]
+        if multi:
+            st.caption("Activa met een afgeleide koers worden toegerekend aan hun "
+                       "onderliggende waarde: " + "; ".join(
+                           f"**{asset_label(r['ticker'], nmap)}** ← "
+                           + ", ".join(asset_label(c["ticker"], nmap)
+                                       for c in r["components"] if c["derived"])
+                           for r in multi))
+
+        if exp["employer_pct"] > 0:
+            st.warning(
+                f"👔 **{exp['employer_pct']:.1f}%** van deze portefeuille "
+                f"({eur(exp['employer_value'])}) hangt aan activa die je als "
+                "*werkgeversgebonden* hebt aangeduid. Dat is een ander soort risico dan "
+                "gewone concentratie: valt de koers, dan is dat vaak net het moment "
+                "waarop ook je inkomen onder druk staat — en een deel ervan zit "
+                "mogelijk nog geblokkeerd, precies wanneer je eraan zou willen. Dit is "
+                "een vaststelling, geen advies.")
+        elif top["pct"] >= thr:
+            st.warning(
+                f"⚠️ **{top['pct']:.1f}%** van deze portefeuille hangt aan één "
+                f"onderliggende waarde: **{asset_label(top['ticker'], nmap)}** "
+                f"({eur(top['value'])}). Dit is een vaststelling, geen advies.")
+
+        show_df(pd.DataFrame([{
+            "Onderliggende waarde": asset_label(r["ticker"], nmap),
+            "Waarde €": round(r["value"], 2),
+            "Aandeel %": round(r["pct"], 2),
+            "Via": len(r["components"]),
+            "Werkgever": "👔" if r["employer"] else "",
+        } for r in exp["rows"]]), width="stretch", hide_index=True,
+            column_config={
+                "Waarde €":  st.column_config.NumberColumn(format="€ %.10g"),
+                "Aandeel %": st.column_config.ProgressColumn(format="%.1f%%", min_value=0,
+                                                             max_value=100),
+                "Via": st.column_config.NumberColumn(
+                    help="Aantal posities die aan deze onderliggende waarde hangen."),
+            })
+
+        with st.expander("👔 Welke activa hangen aan je werkgever?"):
+            st.caption(
+                "Aandelen uit een werkgeversplan, FCPE-fondsen, bonusaandelen: alles "
+                "waarvan de waarde aan dezelfde partij hangt als je loon. De app kan "
+                "dat niet zelf weten — jij duidt het aan, en zij rekent het samen. Het "
+                "verandert niets aan je cijfers; het maakt alleen zichtbaar hoeveel er "
+                "van één partij afhangt.")
+            _all = [a["ticker"] for a in assets]
+            _cur = [t for t in db.employer_linked_tickers() if t in _all]
+            _sel = st.multiselect("Werkgeversgebonden activa", _all, default=_cur,
+                                  format_func=lambda t: asset_label(t, nmap),
+                                  key="emp_linked_sel",
+                                  placeholder="Geen — kies er eventueel een of meer")
+            if st.button("💾 Opslaan", key="emp_linked_save"):
+                db.set_employer_linked([t for t in _all if t not in _sel], False)
+                if _sel:
+                    db.set_employer_linked(_sel, True)
+                clear_cache()
+                st.success("✅ Opgeslagen.")
+                st.rerun()
+
     def render_unlock_calendar():
         """Deblokkeringskalender: wanneer komt hoeveel geblokkeerd kapitaal vrij?
 
@@ -547,6 +625,8 @@ def page_portfolio():
     render_positions()
     st.divider()
     render_unlock_calendar()
+    st.divider()
+    render_concentration()
     st.divider()
     render_sectors()
     st.divider()

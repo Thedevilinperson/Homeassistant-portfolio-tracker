@@ -392,6 +392,23 @@ def _migrate(conn):
     if not _column_exists(cur, "dividends", "manual_override"):
         cur.execute("ALTER TABLE dividends ADD COLUMN manual_override INTEGER DEFAULT 0")
 
+    # Prullenbak: elke verwijderde rij wordt hier eerst als JSON bewaard.
+    cur.execute("""CREATE TABLE IF NOT EXISTS deleted_records (
+        id          INTEGER PRIMARY KEY AUTOINCREMENT,
+        table_name  TEXT NOT NULL,
+        record_id   INTEGER,
+        payload     TEXT NOT NULL,
+        deleted_at  TEXT NOT NULL,
+        group_key   TEXT,
+        label       TEXT
+    )""")
+    cur.execute("CREATE INDEX IF NOT EXISTS idx_deleted_group ON deleted_records(group_key)")
+
+    # Hangt dit activum aan je werkgever (aandelenplan, FCPE, bonusaandelen)? Dan
+    # loopt er meer dan alleen beleggingsrisico: je loon hangt aan dezelfde partij.
+    if not _column_exists(cur, "assets", "employer_linked"):
+        cur.execute("ALTER TABLE assets ADD COLUMN employer_linked INTEGER DEFAULT 0")
+
     if not _column_exists(cur, "assets", "manual_only"):
         cur.execute("ALTER TABLE assets ADD COLUMN manual_only INTEGER DEFAULT 0")
 
@@ -681,6 +698,28 @@ def get_derived_pricing(ticker) -> dict | None:
             "floor":      bool(row["derived_floor"])}
 
 
+def set_employer_linked(tickers, enabled: bool = True):
+    """Markeer activa als verbonden aan je werkgever (aandelenplan, FCPE, bonus).
+    Dat is puur informatief: de app gebruikt het om te tonen welk deel van je
+    vermogen aan dezelfde partij hangt als je inkomen."""
+    if isinstance(tickers, str):
+        tickers = [tickers]
+    conn = get_connection()
+    for t in tickers:
+        conn.execute("UPDATE assets SET employer_linked=? WHERE ticker=?",
+                     (1 if enabled else 0, t.upper()))
+    conn.commit()
+    conn.close()
+
+
+def employer_linked_tickers() -> list[str]:
+    conn = get_connection()
+    rows = conn.execute("SELECT ticker FROM assets WHERE employer_linked=1 "
+                        "ORDER BY ticker").fetchall()
+    conn.close()
+    return [r["ticker"] for r in rows]
+
+
 def set_manual_only(ticker, enabled: bool):
     """Zet/wis 'enkel handmatige koers' voor een activum: alle onlinebronnen worden dan
     overgeslagen."""
@@ -798,8 +837,12 @@ def update_account_cost(cost_id: int, **fields):
     conn.close()
 
 
-def delete_account_cost(cost_id: int):
+def delete_account_cost(cost_id: int, group: str | None = None):
     conn = get_connection()
+    row = _row_dict(conn, "account_costs", cost_id)
+    if row:
+        _trash_row(conn, "account_costs", row, group,
+                   f"kost {row.get('description') or ''} {row.get('amount')}".strip())
     conn.execute("DELETE FROM account_costs WHERE id=?", (cost_id,))
     conn.commit()
     conn.close()
@@ -2228,8 +2271,13 @@ def set_transaction_eur(txn_id: int, fx_rate: float, total_amount_eur: float,
     conn.close()
 
 
-def delete_transaction(txn_id: int):
+def delete_transaction(txn_id: int, group: str | None = None):
     conn = get_connection()
+    row = _row_dict(conn, "transactions", txn_id)
+    if row:
+        _trash_row(conn, "transactions", row, group,
+                   f"{row.get('transaction_type')} {row.get('quantity')} x "
+                   f"{row.get('ticker')} op {str(row.get('date'))[:10]}")
     conn.execute("DELETE FROM transactions WHERE id=?", (txn_id,))
     conn.commit()
     conn.close()
@@ -2335,20 +2383,28 @@ def update_dividend(div_id: int, **fields):
     conn.close()
 
 
-def delete_dividend(div_id: int, with_linked_txn: bool = True) -> int:
+def delete_dividend(div_id: int, with_linked_txn: bool = True,
+                    group: str | None = None) -> int:
     """Verwijder een dividend. Hoort er een automatisch aangemaakte aanwastransactie
     bij (stockdividend), dan verdwijnt die standaard mee — anders blijven er stukken
     in je positie staan waarvan de aanleiding weg is.
 
     Geeft het aantal mee verwijderde transacties terug (0 of 1)."""
     conn = get_connection()
-    row = conn.execute("SELECT linked_txn_id FROM dividends WHERE id=?",
-                       (div_id,)).fetchone()
-    linked = row["linked_txn_id"] if row else None
+    drow = _row_dict(conn, "dividends", div_id)
+    linked = (drow or {}).get("linked_txn_id")
     n = 0
     if with_linked_txn and linked:
+        trow = _row_dict(conn, "transactions", linked)
+        if trow:
+            _trash_row(conn, "transactions", trow, group,
+                       f"aanwas {trow.get('quantity')} x {trow.get('ticker')} "
+                       "(stockdividend)")
         cur = conn.execute("DELETE FROM transactions WHERE id=?", (linked,))
         n = cur.rowcount or 0
+    if drow:
+        _trash_row(conn, "dividends", drow, group,
+                   f"dividend {drow.get('ticker')} op {str(drow.get('date'))[:10]}")
     conn.execute("DELETE FROM dividends WHERE id=?", (div_id,))
     conn.commit()
     conn.close()
@@ -2833,3 +2889,131 @@ def database_size() -> int:
         except OSError:
             pass
     return total
+
+
+# ── Prullenbak: verwijderde rijen bewaren zodat ze terug te halen zijn ────────
+# Een bevestigingsvraag helpt tegen de verkeerde klik, maar niet tegen de verkeerde
+# beslissing: pas nadat de rij weg is, zie je dat het de verkeerde was. Elke
+# verwijdering legt daarom eerst een volledige kopie van de rij (alle kolommen, als
+# JSON) in deze tabel. Terugzetten is dan een INSERT met dezelfde waarden, inclusief
+# het oorspronkelijke id wanneer dat nog vrij is — zo blijven verwijzingen kloppen.
+
+TRASH_KEEP_DAYS = 60
+
+
+def _trash_row(conn, table: str, row: dict, group: str | None = None,
+               label: str | None = None):
+    """Leg één rij in de prullenbak. Verwacht een OPEN verbinding, zodat het
+    bewaren en het verwijderen in dezelfde databasetransactie gebeuren: er kan geen
+    kopie achterblijven van iets dat uiteindelijk niet verwijderd werd, en omgekeerd
+    verdwijnt er nooit iets zonder kopie."""
+    conn.execute(
+        "INSERT INTO deleted_records (table_name, record_id, payload, deleted_at, "
+        "group_key, label) VALUES (?,?,?,?,?,?)",
+        (table, row.get("id"), json.dumps(row, default=str),
+         datetime.now().strftime("%Y-%m-%d %H:%M:%S"), group, label))
+
+
+def _row_dict(conn, table: str, rec_id) -> dict | None:
+    r = conn.execute(f"SELECT * FROM {table} WHERE id=?", (rec_id,)).fetchone()
+    return dict(r) if r else None
+
+
+def list_trash(limit: int = 100) -> list[dict]:
+    """Inhoud van de prullenbak, nieuwste eerst."""
+    conn = get_connection()
+    rows = conn.execute(
+        "SELECT * FROM deleted_records ORDER BY id DESC LIMIT ?", (limit,)).fetchall()
+    conn.close()
+    out = []
+    for r in rows:
+        d = dict(r)
+        try:
+            d["data"] = json.loads(d["payload"])
+        except (TypeError, ValueError):
+            d["data"] = {}
+        out.append(d)
+    return out
+
+
+def trash_count() -> int:
+    conn = get_connection()
+    n = conn.execute("SELECT COUNT(*) c FROM deleted_records").fetchone()["c"]
+    conn.close()
+    return int(n)
+
+
+def restore_trash(trash_ids) -> dict:
+    """Zet verwijderde rijen terug. Geeft {"restored", "skipped", "errors"} terug.
+
+    Bestaat het oorspronkelijke id nog niet, dan komt de rij exact terug zoals ze
+    was — inclusief id, zodat koppelingen (bv. een stockdividend en zijn
+    aanwastransactie) weer kloppen. Is het id intussen door een andere rij ingenomen,
+    dan wordt de rij toegevoegd met een nieuw id: liever terug met een ander nummer
+    dan helemaal niet terug.
+    """
+    if isinstance(trash_ids, (int, str)):
+        trash_ids = [trash_ids]
+    conn = get_connection()
+    restored = skipped = 0
+    errors = []
+    for tid in trash_ids:
+        r = conn.execute("SELECT * FROM deleted_records WHERE id=?", (tid,)).fetchone()
+        if not r:
+            skipped += 1
+            continue
+        try:
+            data = json.loads(r["payload"])
+        except (TypeError, ValueError) as exc:
+            errors.append(f"#{tid}: onleesbare inhoud ({exc})")
+            continue
+        table = r["table_name"]
+        cols = {row["name"] for row in conn.execute(f"PRAGMA table_info({table})")}
+        # Kolommen die intussen uit het schema verdwenen zijn, laten we vallen.
+        data = {k: v for k, v in data.items() if k in cols}
+        if "id" in data and data["id"] is not None:
+            taken = conn.execute(f"SELECT 1 FROM {table} WHERE id=?",
+                                 (data["id"],)).fetchone()
+            if taken:
+                data.pop("id")
+        keys = list(data.keys())
+        try:
+            conn.execute(f"INSERT INTO {table} ({','.join(keys)}) "
+                         f"VALUES ({','.join('?' * len(keys))})",
+                         [data[k] for k in keys])
+            conn.execute("DELETE FROM deleted_records WHERE id=?", (tid,))
+            restored += 1
+        except sqlite3.Error as exc:
+            errors.append(f"#{tid} ({table}): {exc}")
+    conn.commit()
+    conn.close()
+    return {"restored": restored, "skipped": skipped, "errors": errors}
+
+
+def purge_trash(trash_ids=None, older_than_days: int | None = None) -> int:
+    """Leeg de prullenbak: bepaalde items, alles ouder dan N dagen, of alles."""
+    conn = get_connection()
+    if trash_ids:
+        if isinstance(trash_ids, (int, str)):
+            trash_ids = [trash_ids]
+        q = f"DELETE FROM deleted_records WHERE id IN ({','.join('?' * len(trash_ids))})"
+        cur = conn.execute(q, list(trash_ids))
+    elif older_than_days is not None:
+        cur = conn.execute("DELETE FROM deleted_records WHERE deleted_at < "
+                           "datetime('now', ? || ' days')", (f"-{int(older_than_days)}",))
+    else:
+        cur = conn.execute("DELETE FROM deleted_records")
+    n = cur.rowcount or 0
+    conn.commit()
+    conn.close()
+    return n
+
+
+def last_trash_group(group: str) -> list[dict]:
+    """De items van één verwijderactie (zelfde group_key) — voor de knop
+    'Ongedaan maken' meteen na het verwijderen."""
+    conn = get_connection()
+    rows = conn.execute("SELECT * FROM deleted_records WHERE group_key=? ORDER BY id",
+                        (group,)).fetchall()
+    conn.close()
+    return [dict(r) for r in rows]
