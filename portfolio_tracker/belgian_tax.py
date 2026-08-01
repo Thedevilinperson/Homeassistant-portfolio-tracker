@@ -803,7 +803,16 @@ def calculate_tax_overview(year: int | None = None,
     year_gains       = [g for g in all_gains if g["year"] == year]
     total_real_gl    = sum(g["gain_loss"] for g in year_gains)                       # economisch
     total_taxable_gl = sum(g.get("taxable_gain_loss", g["gain_loss"]) for g in year_gains)  # fiscaal
-    taxable          = max(0.0, total_taxable_gl - exemption) if total_taxable_gl > 0 else 0.0
+    # Bestond het regime in dat jaar wel? Vóór REGIME_START_YEAR was er voor normaal
+    # beheer geen meerwaardebelasting; er is dan NIETS verschuldigd, hoe groot de
+    # meerwaarde ook was. available_exemption() geeft voor zo'n jaar een vrijstelling
+    # van 0 terug (er valt immers niets vrij te stellen) — die 0 mocht hier niet
+    # gelezen worden als 'alles is belastbaar'.
+    regime_applicable = year >= REGIME_START_YEAR
+    if regime_applicable:
+        taxable = max(0.0, total_taxable_gl - exemption) if total_taxable_gl > 0 else 0.0
+    else:
+        taxable = 0.0
     tax_due          = round(taxable * tax_rate, 2)
     fotomoment_used  = any(g.get("fotomoment_applied") for g in year_gains)
 
@@ -866,6 +875,8 @@ def calculate_tax_overview(year: int | None = None,
         "exemption_count":       exemption_count,
         "household_regime":      regime,
         "taxable_amount":        taxable,
+        "regime_applicable":     regime_applicable,
+        "regime_start_year":     REGIME_START_YEAR,
         "tax_rate":              tax_rate,
         "tax_due":               tax_due,
         "remaining_exemption":   max(0.0, exemption - total_taxable_gl) if total_taxable_gl >= 0 else exemption,
@@ -1007,3 +1018,233 @@ def reconstruct_portfolio_evolution(transactions: list[dict],
     # Beperk tot dagen waarop er iets in portefeuille zat
     df = df[df["cost::TOTAL"] > 0]
     return df
+
+# ── Deblokkeringskalender ─────────────────────────────────────────────────────
+
+def unlock_schedule(transactions: list[dict], current_prices: dict | None = None,
+                    on_date: str | None = None) -> dict:
+    """Wanneer komt hoeveel geblokkeerd kapitaal vrij?
+
+    Werkt op dezelfde FIFO-loten als de rest van de app: elk lot met een
+    lock_until-datum in de toekomst telt mee voor zijn RESTERENDE hoeveelheid, zodat
+    verkopen uit vrije loten de kalender niet vervuilen.
+
+    Per deblokkeringsdatum wordt de huidige waarde geschat als
+    resterend_aantal × huidige koers (in EUR). Is er geen koers, dan valt de waarde
+    terug op de kostbasis van het lot — dat is beter dan niets tonen, en het wordt
+    apart gemeld zodat het cijfer niet als marktwaarde gelezen wordt.
+
+    Returns:
+      {"events":  [{"date","ticker","account","quantity","cost_eur","value_eur",
+                    "priced","days_until"}, ...]  (chronologisch),
+       "by_date": [{"date","quantity","cost_eur","value_eur","tickers","days_until"}],
+       "totals":  {"locked_qty_value","locked_cost","free_value","priced_ok"},
+       "on_date": "JJJJ-MM-DD"}
+    """
+    from datetime import date as _d
+    on = (str(on_date)[:10] if on_date else _d.today().isoformat())
+    on_dt = _d.fromisoformat(on)
+    prices = current_prices or {}
+    pos_by_key, _, _ = _fifo_core(transactions)
+
+    events, free_value, priced_ok = [], 0.0, True
+    for (tk, acct), pos in pos_by_key.items():
+        px = _price_eur((prices.get(tk) or {}).get("price"),
+                        (prices.get(tk) or {}).get("currency", "EUR"))
+        for lot in pos["lots"]:
+            rem = float(lot.get("remaining_quantity") or 0.0)
+            if rem <= 1e-9:
+                continue
+            unit_cost = float(lot.get("price_per_unit") or 0.0)
+            cost = rem * unit_cost
+            if px is not None:
+                value, ok = rem * px, True
+            else:
+                value, ok = cost, False
+                priced_ok = False
+            lu = (lot.get("lock_until") or "")[:10]
+            if not lu or lu <= on:
+                free_value += value
+                continue
+            events.append({
+                "date": lu, "ticker": tk, "account": acct, "quantity": rem,
+                "cost_eur": cost, "value_eur": value, "priced": ok,
+                "days_until": (_d.fromisoformat(lu) - on_dt).days,
+            })
+
+    events.sort(key=lambda e: (e["date"], e["ticker"], e["account"]))
+    by_date: dict[str, dict] = {}
+    for e in events:
+        b = by_date.setdefault(e["date"], {"date": e["date"], "quantity": 0.0,
+                                           "cost_eur": 0.0, "value_eur": 0.0,
+                                           "tickers": set(), "days_until": e["days_until"]})
+        b["quantity"] += e["quantity"]
+        b["cost_eur"] += e["cost_eur"]
+        b["value_eur"] += e["value_eur"]
+        b["tickers"].add(e["ticker"])
+    rows = []
+    for b in sorted(by_date.values(), key=lambda x: x["date"]):
+        b["tickers"] = sorted(b["tickers"])
+        rows.append(b)
+
+    return {
+        "events": events,
+        "by_date": rows,
+        "totals": {
+            "locked_value": sum(e["value_eur"] for e in events),
+            "locked_cost":  sum(e["cost_eur"] for e in events),
+            "locked_qty":   sum(e["quantity"] for e in events),
+            "free_value":   free_value,
+            "priced_ok":    priced_ok,
+        },
+        "on_date": on,
+    }
+
+
+# ── Aangiftehulp ──────────────────────────────────────────────────────────────
+# Deze functie REKENT alleen; ze beslist niets. De codes van de vakken staan als
+# instelling in de database (net als de tarieven), want ze wijzigen van jaar tot
+# jaar en de app mag ze niet als eeuwige waarheid hardcoderen. De gebruiker moet ze
+# hoe dan ook naast het echte aangifteformulier leggen — dat staat ook prominent op
+# de pagina zelf.
+
+DECLARATION_CODE_DEFAULTS = {
+    "decl_code_div_no_rv": "1444 / 2444",
+    "decl_code_rv_refund": "1437 / 2437",
+    "decl_code_fbb":       "",
+    "decl_code_cgt":       "",
+}
+
+
+def declaration_lines(year: int, accounts=None) -> dict:
+    """Bouw de aangifteregels voor een boekjaar: per vak het in te vullen bedrag,
+    met de onderliggende lijnen erbij zodat elk cijfer navolgbaar is.
+
+    Returns: {"year", "lines": [...], "notes": [...], "settings": {...}}
+    Elke lijn: {"key","vak","label","code","amount","kind","explanation","rows",
+                "verify"} waarbij 'rows' de brondetails zijn en 'verify' aangeeft dat
+    de code onzeker is en nagekeken moet worden.
+    """
+    s = db.get_all_settings()
+    codes = {k: (s.get(k) if s.get(k) is not None else v)
+             for k, v in DECLARATION_CODE_DEFAULTS.items()}
+    accset = set(accounts) if accounts else None
+    assets = {a["ticker"]: a for a in db.get_assets()}
+
+    # ── Dividenden van het boekjaar, opgesplitst naar hoe ze belast werden ──
+    div_no_rv, div_with_rv = [], []
+    for d in db.get_dividends(year=year):
+        if accset is not None and (d.get("account") or db.DEFAULT_ACCOUNT) not in accset:
+            continue
+        fx = d.get("fx_rate") or 1.0
+        gross = d.get("gross_eur") if d.get("gross_eur") is not None else (d.get("gross_amount") or 0.0)
+        foreign = (d.get("foreign_wht_amt") or 0.0) * fx
+        wh = d.get("withholding_eur")
+        if wh is None:
+            wh = (d.get("withholding_tax") or 0.0) * fx
+        be_rv = max(0.0, wh - foreign)
+        row = {
+            "date": str(d["date"])[:10], "ticker": d.get("ticker") or "—",
+            "account": d.get("account") or db.DEFAULT_ACCOUNT,
+            "gross_eur": gross, "foreign_wht_eur": foreign,
+            "after_foreign_eur": max(0.0, gross - foreign),
+            "be_rv_eur": be_rv,
+            "country": (assets.get(d.get("ticker"), {}).get("country") or "BE").upper(),
+            "asset_type": assets.get(d.get("ticker"), {}).get("asset_type", "stock"),
+            "kind": d.get("kind") or "dividend",
+        }
+        (div_with_rv if be_rv > 0.005 else div_no_rv).append(row)
+
+    ben = dividend_tax_benefit(year=year, accounts=accounts)
+    byear = ben["per_year"].get(year, {})
+    overview = calculate_tax_overview(year=year, account=accounts)
+
+    lines = []
+
+    # 1. Buitenlandse dividenden zonder Belgische inhouding: VERPLICHT aan te geven
+    amt_no_rv = sum(r["after_foreign_eur"] for r in div_no_rv)
+    lines.append({
+        "key": "div_no_rv", "vak": "VII", "code": codes["decl_code_div_no_rv"],
+        "label": "Dividenden waarop geen Belgische roerende voorheffing werd ingehouden",
+        "amount": amt_no_rv, "kind": "aangeven", "verify": True,
+        "explanation": (
+            "Dividenden die je rechtstreeks bij een buitenlandse bank of broker ontving, "
+            "zonder Belgische tussenpersoon die de roerende voorheffing inhield. Die moet "
+            "je ZELF aangeven en er is 30% op verschuldigd. Het bedrag is het brutodividend "
+            "NA de buitenlandse bronbelasting."),
+        "rows": sorted(div_no_rv, key=lambda r: r["date"]),
+    })
+
+    # 2. Terug te vorderen RV binnen de vrijstelling
+    lines.append({
+        "key": "rv_refund", "vak": "VII", "code": codes["decl_code_rv_refund"],
+        "label": "Terug te vorderen roerende voorheffing (vrijstelling gewone aandelen)",
+        "amount": byear.get("reclaimable_rv", 0.0), "kind": "terugvorderen", "verify": False,
+        "explanation": (
+            f"De eerste {ben['cap_amount']:,.0f} EUR aan dividenden van GEWONE AANDELEN is "
+            f"vrijgesteld ({ben['exemption_per_person']:,.0f} EUR × {ben['persons']} "
+            "belastingplichtige(n)). Je vult hier de INGEHOUDEN VOORHEFFING in, niet het "
+            "dividend zelf. Dividenden van fondsen, ETF's en beveks tellen niet mee."),
+        "rows": sorted([r for r in div_with_rv
+                        if r["asset_type"] == "stock" and r["kind"] == "dividend"],
+                       key=lambda r: -r["be_rv_eur"]),
+        "extra": {
+            "In aanmerking komend brutobedrag": byear.get("qualifying_gross", 0.0),
+            "Waarvan binnen de vrijstelling":   byear.get("eligible_gross", 0.0),
+            "Ingehouden Belgische voorheffing": byear.get("be_rv_qualifying", 0.0),
+            "Niet in aanmerking (fondsen/ETF)": byear.get("excluded_gross", 0.0),
+        },
+    })
+
+    # 3. FBB (enkel wanneer ingeschakeld)
+    if ben.get("fbb_enabled"):
+        lines.append({
+            "key": "fbb", "vak": "VII", "code": codes["decl_code_fbb"],
+            "label": "Forfaitair gedeelte buitenlandse belasting (FBB) — Franse dividenden",
+            "amount": byear.get("fbb", 0.0), "kind": "terugvorderen", "verify": True,
+            "explanation": (
+                f"{ben['fbb_rate'] * 100:.0f}% van het nettobedrag na Franse bronbelasting, "
+                "op grond van het dubbelbelastingverdrag Belgie-Frankrijk. Dit is betwiste "
+                "materie: bewaar je rekeninguittreksels als bewijs."),
+            "rows": sorted([r for r in (div_no_rv + div_with_rv)
+                            if r["country"] == "FR" and r["asset_type"] == "stock"
+                            and r["kind"] == "dividend"], key=lambda r: r["date"]),
+        })
+
+    # 4. Meerwaardebelasting
+    _applies = overview.get("regime_applicable", True)
+    if _applies:
+        _cgt_expl = (
+            "Gerealiseerde meerwaarde van dit boekjaar na aftrek van de vrijstelling. "
+            f"Verschuldigd: {overview.get('tax_due', 0.0):,.2f} EUR. Let op: dit is de "
+            "berekening van de app; de aangiftecodes voor dit regime worden pas met het "
+            "aangifteformulier zelf bekendgemaakt.")
+    else:
+        _cgt_expl = (
+            f"In {year} bestond de meerwaardebelasting op financiele activa nog niet — "
+            f"die geldt vanaf {overview.get('regime_start_year', 2026)}. Er is dus niets "
+            "verschuldigd en niets aan te geven, ook niet op een meerwaarde van "
+            f"{overview.get('total_taxable_gl', 0.0):,.2f} EUR.")
+    lines.append({
+        "key": "cgt", "vak": "—", "code": codes["decl_code_cgt"],
+        "label": "Belastbare meerwaarde op financiele activa",
+        "amount": overview.get("taxable_amount", 0.0), "kind": "aangeven",
+        "verify": bool(_applies),
+        "explanation": _cgt_expl,
+        "rows": [],
+        "extra": {
+            "Gerealiseerd (fiscaal) dit jaar": overview.get("total_taxable_gl", 0.0),
+            "Beschikbare vrijstelling":        overview.get("annual_exemption", 0.0),
+            "Belastbaar na vrijstelling":      overview.get("taxable_amount", 0.0),
+            "Verschuldigde belasting":         overview.get("tax_due", 0.0),
+        },
+    })
+
+    notes = []
+    if not div_no_rv and not div_with_rv:
+        notes.append("Er zijn geen dividenden geregistreerd voor dit boekjaar.")
+    if any(r["country"] not in ("BE", "") for r in div_no_rv + div_with_rv):
+        notes.append("Je ontving buitenlandse dividenden. Houd je rekeninguittreksels bij "
+                     "de hand: de fiscus kan de ingehouden bronbelasting laten bewijzen.")
+    return {"year": year, "lines": lines, "notes": notes, "codes": codes,
+            "benefit": ben, "overview": overview}

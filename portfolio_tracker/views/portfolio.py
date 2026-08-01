@@ -11,6 +11,7 @@ import plotly.graph_objects as go
 import streamlit as st
 
 import ai_advisor
+import belgian_tax as tax_mod
 import database as db
 import market_data as md
 
@@ -460,9 +461,92 @@ def page_portfolio():
                    "je best op *Gediversifieerd (index/fonds)*, anders lijkt je portefeuille "
                    "geconcentreerder dan ze is.")
 
-    # Volgorde: open posities → sectorspreiding → totaal per activum →
-    # gerealiseerde historiek → AI-synthese → prijsgeschiedenis
+    def render_unlock_calendar():
+        """Deblokkeringskalender: wanneer komt hoeveel geblokkeerd kapitaal vrij?
+
+        Voor werkgeversplannen (FCPE en dergelijke) met meerdere jaargangen is dat de
+        vraag die er echt toe doet — niet 'hoeveel zit vast', maar 'wanneer kan ik erbij
+        en wat is het dan waard'. De waarde is de HUIDIGE waarde van die stukken, geen
+        voorspelling: wat ze op de dag van deblokkering waard zijn, weet niemand.
+        """
+        _txns = [t for t in db.get_transactions()
+                 if accset is None or (t.get("account") or db.DEFAULT_ACCOUNT) in accset]
+        sch = tax_mod.unlock_schedule(_txns, prices)
+        rows = sch["by_date"]
+        st.subheader("🔓 Deblokkeringskalender")
+        if not rows:
+            st.caption(
+                "Geen geblokkeerde stukken in deze selectie. Heb je effecten uit een "
+                "werkgeversplan met een resterende blokkeringsperiode, geef het aankooplot "
+                "dan een *vrij vanaf*-datum mee (➕ Transacties, of de kolom **Vrij vanaf** "
+                "in de transactietabel). Ze verschijnen dan hier op een tijdlijn.")
+            return
+
+        t = sch["totals"]
+        u1, u2, u3 = st.columns(3)
+        u1.metric("🔒 Geblokkeerd", eur(t["locked_value"]),
+                  help=f"{num(t['locked_qty'], 4)} stuk(s), tegen de huidige koers.")
+        u2.metric("🔓 Vrij beschikbaar", eur(t["free_value"]))
+        u3.metric("Eerstvolgende deblokkering",
+                  f"{rows[0]['date'][8:10]}/{rows[0]['date'][5:7]}/{rows[0]['date'][:4]}",
+                  delta=f"over {rows[0]['days_until']} dagen", delta_color="off")
+        if not t["priced_ok"]:
+            st.caption("⚠️ Voor een deel van deze stukken is er geen actuele koers; "
+                       "daar toont de kalender de **kostbasis** in plaats van de "
+                       "marktwaarde.")
+
+        _cum, chart_rows = 0.0, []
+        for b in rows:
+            _cum += b["value_eur"]
+            chart_rows.append({"Datum": b["date"], "Komt vrij €": round(b["value_eur"], 2),
+                               "Cumulatief vrij €": round(_cum, 2)})
+        cdf = pd.DataFrame(chart_rows)
+        fig = go.Figure()
+        fig.add_bar(x=cdf["Datum"], y=cdf["Komt vrij €"], name="Komt vrij",
+                    marker_color="#4c9be8")
+        fig.add_scatter(x=cdf["Datum"], y=cdf["Cumulatief vrij €"], name="Cumulatief",
+                        mode="lines+markers", line=dict(color="#f0a202"))
+        fig.update_layout(height=300, margin=dict(l=0, r=0, t=10, b=0),
+                          yaxis_title="EUR", xaxis_title=None,
+                          legend=dict(orientation="h", y=1.1))
+        st.plotly_chart(fig, width="stretch")
+
+        show_df(pd.DataFrame([{
+            "Vrij vanaf":   b["date"],
+            "Over (dagen)": b["days_until"],
+            "Activa":       ", ".join(asset_label(x, nmap) for x in b["tickers"]),
+            "Aantal":       b["quantity"],
+            "Kostbasis €":  round(b["cost_eur"], 2),
+            "Waarde nu €":  round(b["value_eur"], 2),
+            "Cumulatief €": round(c["Cumulatief vrij €"], 2),
+        } for b, c in zip(rows, chart_rows)]), width="stretch", hide_index=True,
+            column_config={
+                "Aantal":       st.column_config.NumberColumn(format="%.10g"),
+                "Kostbasis €":  st.column_config.NumberColumn(format="€ %.10g"),
+                "Waarde nu €":  st.column_config.NumberColumn(format="€ %.10g"),
+                "Cumulatief €": st.column_config.NumberColumn(
+                    format="€ %.10g",
+                    help="Totaal dat vanaf die datum vrij verhandelbaar is."),
+            })
+
+        with st.expander(f"📄 Detail per lot ({len(sch['events'])})"):
+            show_df(pd.DataFrame([{
+                "Vrij vanaf": e["date"],
+                "Activum":    asset_label(e["ticker"], nmap),
+                "Rekening":   e["account"],
+                "Aantal":     e["quantity"],
+                "Kostbasis €": round(e["cost_eur"], 2),
+                "Waarde nu €": round(e["value_eur"], 2),
+            } for e in sch["events"]]), width="stretch", hide_index=True)
+        st.caption("De waarde is de huidige marktwaarde van die stukken, geen prognose. "
+                   "Verkopen vóór de datum kan de app niet tegenhouden — ze waarschuwt "
+                   "wel in het verkoopformulier.")
+
+    # Volgorde: open posities → deblokkeringskalender → sectorspreiding →
+    # totaal per activum → gerealiseerde historiek → AI-synthese → prijsgeschiedenis
     render_positions()
+    st.divider()
+    render_unlock_calendar()
     st.divider()
     render_sectors()
     st.divider()

@@ -75,8 +75,8 @@ _init_db_once()
 # hieronder.
 from views.common import eur, pct                      # noqa: E402  (na set_page_config)
 from views import (                                    # noqa: E402
-    ai, assets, cash, dashboard, dividends, docs, evolution, portfolio,
-    settings, simulation, status, tax, transactions,
+    ai, assets, cash, dashboard, declaration, dividends, docs, evolution,
+    portfolio, settings, simulation, status, tax, transactions,
 )
 
 PAGES = {
@@ -89,6 +89,7 @@ PAGES = {
     "💰 Dividenden":           dividends.page_dividends,
     "🧮 Simulatie":            simulation.page_simulation,
     "🧾 Belgische Belasting":  tax.page_tax,
+    "📋 Aangifte":             declaration.page_declaration,
     "🤖 AI Advisor":           ai.page_ai_advisor,
     "🩺 Status":               status.page_status,
     "⚙️ Instellingen":         settings.page_settings,

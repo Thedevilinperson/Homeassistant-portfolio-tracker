@@ -1,6 +1,6 @@
 # Portfolio Tracker - Handleiding
 
-Versie 1.4.2
+Versie 1.6.0
 
 ---
 
@@ -478,6 +478,17 @@ sinds de vorige ronde. De volledige tekst zit in een uitklapbaar blok.
 **Prijsgeschiedenis** tekent de koers van een gekozen positie over een instelbaar
 aantal dagen, opgebouwd uit wat de scheduler verzameld heeft.
 
+**Deblokkeringskalender** beantwoordt de vraag die telt wanneer je stukken uit een
+werkgeversplan aanhoudt: niet *hoeveel zit vast*, maar *wanneer kan ik eraan en wat is
+het dan waard*. Je krijgt een staaf per deblokkeringsdatum met de cumulatieve lijn
+erover, een tabel met het aantal dagen tot elke datum, en een uitklapbaar detail per
+lot. De kalender volgt de *vrij vanaf*-datums van je aankooploten; heb je die nergens
+ingevuld, dan blijft de sectie leeg met een verwijzing naar waar je ze instelt.
+
+De getoonde waarde is de **huidige** marktwaarde van die stukken, geen voorspelling —
+wat ze op de dag van deblokkering waard zijn, weet niemand. Ontbreekt er een koers, dan
+toont de kalender de kostbasis en zegt ze dat er uitdrukkelijk bij.
+
 ### 5.3 💶 Cash
 
 Drie secties: **posities** (het saldo per rekening met de opbouw), **storting of
@@ -684,11 +695,48 @@ Het fiscale jaaroverzicht, per boekjaar te kiezen.
   aandelen als je dat ingeschakeld hebt.
 - Een uitklapbaar blok met de wetgeving zoals de app ze toepast.
 
-### 5.10 🤖 AI Advisor
+### 5.10 📋 Aangifte
+
+De pagina Belgische Belasting toont wat er fiscaal gebeurd is. Deze pagina vertaalt dat
+naar wat je op je aangifteformulier moet invullen: per vak het bedrag, waarom het daar
+hoort, en waar het vandaan komt.
+
+Bovenaan kies je het **inkomstenjaar** — standaard het jaar dat achter je ligt, want dat
+is waar de aangifte die je nu invult over gaat. Daarna zie je in één oogopslag wat je moet
+aangeven tegenover wat je kunt terugvorderen. Dat tweede cijfer is het belangrijkste van
+de pagina: dat is geld dat je laat liggen als je het niet invult.
+
+De regels zelf:
+
+| Regel | Wat |
+|---|---|
+| Dividenden zonder Belgische voorheffing | Wat je zelf moet aangeven omdat geen Belgische tussenpersoon voorheffing inhield. Het bedrag is bruto **ná** buitenlandse bronbelasting. |
+| Terug te vorderen voorheffing | De ingehouden voorheffing op de vrijgestelde schijf voor gewone aandelen. Je vult de **voorheffing** in, niet het dividend. |
+| FBB | Het forfaitair gedeelte buitenlandse belasting voor Franse dividenden, als je die instelling aan hebt staan. |
+| Meerwaarde | De belastbare meerwaarde en wat erop verschuldigd is, met de opbouw van gerealiseerd naar verschuldigd. |
+
+Elke regel klapt open tot op de onderliggende dividendlijnen, zodat je elk bedrag kunt
+narekenen tegen je rekeninguittreksels.
+
+> **Leg dit naast je echte formulier.** De vakcodes wijzigen van jaar tot jaar en de app
+> kent het formulier van dit jaar niet. De bedragen zijn berekend uit jouw gegevens; de
+> codes zijn een geheugensteun, en die waarvan de app niet zeker is, staan als zodanig
+> gemarkeerd. Wijkt een code bij jou af, pas ze aan onderaan de pagina — ze wordt bewaard
+> zoals de tarieven, in de database.
+
+Bekijk je een jaar vóór 2026, dan meldt de pagina dat de meerwaardebelasting toen nog
+niet bestond: er is dan niets verschuldigd, ook niet op een grote meerwaarde.
+
+Onderaan staat een lijst van wat de app **niet** voor je kan invullen: buitenlandse
+rekeningen (vak XIII) en de aanmelding bij het Centraal Aanspreekpunt, de taks op
+effectenrekeningen, en alles buiten deze portefeuille. De app is een hulpmiddel, geen
+aangiftesoftware.
+
+### 5.11 🤖 AI Advisor
 
 Drie secties, die overeenkomen met drie verschillende opdrachten. Zie hoofdstuk 8.
 
-### 5.11 🩺 Status
+### 5.12 🩺 Status
 
 De gezondheid van je koersdata op één plek. De controle draait elke nacht om 22:45 en
 kan hier met een knop meteen uitgevoerd worden. Ze meldt:
@@ -748,7 +796,7 @@ afhankelijkheid, een extra faalpunt en een netwerkcall per controle betekenen, v
 gegevens die jaren vooruit exact berekenbaar zijn: de feestdagen liggen vast en
 Pasen volgt uit een formule van een paar regels.
 
-### 5.12 ⚙️ Instellingen
+### 5.13 ⚙️ Instellingen
 
 Zes secties.
 
@@ -793,7 +841,7 @@ volgens de tarieven die toen golden.
 **🗃️ Data.** Bulk-import via Excel, koersen handmatig ophalen, en het overzicht van de
 EUR-omrekening.
 
-### 5.13 📖 Handleiding
+### 5.14 📖 Handleiding
 
 Deze handleiding, in de app zelf. Ook de changelog, de Windows-installatie en de
 README staan er, elk met een zoekveld en een keuzelijst per hoofdstuk. Onderaan kun je
@@ -1448,7 +1496,8 @@ Binnen `portfolio_tracker/`:
 
 | Bestand | Rol |
 |---|---|
-| `app.py` | de volledige webinterface |
+| `app.py` | het startpunt: opzet, zijbalk, en het doorgeven aan de gekozen pagina |
+| `views/` | een module per pagina, plus de gedeelde bouwstenen (zie hieronder) |
 | `database.py` | opslag, schema, migraties, statuscontroles |
 | `belgian_tax.py` | FIFO, TOB, meerwaardebelasting, dividendketen |
 | `market_data.py` | koersen, wisselkoersen, bronnen, FSMA-lijsten |
@@ -1461,6 +1510,24 @@ Binnen `portfolio_tracker/`:
 | `README.md` | kennismaking en links, voor wie op GitHub kijkt |
 | `CHANGELOG.md` | wat er per versie veranderd is, en waarom |
 | `windows/` | de opstartlaag voor Windows |
+
+De interface zat vroeger volledig in `app.py`, dat daardoor naar 6.400 regels groeide
+met pagina's van 700 tot 900 regels. Nu heeft elke pagina een eigen bestand in `views/`:
+
+| Bestand | Pagina |
+|---|---|
+| `views/common.py` | geen pagina, maar het gedeelde fundament: opmaak van bedragen, de gecachete portefeuilleweergave, blijvende filters, herberekeningen en terugkerende widgets |
+| `views/dashboard.py`, `portfolio.py`, `cash.py`, `evolution.py` | de overzichtspagina's |
+| `views/assets.py`, `transactions.py`, `dividends.py` | de invoerpagina's |
+| `views/tax.py`, `simulation.py` | belasting en simulatie |
+| `views/ai.py`, `status.py`, `settings.py`, `docs.py` | AI-advies, status, instellingen, dit document |
+
+Twee dingen zijn daarbij bewust zo gekozen. **De map heet `views` en niet `pages`:**
+Streamlit bouwt uit een map met de naam `pages` automatisch een eigen navigatiemenu, wat
+zou botsen met de zijbalk die de app zelf opbouwt. En **de afhankelijkheid loopt maar één
+kant op:** pagina's gebruiken `views/common.py`, maar `common` kent geen enkele pagina en
+pagina's kennen elkaar niet. Zo kan je een pagina aanpassen zonder ergens anders iets te
+breken, en kan er geen importkringloop ontstaan.
 
 ### 12.3 Verder lezen
 

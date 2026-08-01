@@ -2,6 +2,62 @@
 
 Alle noemenswaardige wijzigingen aan de Portfolio Tracker add-on.
 
+## 1.6.0
+Twee nieuwe werkinstrumenten, en een fiscale rekenfout die daarbij aan het licht kwam.
+
+### 🔴 Meerwaardebelasting werd gerekend voor jaren waarin het regime nog niet bestond
+
+Bij het bouwen van de aangiftehulp bleek de app voor **2025** een meerwaarde van €200
+als volledig belastbaar te behandelen: €20 verschuldigd, terwijl er dat jaar voor normaal
+beheer helemaal geen meerwaardebelasting bestond.
+
+De oorzaak: `available_exemption()` geeft voor een jaar vóór 2026 terecht een
+vrijstelling van 0 terug — er valt immers niets vrij te stellen — maar de berekening las
+die 0 als "alles is belastbaar". Nu wordt eerst gekeken óf het regime van toepassing was;
+zo niet, dan is het belastbare bedrag nul, hoe groot de meerwaarde ook was. Het overzicht
+geeft dat mee als `regime_applicable`, en de aangiftehulp legt het met zoveel woorden uit
+in plaats van een leeg bedrag te tonen.
+
+Wie in de app een boekjaar vóór 2026 bekeek en daar een bedrag zag staan: dat cijfer was
+fout en is nu nul.
+
+### 📋 Aangiftehulp (nieuwe pagina)
+
+Eén scherm dat per vak toont wat je moet invullen, met de onderbouwing eronder:
+
+- **Dividenden zonder Belgische voorheffing** — wat je zelf moet aangeven omdat er geen
+  Belgische tussenpersoon inhield, berekend als brutobedrag ná buitenlandse bronbelasting.
+- **Terug te vorderen voorheffing** binnen de vrijstelling voor gewone aandelen, met de
+  opbouw erbij: wat komt in aanmerking, wat valt binnen de schijf, wat is er ingehouden,
+  en wat telt niet mee omdat het fondsen of ETF's zijn.
+- **FBB** voor Franse dividenden, wanneer die instelling aan staat.
+- **Meerwaardebelasting**, met de volledige opbouw van gerealiseerd naar verschuldigd.
+
+Elke regel is uitklapbaar tot op de onderliggende dividendlijnen, zodat je elk bedrag kunt
+narekenen tegen je rekeninguittreksels. Bovenaan staat wat je totaal moet aangeven
+tegenover wat je kunt terugvorderen — dat laatste is geld dat je laat liggen als je het
+niet invult.
+
+Twee dingen bewust níét gedaan. De **vakcodes staan als instelling in de database**, niet
+vast in de code: ze wijzigen van jaar tot jaar, en de app kan het formulier van dit jaar
+niet kennen. Codes waarvan de app niet zeker is, zijn als zodanig gemarkeerd. En er is
+een expliciete lijst van **wat de app niet voor je kan invullen**: buitenlandse rekeningen
+(vak XIII), de taks op effectenrekeningen, en alles buiten deze portefeuille.
+
+### 🔓 Deblokkeringskalender (op de portefeuillepagina)
+
+Onder de open posities staat nu een tijdlijn: wanneer komt hoeveel geblokkeerd kapitaal
+vrij, en wat is het vandaag waard. Met een grafiek per datum plus de cumulatieve lijn, een
+tabel met het aantal dagen tot elke datum, en een uitklapbaar detail per lot. Voor wie
+meerdere jaargangen uit een werkgeversplan aanhoudt, is dat de vraag die er echt toe doet.
+
+De waarde is de huidige marktwaarde van die stukken, uitdrukkelijk geen prognose. Is er
+voor een activum geen koers, dan valt de kalender terug op de kostbasis en zegt ze dat
+erbij — een verzonnen marktwaarde zou hier erger zijn dan een eerlijk cijfer met een
+kanttekening.
+
+Nieuw in `belgian_tax.py`: `unlock_schedule()` en `declaration_lines()`.
+
 ## 1.5.0
 Opschoning onder de motorkap. Aan wat je op het scherm ziet, verandert niets — dit gaat
 over hoe de code in elkaar zit, zodat elke volgende wijziging goedkoper en veiliger
