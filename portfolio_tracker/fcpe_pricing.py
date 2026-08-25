@@ -315,15 +315,30 @@ def compare_with_official(computed: dict, official: dict) -> dict:
 
 def fit_parameters(readings, official: dict, *, n_readings: int,
                    subscription_price: float, spots: dict,
+                   alpha: float | None = None, fit_alpha: bool = False,
+                   fit_subscription: bool = False,
                    start_date=None, annual_rate: float = DEFAULT_ANNUAL_RATE,
+                   maturity_date=None, maturity_return: float | None = None,
+                   md_entries=None,
                    ref_range=None, ref_step: float = 0.05) -> dict | None:
-    """Zoek α en de referentieprijs die het best bij de gepubliceerde NAV passen.
+    """Zoek de referentieprijs (en desgewenst α en/of de inschrijvingsprijs) die het
+    best bij de gepubliceerde NAV passen.
 
-    Bedoeld voor het geval dat je de parameters van je jaargang niet bij de hand hebt.
-    Voor een vaste referentieprijs is de waarde lineair in α, dus die volgt in één
-    stap uit een kleinstekwadratenschatting; over de referentieprijs zelf lopen we een
-    raster af. Het resultaat is een SCHATTING: lees altijd de gevonden afwijking mee,
-    en houd de parameters uit je fondsdocumenten aan wanneer je die hebt.
+    α HOORT NORMAAL VAST TE STAAN. Hij is geen vrije parameter maar een getal uit het
+    fondsreglement (16 voor de jaargang 2022, 19 voor 2018). Hem laten meebewegen
+    levert altijd een iets kleinere afwijking op — een extra vrijheidsgraad past per
+    definitie beter — maar het resultaat is dan geen schatting van de werkelijkheid
+    meer, alleen nog een kromme die door de punten loopt. Zet fit_alpha enkel aan als
+    je het reglement van je jaargang echt niet hebt.
+
+    De waarde is lineair in α en in de inschrijvingsprijs:
+        NAV − majoraties = inschrijving × (1 + rendementsfactor) + α × (gemiddelde − referentie)
+    Voor een gegeven referentieprijs volgen de vrije coëfficiënten dus in één stap uit
+    een kleinstekwadratenschatting; over de referentieprijs zelf lopen we een raster
+    af, dat daarna tweemaal verfijnd wordt rond het beste punt.
+
+    Returns o.a. 'alpha', 'reference_price', 'subscription_price', 'rmse',
+    'fitted' (welke parameters vrijgelaten zijn) en 'fixed'.
     """
     if not official or not spots:
         return None
@@ -331,41 +346,90 @@ def fit_parameters(readings, official: dict, *, n_readings: int,
     if len(dates) < 3:
         return None
 
-    if ref_range is None:
-        lo = min(min(spots.values()), min(
-            (r.get("close") if isinstance(r, dict) else r) for r in readings) if readings else min(spots.values()))
-        hi = max(max(spots.values()), max(
-            (r.get("close") if isinstance(r, dict) else r) for r in readings) if readings else max(spots.values()))
-        ref_range = (lo * 0.5, hi)
+    a_fixed = None if fit_alpha else (float(alpha) if alpha is not None else None)
+    if a_fixed is None and not fit_alpha:
+        fit_alpha = True                      # geen α gegeven: dan toch maar schatten
+    s_fixed = None if fit_subscription else float(subscription_price)
 
-    best = None
-    ref = float(ref_range[0])
-    while ref <= float(ref_range[1]) + 1e-9:
-        xs, ys = [], []
-        ok = True
+    def _eval(ref: float):
+        """Geeft (afwijking², α, inschrijvingsprijs) voor deze referentieprijs."""
+        xs, zs, ys = [], [], []
         for d in dates:
             dd = _as_date(d)
             known = [r for r in readings
                      if (_as_date(r.get("date") if isinstance(r, dict) else None) or dd) <= dd]
+            # α=1 en inschrijving=1 maken de twee bouwstenen los afleesbaar:
+            # 'participation' is dan (gemiddelde − referentie), 'rendement' de factor.
             base = part_value(known, n_readings=n_readings, reference_price=ref,
-                              alpha=1.0, subscription_price=subscription_price,
-                              spot=spots[d], on_date=dd, start_date=start_date,
-                              annual_rate=annual_rate)
+                              alpha=1.0, subscription_price=1.0, spot=spots[d],
+                              on_date=dd, start_date=start_date, annual_rate=annual_rate,
+                              maturity_date=maturity_date, maturity_return=maturity_return,
+                              md_entries=md_entries)
             if base is None:
-                ok = False
-                break
-            # value = sub + rendement + alpha * (avg - ref); bij alpha=1 is
-            # participation net (avg - ref), dus dat is de verklarende variabele.
-            xs.append(base["participation"])
-            ys.append(float(official[d]) - base["subscription"] - base["rendement"])
-        if ok and xs:
-            denom = sum(x * x for x in xs)
-            if denom > 1e-12:
-                alpha = sum(x * y for x, y in zip(xs, ys)) / denom
-                resid = sum((alpha * x - y) ** 2 for x, y in zip(xs, ys)) / len(xs)
+                return None
+            xs.append(base["participation"])          # (gemiddelde − referentie)
+            zs.append(1.0 + base["rendement"])        # (1 + rendementsfactor)
+            ys.append(float(official[d]) - base["md"])
+        if not xs:
+            return None
+
+        if fit_alpha and fit_subscription:
+            sxx = sum(x*x for x in xs); szz = sum(z*z for z in zs)
+            sxz = sum(x*z for x, z in zip(xs, zs))
+            sxy = sum(x*y for x, y in zip(xs, ys)); szy = sum(z*y for z, y in zip(zs, ys))
+            det = sxx*szz - sxz*sxz
+            if abs(det) < 1e-12:
+                return None
+            a = (sxy*szz - szy*sxz) / det
+            sub = (szy*sxx - sxy*sxz) / det
+        elif fit_alpha:
+            ys2 = [y - s_fixed*z for y, z in zip(ys, zs)]
+            denom = sum(x*x for x in xs)
+            if denom < 1e-12:
+                return None
+            a = sum(x*y for x, y in zip(xs, ys2)) / denom
+            sub = s_fixed
+        elif fit_subscription:
+            ys2 = [y - a_fixed*x for y, x in zip(ys, xs)]
+            denom = sum(z*z for z in zs)
+            if denom < 1e-12:
+                return None
+            sub = sum(z*y for z, y in zip(zs, ys2)) / denom
+            a = a_fixed
+        else:
+            a, sub = a_fixed, s_fixed
+
+        resid = sum((a*x + sub*z - y) ** 2 for x, z, y in zip(xs, zs, ys)) / len(xs)
+        return resid, a, sub
+
+    if ref_range is None:
+        pool = list(spots.values()) + [
+            (r.get("close") if isinstance(r, dict) else r) for r in (readings or [])]
+        pool = [float(v) for v in pool if v is not None]
+        if not pool:
+            return None
+        ref_range = (min(pool) * 0.5, max(pool))
+
+    best, lo, hi, step = None, float(ref_range[0]), float(ref_range[1]), float(ref_step)
+    for _ in range(3):                        # grof, dan tweemaal verfijnen
+        ref = lo
+        while ref <= hi + 1e-9:
+            got = _eval(ref)
+            if got:
+                resid, a, sub = got
                 if best is None or resid < best["residual"]:
-                    best = {"reference_price": round(ref, 4), "alpha": round(alpha, 4),
-                            "residual": resid, "rmse": round(resid ** 0.5, 4),
-                            "n_points": len(xs)}
-        ref += ref_step
+                    best = {"reference_price": round(ref, 4), "alpha": round(a, 4),
+                            "subscription_price": round(sub, 4), "residual": resid,
+                            "rmse": round(resid ** 0.5, 4), "n_points": len(dates)}
+            ref += step
+        if best is None:
+            return None
+        lo, hi = best["reference_price"] - step, best["reference_price"] + step
+        step /= 10.0
+
+    best["fitted"] = ([("α" if fit_alpha else None), "referentieprijs",
+                       ("inschrijvingsprijs" if fit_subscription else None)])
+    best["fitted"] = [f for f in best["fitted"] if f]
+    best["fixed"] = [f for f in (("α" if not fit_alpha else None),
+                                 ("inschrijvingsprijs" if not fit_subscription else None)) if f]
     return best

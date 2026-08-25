@@ -805,11 +805,27 @@ def page_assets():
 
                 with st.expander("🎯 Parameters kalibreren tegen de officiële NAV"):
                     st.caption(
-                        "Ken je de referentie- of inschrijvingsprijs niet, dan kan de app ze "
-                        "afleiden uit de gepubliceerde NAV van de beheerder. Laad daarvoor de "
-                        "NAV-export van Amundi op (kolommen datum en NAV). Dit is een "
-                        "SCHATTING: lees de gevonden afwijking mee, en gebruik de cijfers uit "
-                        "je fondsreglement zodra je die hebt.")
+                        "Ken je de referentieprijs of de inschrijvingsprijs niet, dan kan de "
+                        "app ze afleiden uit de gepubliceerde NAV van de beheerder. Laad "
+                        "daarvoor de NAV-export van Amundi op (kolommen datum en NAV). Dit is "
+                        "een SCHATTING: lees de gevonden afwijking mee, en gebruik de cijfers "
+                        "uit je fondsreglement zodra je die hebt.")
+                    st.caption(
+                        f"**α blijft vast op {f_alpha:g}.** Die staat in het reglement en is "
+                        "geen onbekende. Hem toch laten meebewegen geeft altijd een iets "
+                        "kleinere afwijking — een extra vrijheidsgraad past nu eenmaal beter — "
+                        "maar het resultaat is dan geen schatting van de werkelijkheid meer, "
+                        "alleen nog een kromme die door de punten loopt.")
+                    _c1, _c2 = st.columns(2)
+                    _fit_sub = _c1.checkbox(
+                        "Ook de inschrijvingsprijs afleiden", value=False, key="fcpe_fit_sub",
+                        help="Aan als je ook die niet zeker weet. Ze bepaalt het gegarandeerde "
+                             "deel en het rendement.")
+                    _fit_alpha = _c2.checkbox(
+                        "α toch meekalibreren", value=False, key="fcpe_fit_alpha",
+                        help="Alleen als je het reglement van jouw jaargang echt niet hebt. "
+                             "Wijkt de gevonden α ver af van een rond getal, dan klopt er "
+                             "elders iets niet.")
                     _up = st.file_uploader("NAV-export (.xlsx)", type=["xlsx", "xls", "csv"],
                                            key="fcpe_nav_up")
                     if _up is not None and st.button("📥 Inlezen en kalibreren", key="fcpe_cal"):
@@ -819,15 +835,31 @@ def page_assets():
                             _off = {r["date"]: r["nav"] for r in db.get_official_nav(f_sel)}
                             _rdd = db.get_fcpe_readings(f_sel)
                             _spots = {r["date"]: r["close"] for r in _rdd}
+                            _md_now = (db.get_fcpe_params(f_sel) or {}).get("md_entries")
                             fit = fcpe.fit_parameters(
                                 _rdd, _off, n_readings=int(f_n), subscription_price=f_sub,
-                                spots=_spots, start_date=str(f_start), annual_rate=f_rate)
+                                spots=_spots, alpha=f_alpha, fit_alpha=_fit_alpha,
+                                fit_subscription=_fit_sub, start_date=str(f_start),
+                                annual_rate=f_rate, maturity_date=str(f_mat),
+                                maturity_return=f_mret, md_entries=_md_now)
                             if fit:
-                                st.info(f"🎯 Best passend: **α = {fit['alpha']}**, "
-                                        f"**referentieprijs = {fit['reference_price']}** "
-                                        f"(afwijking {fit['rmse']} EUR over "
-                                        f"{fit['n_points']} punten). Vul deze hierboven in "
-                                        "als ze aannemelijk zijn.")
+                                _parts = [f"**referentieprijs = {fit['reference_price']}**"]
+                                if _fit_alpha:
+                                    _parts.insert(0, f"**α = {fit['alpha']}**")
+                                if _fit_sub:
+                                    _parts.append("**inschrijvingsprijs = "
+                                                  f"{fit['subscription_price']}**")
+                                st.info("🎯 Best passend: " + ", ".join(_parts)
+                                        + f" (afwijking {fit['rmse']} EUR over "
+                                        f"{fit['n_points']} punten). Vast gehouden: "
+                                        + (", ".join(fit["fixed"]) or "niets")
+                                        + ". Vul deze hierboven in als ze aannemelijk zijn.")
+                                if fit["rmse"] > 1.0:
+                                    st.warning(
+                                        "⚠️ De afwijking is groot. Controleer eerst of de "
+                                        "waarnemingen volledig zijn en of de aanvangsdatum en "
+                                        "de waarnemingsregel kloppen — een verkeerde "
+                                        "referentieprijs is zelden de enige oorzaak.")
                             else:
                                 st.warning("Kalibratie niet mogelijk — haal eerst de "
                                            "waarnemingen op.")

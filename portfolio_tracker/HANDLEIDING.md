@@ -1,6 +1,6 @@
 # Portfolio Tracker - Handleiding
 
-Versie 1.8.0
+Versie 1.8.1
 
 ---
 
@@ -301,7 +301,9 @@ reglement van jouw jaargang. Voor Link Multiple BEL 2022 is α = 16, loopt de ee
 waarneming op 13 januari 2023 en de laatste op 15 december 2027, en bedraagt het rendement
 1,5% per jaar bij vervroegde uitstap of 7,73% op de eindvervaldag. Ken je de referentie- of
 inschrijvingsprijs niet, laad dan de NAV-export van de beheerder op: de app leidt ze af en
-toont hoe goed ze passen.
+toont hoe goed ze passen. α blijft daarbij vast op de waarde uit het reglement — dat is
+geen onbekende, en hem laten meebewegen zou een fout elders (een verkeerde aanvangsdatum,
+ontbrekende waarnemingen) verbergen in een te hoge of te lage hefboom.
 
 De waarnemingsdata bepaalt de app zelf uit het reglement (de 15e, of de beursdag ervóór —
 inclusief de Franse feestdagen, want daar schuift de reeks effectief op), en met

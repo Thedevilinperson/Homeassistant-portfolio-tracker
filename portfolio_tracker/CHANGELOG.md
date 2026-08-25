@@ -2,6 +2,30 @@
 
 Alle noemenswaardige wijzigingen aan de Portfolio Tracker add-on.
 
+## 1.8.1
+De kalibratie liet α meebewegen. Dat was fout: α staat in het fondsreglement (16 voor
+de jaargang 2022, 19 voor 2018) en is geen onbekende. Hem als vrije parameter behandelen
+levert altijd een iets kleinere afwijking op — een extra vrijheidsgraad past nu eenmaal
+beter — maar het resultaat is dan geen schatting van de werkelijkheid meer, alleen nog
+een kromme die door de punten loopt. Erger: een verkeerde α verbergt een fout elders,
+bijvoorbeeld in de aanvangsdatum of in ontbrekende waarnemingen, door hem in de hefboom
+te absorberen.
+
+α wordt nu **vast gehouden** op de waarde die je hierboven invulde; enkel de
+referentieprijs wordt gezocht. Twee vinkjes laten dat desgewenst los:
+
+- *Ook de inschrijvingsprijs afleiden*, als je die evenmin kent.
+- *α toch meekalibreren*, alleen voor wie het reglement van zijn jaargang echt niet
+  heeft. Wijkt de gevonden α dan ver af van een rond getal, dan klopt er elders iets niet.
+
+Het resultaat vermeldt voortaan expliciet welke parameters vrijgelaten en welke vast
+gehouden zijn, en waarschuwt wanneer de afwijking groter is dan één euro — dan is de
+referentieprijs zelden de enige oorzaak.
+
+Verder rekent de kalibratie nu ook met de majoraties, de vervaldag en het rendement op
+vervaldag, en verfijnt ze het raster tweemaal rond het beste punt in plaats van op de
+grofste stap te blijven staan.
+
 ## 1.8.0
 Een tweede waarderingsmethode voor werkgeversfondsen: de formule uit het fondsreglement
 zelf, naast de bestaande lineaire methode. Per activum te kiezen.
