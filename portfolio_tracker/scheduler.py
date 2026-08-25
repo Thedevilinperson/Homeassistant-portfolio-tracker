@@ -142,6 +142,39 @@ def job_track_idea_prices():
     db.cleanup_old_market_ideas(keep_days=400)
 
 
+def job_fcpe_readings():
+    """Vul de maandelijkse waarnemingen van FCPE-fondsen aan.
+
+    De waarnemingsdata liggen vast in het reglement (de 15e, of de beursdag ervoor).
+    Deze job draait dagelijks en pikt de nieuwe waarneming op zodra haar datum
+    voorbij is; reeds vastgelegde waarnemingen blijft ze af. Zonder deze job zou de
+    waarde van zo'n fonds na verloop van tijd stilaan afwijken, omdat er dan te veel
+    waarnemingen met de HUIDIGE koers ingevuld blijven worden in plaats van met de
+    koers die destijds gold.
+    """
+    try:
+        tickers = [a["ticker"] for a in db.get_assets()
+                   if (a.get("pricing_mode") or "auto") == "fcpe"]
+    except Exception as exc:
+        logger.error(f"job_fcpe_readings: activa ophalen faalde: {exc}")
+        return
+    for t in tickers:
+        try:
+            r = md.fcpe_sync_readings(t)
+            if r["added"]:
+                logger.info(f"📐 {t}: {r['added']} nieuwe waarneming(en) vastgelegd.")
+            if r["missing"]:
+                db.record_status_event(
+                    t, "fcpe_reading_missing", "warning",
+                    f"Geen slotkoers gevonden voor {len(r['missing'])} waarnemingsdatum(s) "
+                    f"van {t}; vul ze handmatig aan bij 🏢 Activa.",
+                    {"dates": r["missing"][:12]})
+            else:
+                db.resolve_status_event(t, "fcpe_reading_missing")
+        except Exception as exc:
+            logger.error(f"job_fcpe_readings({t}): {exc}")
+
+
 def job_backup():
     """Dagelijkse back-up van de database, met opruiming van de oudste.
 
@@ -313,6 +346,15 @@ def main():
         id="status_checks",
         replace_existing=True,
         misfire_grace_time=3600,
+    )
+
+    # ── Waarnemingen van FCPE-fondsen: dagelijks, kort na de slotkoersen ──
+    scheduler.add_job(
+        job_fcpe_readings,
+        trigger=CronTrigger(hour=23, minute=10, timezone=BRUSSELS),
+        id="fcpe_readings",
+        replace_existing=True,
+        misfire_grace_time=7200,
     )
 
     # ── Dagelijkse back-up: 02:30, wanneer er zeker niets ingevoerd wordt ──

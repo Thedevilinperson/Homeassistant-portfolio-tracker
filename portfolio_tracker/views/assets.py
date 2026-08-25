@@ -13,6 +13,7 @@ import streamlit as st
 import ai_advisor
 import belgian_tax as tax_mod
 import database as db
+import fcpe_pricing as fcpe
 import market_data as md
 
 from views.common import (
@@ -24,6 +25,47 @@ logger = logging.getLogger("app.assets")
 
 
 # ── PAGINA: Activa ────────────────────────────────────────────────────────────
+
+
+def _d_or(value, fallback):
+    """Datum uit de bewaarde parameters, of een verstandige beginwaarde."""
+    try:
+        return date.fromisoformat(str(value)[:10])
+    except (TypeError, ValueError):
+        return fallback
+
+
+def _import_official_nav(ticker: str, upload) -> int:
+    """Lees de NAV-export van de beheerder in.
+
+    De export van Amundi heeft een kop van enkele regels boven de eigenlijke tabel,
+    dus we zoeken zelf de kolom met datums en die met bedragen in plaats van een vaste
+    positie aan te nemen — dan blijft het werken als de export er volgend jaar anders
+    uitziet.
+    """
+    if str(getattr(upload, "name", "")).lower().endswith(".csv"):
+        raw = pd.read_csv(upload, header=None)
+    else:
+        raw = pd.read_excel(upload, header=None)
+    n = 0
+    for _, row in raw.iterrows():
+        d = v = None
+        for cell in row:
+            if d is None:
+                try:
+                    ts = pd.to_datetime(cell, errors="raise")
+                    if 1990 < ts.year < 2100:
+                        d = ts.date().isoformat()
+                        continue
+                except Exception:
+                    pass
+            if d is not None and v is None and isinstance(cell, (int, float)) and cell == cell:
+                v = float(cell)
+        if d and v and v > 0:
+            db.save_official_nav(ticker, d, v, source="import")
+            n += 1
+    return n
+
 
 def page_assets():
     st.title("🏢 Activa beheren")
@@ -582,6 +624,233 @@ def page_assets():
                     st.success(f"✅ Koppeling verwijderd — {asset_label(dp_sel, a_names)} volgt "
                                "weer de gewone bronnenketen (of de handmatige koers).")
                     st.rerun()
+
+        with st.expander("📐 Fondsformule (FCPE Multiple) — waarde uit het maandgemiddelde"):
+            st.caption(
+                "De tweede waarderingsmethode, voor hefboomfondsen zoals **Link Multiple**. "
+                "Die hangen niet aan de koers van vandaag maar aan het **gemiddelde van "
+                "zestig maandelijkse waarnemingen**, elk afzonderlijk afgetopt op de "
+                "referentieprijs:  \n"
+                "**waarde = inschrijvingsprijs + rendement + α × (gemiddelde van de "
+                "waarnemingen − referentieprijs) + majoraties**  \n"
+                "Twee gevolgen die de lineaire methode hierboven niet kan nabootsen: de "
+                "gevoeligheid **daalt** naarmate er waarnemingen vastliggen (elke weegt "
+                "1/60), en een eenmaal vastgelegde stijging kan **niet meer verdwijnen**, "
+                "omdat een koersval onder de referentieprijs het gemiddelde niet omlaag "
+                "haalt. De app haalt de waarnemingen zelf op vanaf de start van het fonds; "
+                "je hoeft niets in te typen.")
+
+            f_sel = st.selectbox("Fonds", _all_tk, format_func=lambda t: asset_label(t, a_names),
+                                 key="fcpe_asset")
+            _fp = db.get_fcpe_params(f_sel) or {}
+            _row = db.get_asset(f_sel) or {}
+            _active = (_row.get("pricing_mode") or "auto") == "fcpe"
+            if _active:
+                st.success(f"📐 **{asset_label(f_sel, a_names)}** wordt met de fondsformule "
+                           f"gewaardeerd (α={_fp.get('alpha')}, referentie "
+                           f"{_fp.get('reference_price')}, {_fp.get('n_readings', 60)} "
+                           "waarnemingen).")
+
+            _uo = [t for t in _all_tk if t != f_sel]
+            if not _uo:
+                st.warning("Er is geen ander activum om als onderliggende waarde te kiezen.")
+            else:
+                _ud = _fp.get("underlying_ticker")
+                f_und = st.selectbox("Onderliggende waarde (het aandeel)", _uo,
+                                     index=_uo.index(_ud) if _ud in _uo else 0,
+                                     format_func=lambda t: asset_label(t, a_names),
+                                     key="fcpe_und")
+                st.markdown("**Parameters uit het fondsreglement**")
+                g1, g2, g3 = st.columns(3)
+                f_alpha = g1.number_input("α (multiplicator)", value=float(_fp.get("alpha", 16.0)),
+                                          step=0.5, format="%.10g", key="fcpe_alpha",
+                                          help="Staat letterlijk in het reglement. Voor Link "
+                                               "Multiple BEL 2022 is dat 16; voor de jaargang "
+                                               "2018 was het 19.")
+                f_ref = g2.number_input("Referentieprijs (Prix de Référence)",
+                                        value=float(_fp.get("reference_price", 0.0)),
+                                        step=0.01, format="%.10g", key="fcpe_ref",
+                                        help="De prijs waarop elke waarneming wordt afgetopt "
+                                             "én waarvan de stijging gemeten wordt. Ken je ze "
+                                             "niet, gebruik dan de kalibratie onderaan.")
+                f_sub = g3.number_input("Inschrijvingsprijs (Prix de Souscription)",
+                                        value=float(_fp.get("subscription_price", 0.0)),
+                                        step=0.01, format="%.10g", key="fcpe_sub",
+                                        help="Bepaalt het gegarandeerde deel en het rendement.")
+                h1, h2, h3 = st.columns(3)
+                f_n = h1.number_input("Aantal waarnemingen", min_value=1, max_value=240,
+                                      value=int(_fp.get("n_readings", 60)), step=1,
+                                      key="fcpe_n")
+                f_day = h2.number_input("Waarnemingsdag van de maand", min_value=1, max_value=31,
+                                        value=int(_fp.get("reading_day", 15)), step=1,
+                                        key="fcpe_day",
+                                        help="Valt die dag niet op een beursdag, dan neemt de "
+                                             "app de beursdag ervóór — zoals het reglement "
+                                             "voorschrijft.")
+                f_first = h3.date_input("Eerste waarnemingsmaand",
+                                        value=_d_or(_fp.get("first_reading_month"), date(2023, 1, 15)),
+                                        min_value=date(2000, 1, 1), max_value=date(2100, 12, 31),
+                                        key="fcpe_first",
+                                        help="Alleen de maand telt; de dag wordt door de regel "
+                                             "hierboven bepaald.")
+                i1, i2, i3, i4 = st.columns(4)
+                f_start = i1.date_input("Datum van aanvang", 
+                                        value=_d_or(_fp.get("start_date"), date(2022, 12, 22)),
+                                        min_value=date(2000, 1, 1), max_value=date(2100, 12, 31),
+                                        key="fcpe_start",
+                                        help="Date de Commencement — vanaf hier loopt het rendement.")
+                f_mat = i2.date_input("Eindvervaldag",
+                                      value=_d_or(_fp.get("maturity_date"), date(2027, 12, 15)),
+                                      min_value=date(2000, 1, 1), max_value=date(2100, 12, 31),
+                                      key="fcpe_mat")
+                f_rate = i3.number_input("Rendement per jaar", value=float(_fp.get("annual_rate", 0.015)),
+                                         step=0.001, format="%.10g", key="fcpe_rate",
+                                         help="1,5% bij vervroegde uitstap.")
+                f_mret = i4.number_input("Rendement op vervaldag",
+                                         value=float(_fp.get("maturity_return", 0.0773)),
+                                         step=0.001, format="%.10g", key="fcpe_mret",
+                                         help="7,73% op de eindvervaldag.")
+
+                st.caption("**Majorations de Dividende** (optioneel): keert ENGIE een dividend "
+                           "met majoration uit, dan verhoogt dat de prestatie. Eén regel per "
+                           "majoration, als `JJJJ-MM-DD = bedrag per deelbewijs`.")
+                f_md_txt = st.text_area(
+                    "Majoraties", value="\n".join(
+                        f"{e.get('date')} = {e.get('amount')}" for e in (_fp.get("md_entries") or [])),
+                    height=68, key="fcpe_md", placeholder="2024-05-02 = 0.35")
+
+                _dates = fcpe.reading_dates(int(f_n), day_of_month=int(f_day),
+                                            first_month=str(f_first))
+                _done = [d for d in _dates if d <= date.today().isoformat()]
+                st.caption(f"➡️ Waarnemingen: **{_dates[0]}** t/m **{_dates[-1]}**, "
+                           f"waarvan **{len(_done)}** in het verleden. "
+                           f"Bewaard: **{len(db.get_fcpe_readings(f_sel))}**.")
+
+                b1, b2, b3 = st.columns(3)
+                if b1.button("💾 Opslaan en activeren", type="primary", key="fcpe_save"):
+                    _md = []
+                    for line in (f_md_txt or "").splitlines():
+                        if "=" in line:
+                            dd, _, aa = line.partition("=")
+                            try:
+                                _md.append({"date": dd.strip()[:10], "amount": float(aa.strip().replace(",", "."))})
+                            except ValueError:
+                                st.warning(f"Majoration overgeslagen (onleesbaar): {line}")
+                    db.set_fcpe_params(f_sel, {
+                        "underlying_ticker": f_und, "alpha": f_alpha,
+                        "reference_price": f_ref, "subscription_price": f_sub,
+                        "n_readings": int(f_n), "reading_day": int(f_day),
+                        "first_reading_month": str(f_first), "start_date": str(f_start),
+                        "maturity_date": str(f_mat), "annual_rate": f_rate,
+                        "maturity_return": f_mret, "md_entries": _md})
+                    db.set_pricing_mode(f_sel, "fcpe")
+                    md._CACHE.pop(f_sel, None)
+                    clear_cache()
+                    st.success("✅ Opgeslagen. Haal nu de waarnemingen op.")
+                    st.rerun()
+                if b2.button("🔄 Waarnemingen ophalen", key="fcpe_sync",
+                             help="Haalt de slotkoers van de onderliggende waarde op voor elke "
+                                  "voorbije waarnemingsdatum, vanaf de start van het fonds. "
+                                  "Reeds bewaarde waarnemingen blijven ongemoeid."):
+                    with st.spinner("Slotkoersen ophalen…"):
+                        r = md.fcpe_sync_readings(f_sel)
+                    if r["added"]:
+                        st.success(f"✅ {r['added']} waarneming(en) opgehaald "
+                                   f"({r['skipped']} stonden er al).")
+                    elif r["skipped"]:
+                        st.info(f"Alle {r['skipped']} voorbije waarnemingen stonden er al.")
+                    else:
+                        st.warning("Niets opgehaald — controleer de parameters en de "
+                                   "onderliggende waarde.")
+                    if r["missing"]:
+                        st.warning(f"Geen slotkoers gevonden voor {len(r['missing'])} datum(s): "
+                                   + ", ".join(r["missing"][:5])
+                                   + ("…" if len(r["missing"]) > 5 else "")
+                                   + ". Vul die desnoods handmatig aan in de tabel hieronder.")
+                    st.rerun()
+                if _active and b3.button("🗑️ Formule uitschakelen", key="fcpe_off"):
+                    db.set_pricing_mode(f_sel, "auto")
+                    md._CACHE.pop(f_sel, None)
+                    clear_cache()
+                    st.success("✅ Uitgeschakeld — het fonds volgt weer de gewone bronnenketen.")
+                    st.rerun()
+
+                _rd = db.get_fcpe_readings(f_sel)
+                if _rd:
+                    _res, _cur = md.fcpe_value(f_sel, auto_sync=False)
+                    if _res:
+                        v1, v2, v3, v4 = st.columns(4)
+                        v1.metric("Waarde per deelbewijs", f"{_res['value']:,.2f} {_cur}")
+                        v2.metric("Participatie", f"{_res['participation']:,.2f}")
+                        v3.metric("Vastgelegd", f"{_res['n_known']} / {_res['n_readings']}")
+                        v4.metric("Gevoeligheid", f"{_res['sensitivity']:,.2f}",
+                                  help="Hoeveel de waarde verschuift bij €1 koersbeweging van "
+                                       "de onderliggende waarde. Dit daalt naarmate er meer "
+                                       "waarnemingen vastliggen; op het einde is ze nul.")
+                        st.caption(
+                            f"Gemiddelde van de waarnemingen: **{_res['average']:,.4f}** · "
+                            f"rendement **{_res['rendement']:,.2f}** · majoraties "
+                            f"**{_res['md']:,.2f}** · nog **{_res['n_open']}** waarnemingen open"
+                            + (f", ingevuld met **{_res['fill_value']:,.4f}**"
+                               if _res["fill_value"] is not None else ""))
+                    with st.expander(f"📅 Waarnemingen ({len(_rd)})"):
+                        show_df(pd.DataFrame([{
+                            "Datum": r["date"], "Slotkoers": r["close"],
+                            "Afgetopt op referentie": max(r["close"], f_ref),
+                            "Bron": r["source"] or "",
+                        } for r in _rd]), width="stretch", hide_index=True, height=280)
+                        st.caption("De slotkoersen worden RUW bewaard, zodat je ze regel per "
+                                   "regel tegen een beursoverzicht kunt houden. Het aftoppen "
+                                   "op de referentieprijs gebeurt pas bij het rekenen.")
+
+                with st.expander("🎯 Parameters kalibreren tegen de officiële NAV"):
+                    st.caption(
+                        "Ken je de referentie- of inschrijvingsprijs niet, dan kan de app ze "
+                        "afleiden uit de gepubliceerde NAV van de beheerder. Laad daarvoor de "
+                        "NAV-export van Amundi op (kolommen datum en NAV). Dit is een "
+                        "SCHATTING: lees de gevonden afwijking mee, en gebruik de cijfers uit "
+                        "je fondsreglement zodra je die hebt.")
+                    _up = st.file_uploader("NAV-export (.xlsx)", type=["xlsx", "xls", "csv"],
+                                           key="fcpe_nav_up")
+                    if _up is not None and st.button("📥 Inlezen en kalibreren", key="fcpe_cal"):
+                        try:
+                            _n = _import_official_nav(f_sel, _up)
+                            st.success(f"✅ {_n} NAV-regel(s) ingelezen.")
+                            _off = {r["date"]: r["nav"] for r in db.get_official_nav(f_sel)}
+                            _rdd = db.get_fcpe_readings(f_sel)
+                            _spots = {r["date"]: r["close"] for r in _rdd}
+                            fit = fcpe.fit_parameters(
+                                _rdd, _off, n_readings=int(f_n), subscription_price=f_sub,
+                                spots=_spots, start_date=str(f_start), annual_rate=f_rate)
+                            if fit:
+                                st.info(f"🎯 Best passend: **α = {fit['alpha']}**, "
+                                        f"**referentieprijs = {fit['reference_price']}** "
+                                        f"(afwijking {fit['rmse']} EUR over "
+                                        f"{fit['n_points']} punten). Vul deze hierboven in "
+                                        "als ze aannemelijk zijn.")
+                            else:
+                                st.warning("Kalibratie niet mogelijk — haal eerst de "
+                                           "waarnemingen op.")
+                        except Exception as exc:
+                            st.error(f"Inlezen mislukt: {exc}")
+                    _offr = db.get_official_nav(f_sel)
+                    if _offr:
+                        _cmp_rows = []
+                        for r in _offr:
+                            _rv, _ = md.fcpe_value(f_sel, on_date=r["date"], auto_sync=False)
+                            if _rv:
+                                _cmp_rows.append({"Datum": r["date"],
+                                                  "Berekend": round(_rv["value"], 2),
+                                                  "Officieel": round(r["nav"], 2),
+                                                  "Verschil": round(_rv["value"] - r["nav"], 2)})
+                        if _cmp_rows:
+                            _cd = pd.DataFrame(_cmp_rows)
+                            _mad = _cd["Verschil"].abs().mean()
+                            st.metric("Gemiddelde afwijking", f"{_mad:,.2f} EUR")
+                            st.caption("Ligt dit dicht bij nul, dan kloppen je parameters. "
+                                       "Wijkt het stelselmatig af, dan is de officiële NAV de "
+                                       "waarheid en niet de berekening.")
+                            show_df(_cd, width="stretch", hide_index=True, height=240)
 
         with st.expander("🔬 Bronnen diagnose — waarom vindt de app geen koers?"):
             st.caption("Vraagt élke koersbron apart wat ze van deze ISIN weet en toont het "

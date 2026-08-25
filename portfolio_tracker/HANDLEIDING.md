@@ -1,6 +1,6 @@
 # Portfolio Tracker - Handleiding
 
-Versie 1.7.0
+Versie 1.8.0
 
 ---
 
@@ -259,7 +259,7 @@ Omdat er geen enkel juist antwoord bestaat op de vraag wat zulke aandelen je nu
 De eerste twee geven hetzelfde nettoresultaat; ze verschillen alleen in hoe het
 uitgesplitst wordt. De keuze verschijnt alleen als je zulke producten hebt.
 
-### 3.10 Werkgeversfondsen (FCPE): afgeleide koers, stockdividend en blokkering
+### 3.10 Werkgeversfondsen (FCPE): waardering, stockdividend en blokkering
 
 Fondsen uit aandelenplannen van je werkgever — zoals de Amundi/ENGIE Link-fondsen
 (Classic, Liberty, Multiple) — gedragen zich op drie punten anders dan gewone
@@ -281,6 +281,32 @@ activum moet in de app bestaan; heb je het losse aandeel niet in portefeuille, v
 het dan gewoon toe zonder transacties. Vanaf dan volgen de actuele koers, het
 dagresultaat, de koershistoriek én de fotomomentwaarde automatisch de onderliggende
 waarde — zonder één netwerkcall voor het fonds zelf.
+
+**De Multiple-fondsen volgen een andere formule.** Voor Classic en Liberty klopt de
+lineaire methode exact: één deelbewijs is één aandeel. Een Multiple-fonds hangt echter
+niet aan de koers van vandaag, maar aan het gemiddelde van zestig maandelijkse
+waarnemingen, elk afzonderlijk afgetopt op de referentieprijs:
+
+    waarde = inschrijvingsprijs + rendement + α × (gemiddelde − referentieprijs) + majoraties
+
+Kies daarvoor `🏢 Activa → Overzicht → 📐 Fondsformule`. Twee dingen gedragen zich daar
+wezenlijk anders dan bij de lineaire methode. De **gevoeligheid daalt**: elke waarneming
+weegt 1/60, dus naarmate er meer vastliggen beweegt de waarde steeds minder mee met de
+koers — op het einde helemaal niet meer. En **verworven stijging verdwijnt niet meer**:
+omdat elke waarneming apart wordt afgetopt, kan een koersval onder de referentieprijs het
+gemiddelde niet omlaag halen. Het paneel toont de gevoeligheid van vandaag expliciet.
+
+De parameters (α, referentieprijs, inschrijvingsprijs, data, rendement) staan in het
+reglement van jouw jaargang. Voor Link Multiple BEL 2022 is α = 16, loopt de eerste
+waarneming op 13 januari 2023 en de laatste op 15 december 2027, en bedraagt het rendement
+1,5% per jaar bij vervroegde uitstap of 7,73% op de eindvervaldag. Ken je de referentie- of
+inschrijvingsprijs niet, laad dan de NAV-export van de beheerder op: de app leidt ze af en
+toont hoe goed ze passen.
+
+De waarnemingsdata bepaalt de app zelf uit het reglement (de 15e, of de beursdag ervóór —
+inclusief de Franse feestdagen, want daar schuift de reeks effectief op), en met
+*Waarnemingen ophalen* haalt ze de slotkoersen op vanaf de start van het fonds. Daarna
+gebeurt dat maandelijks vanzelf. Je typt niets in.
 
 **Ze keren dividenden uit in deelbewijzen.** De kapitalisatie van het onderliggende
 dividend is fiscaal gewoon een dividend (roerende voorheffing, €833-vrijstelling),

@@ -392,6 +392,28 @@ def _migrate(conn):
     if not _column_exists(cur, "dividends", "manual_override"):
         cur.execute("ALTER TABLE dividends ADD COLUMN manual_override INTEGER DEFAULT 0")
 
+    # Waarnemingen en gepubliceerde NAV van FCPE-hefboomfondsen.
+    cur.execute("""CREATE TABLE IF NOT EXISTS fcpe_readings (
+        id           INTEGER PRIMARY KEY AUTOINCREMENT,
+        ticker       TEXT NOT NULL,
+        reading_date TEXT NOT NULL,
+        close_price  REAL NOT NULL,
+        source       TEXT DEFAULT 'manual',
+        note         TEXT,
+        UNIQUE(ticker, reading_date)
+    )""")
+    cur.execute("""CREATE TABLE IF NOT EXISTS official_nav (
+        id       INTEGER PRIMARY KEY AUTOINCREMENT,
+        ticker   TEXT NOT NULL,
+        nav_date TEXT NOT NULL,
+        nav      REAL NOT NULL,
+        currency TEXT DEFAULT 'EUR',
+        source   TEXT DEFAULT 'import',
+        UNIQUE(ticker, nav_date)
+    )""")
+    if not _column_exists(cur, "assets", "fcpe_params"):
+        cur.execute("ALTER TABLE assets ADD COLUMN fcpe_params TEXT")
+
     # Prullenbak: elke verwijderde rij wordt hier eerst als JSON bewaard.
     cur.execute("""CREATE TABLE IF NOT EXISTS deleted_records (
         id          INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -718,6 +740,18 @@ def employer_linked_tickers() -> list[str]:
                         "ORDER BY ticker").fetchall()
     conn.close()
     return [r["ticker"] for r in rows]
+
+
+def set_pricing_mode(ticker: str, mode: str):
+    """Kies de waarderingsmethode van een activum: 'auto' (bronnenketen),
+    'derived' (lineair op een onderliggende waarde) of 'fcpe' (formule van het
+    fonds). Er kan er maar één tegelijk gelden."""
+    if mode not in ("auto", "derived", "fcpe"):
+        raise ValueError(f"onbekende waarderingsmethode: {mode}")
+    conn = get_connection()
+    conn.execute("UPDATE assets SET pricing_mode=? WHERE ticker=?", (mode, ticker.upper()))
+    conn.commit()
+    conn.close()
 
 
 def set_manual_only(ticker, enabled: bool):
@@ -1708,7 +1742,9 @@ def run_status_checks(online: bool = True, tickers: list[str] | None = None) -> 
         # ISIN's is elke bron bij voorbaat blind, dus zouden de checks enkel netwerk-
         # calls en logruis opleveren — en erger: een 'ticker_change'- of
         # 'name_change'-melding op basis van een toevallige naamgelijkenis.
-        _derived = (a.get("pricing_mode") or "auto") == "derived" and a.get("underlying_ticker")
+        _mode = (a.get("pricing_mode") or "auto")
+        _derived = (_mode in ("derived", "fcpe")) and (
+            a.get("underlying_ticker") or _mode == "fcpe")
         if online and md is not None and not _derived and not a.get("manual_only"):
             try:
                 probe = md.asset_status_probe(a, online=True)
@@ -3017,3 +3053,103 @@ def last_trash_group(group: str) -> list[dict]:
                         (group,)).fetchall()
     conn.close()
     return [dict(r) for r in rows]
+
+
+# ── FCPE-fondsen: waarnemingen, parameters en officiële NAV ───────────────────
+# Voor hefboomfondsen waarvan de waarde het GEMIDDELDE van zestig maandelijkse
+# waarnemingen volgt (zie fcpe_pricing.py) is één koers niet genoeg: de app moet de
+# reeds vastgelegde waarnemingen kennen. Die bewaren we hier als RUWE slotkoersen —
+# niet als reeds afgetopte Relevés — zodat ze regel per regel te controleren zijn
+# tegen een beursoverzicht. Het aftoppen op de referentieprijs gebeurt pas bij het
+# rekenen, waar het thuishoort.
+
+def set_fcpe_params(ticker: str, params: dict | None):
+    """Bewaar (of wis, met None) de formuleparameters van een fonds."""
+    conn = get_connection()
+    conn.execute("UPDATE assets SET fcpe_params=? WHERE ticker=?",
+                 (json.dumps(params) if params else None, ticker.upper()))
+    conn.commit()
+    conn.close()
+
+
+def get_fcpe_params(ticker: str) -> dict | None:
+    conn = get_connection()
+    row = conn.execute("SELECT fcpe_params FROM assets WHERE ticker=?",
+                       (ticker.upper(),)).fetchone()
+    conn.close()
+    if not row or not row["fcpe_params"]:
+        return None
+    try:
+        return json.loads(row["fcpe_params"])
+    except (TypeError, ValueError):
+        logger.warning(f"get_fcpe_params({ticker}): onleesbare parameters.")
+        return None
+
+
+def save_fcpe_reading(ticker: str, reading_date: str, close_price: float,
+                      source: str = "manual", note: str | None = None):
+    """Leg één maandelijkse waarneming vast (of werk ze bij)."""
+    conn = get_connection()
+    conn.execute(
+        "INSERT INTO fcpe_readings (ticker, reading_date, close_price, source, note) "
+        "VALUES (?,?,?,?,?) ON CONFLICT(ticker, reading_date) DO UPDATE SET "
+        "close_price=excluded.close_price, source=excluded.source, note=excluded.note",
+        (ticker.upper(), str(reading_date)[:10], float(close_price), source, note))
+    conn.commit()
+    conn.close()
+
+
+def get_fcpe_readings(ticker: str, upto: str | None = None) -> list[dict]:
+    """Waarnemingen in chronologische volgorde, eventueel tot en met een datum."""
+    conn = get_connection()
+    q = "SELECT * FROM fcpe_readings WHERE ticker=?"
+    p = [ticker.upper()]
+    if upto:
+        q += " AND reading_date<=?"
+        p.append(str(upto)[:10])
+    q += " ORDER BY reading_date"
+    rows = conn.execute(q, p).fetchall()
+    conn.close()
+    return [{"date": r["reading_date"], "close": r["close_price"],
+             "source": r["source"], "note": r["note"]} for r in rows]
+
+
+def delete_fcpe_reading(ticker: str, reading_date: str) -> bool:
+    conn = get_connection()
+    cur = conn.execute("DELETE FROM fcpe_readings WHERE ticker=? AND reading_date=?",
+                       (ticker.upper(), str(reading_date)[:10]))
+    n = cur.rowcount or 0
+    conn.commit()
+    conn.close()
+    return n > 0
+
+
+def save_official_nav(ticker: str, nav_date: str, nav: float,
+                      currency: str = "EUR", source: str = "import"):
+    """Bewaar een door de beheerder gepubliceerde NAV.
+
+    Dit is de waarheid waartegen elke eigen berekening zich moet verantwoorden. Ze
+    staat bewust apart van price_history: die bevat wat de app zelf ophaalt of
+    berekent, deze tabel wat de beheerder heeft vastgesteld."""
+    conn = get_connection()
+    conn.execute(
+        "INSERT INTO official_nav (ticker, nav_date, nav, currency, source) "
+        "VALUES (?,?,?,?,?) ON CONFLICT(ticker, nav_date) DO UPDATE SET "
+        "nav=excluded.nav, currency=excluded.currency, source=excluded.source",
+        (ticker.upper(), str(nav_date)[:10], float(nav), currency, source))
+    conn.commit()
+    conn.close()
+
+
+def get_official_nav(ticker: str) -> list[dict]:
+    conn = get_connection()
+    rows = conn.execute("SELECT * FROM official_nav WHERE ticker=? ORDER BY nav_date",
+                        (ticker.upper(),)).fetchall()
+    conn.close()
+    return [{"date": r["nav_date"], "nav": r["nav"], "currency": r["currency"],
+             "source": r["source"]} for r in rows]
+
+
+def latest_official_nav(ticker: str) -> dict | None:
+    rows = get_official_nav(ticker)
+    return rows[-1] if rows else None

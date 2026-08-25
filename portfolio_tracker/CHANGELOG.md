@@ -2,6 +2,78 @@
 
 Alle noemenswaardige wijzigingen aan de Portfolio Tracker add-on.
 
+## 1.8.0
+Een tweede waarderingsmethode voor werkgeversfondsen: de formule uit het fondsreglement
+zelf, naast de bestaande lineaire methode. Per activum te kiezen.
+
+### 📐 De fondsformule ("Participation à la Hausse Moyenne Protégée")
+
+De bestaande methode rekent op de spotkoers: `basis + multiplicator × (koers −
+referentie)`. Voor Link Classic en Liberty klopt dat exact — één deelbewijs is één
+aandeel. Voor de **Multiple**-fondsen niet: die hangen aan het **gemiddelde van zestig
+maandelijkse waarnemingen**, elk afzonderlijk afgetopt op de referentieprijs.
+
+    waarde = inschrijvingsprijs + rendement + α × (gemiddelde − referentieprijs) + majoraties
+    Relevé i = max(slotkoers op waarnemingsdatum i, referentieprijs)
+
+Twee gedragingen die een lineair model per definitie niet kan nabootsen:
+
+- **De gevoeligheid daalt.** Elke waarneming weegt 1/60; openstaande waarnemingen worden
+  met de huidige koers ingevuld. Een beweging van €1 verschuift de waarde dus met
+  α × (openstaand/60) × €1 — bij α=16 is dat €16 aan het begin en nog €4 wanneer er
+  vijftien openstaan. Een vaste multiplicator is even gevoelig op de eerste als op de
+  laatste dag.
+- **Verworven stijging kan niet meer verdwijnen.** Omdat elke waarneming apart wordt
+  afgetopt, kan een koersval onder de referentieprijs het gemiddelde niet omlaag halen.
+  De lineaire methode met ondergrens laat die winst wél volledig wegvallen.
+
+Nieuw bestand `fcpe_pricing.py` met de volledige formule: aftopping per waarneming,
+invulling van openstaande waarnemingen, het rendement met dagtelling
+`[(1+1,5%)^(Nbj/365) − 1]`, het afwijkende tarief van 7,73% op de eindvervaldag, en de
+Majorations de Dividende.
+
+### 🗓️ De waarnemingsdata worden zelf bepaald
+
+Het reglement zegt: de 15e van elke maand, of de beursdag ervóór. Welke dagen dat zijn,
+is niet vrijblijvend — de gepubliceerde reeks schuift op 14 juli en 15 augustus een dag
+terug, dus de Franse feestdagen tellen mee, niet enkel de sluitingsdagen van Euronext.
+De ingebouwde kalender is nagerekend tegen de **44 gepubliceerde waarnemingsdata van
+januari 2023 tot augustus 2026: alle 44 komen exact uit**, inclusief de verschuivingen
+naar 13 juli 2023, 14 augustus 2023 en 14 augustus 2025. De laatste gegenereerde datum
+is 15 december 2027, zoals het reglement voorschrijft.
+
+### 🔄 De historische waarnemingen worden automatisch opgehaald
+
+Er hoeft niets ingetypt te worden. De knop *Waarnemingen ophalen* (en voortaan ook een
+dagelijkse achtergrondtaak om 23:10) haalt de werkelijke slotkoers van de onderliggende
+waarde op voor elke voorbije waarnemingsdatum, terug tot de start van het fonds — ook
+voor jaren waarin de app zelf nog geen koersen bewaarde. Bewust met de ONGECORRIGEERDE
+slotkoers: het reglement spreekt over de werkelijke slotkoers, niet over een voor
+dividenden gecorrigeerde reeks.
+
+Reeds vastgelegde waarnemingen worden nooit overschreven. Een waarneming hoort niet meer
+te bewegen, en een handmatige correctie mag niet stilzwijgend ongedaan gemaakt worden.
+De slotkoersen worden ruw bewaard — het aftoppen gebeurt pas bij het rekenen — zodat je
+ze regel per regel tegen een beursoverzicht kunt houden.
+
+### 🎯 Kalibratie tegen de gepubliceerde NAV
+
+Ken je de referentie- of inschrijvingsprijs van je jaargang niet, laad dan de NAV-export
+van de beheerder op. De app leidt de best passende parameters af en toont de afwijking,
+plus een vergelijking berekend-tegenover-officieel per datum. Dat laatste is de enige
+eerlijke controle: wijkt het stelselmatig af, dan is de gepubliceerde NAV de waarheid en
+niet de berekening.
+
+### Overige
+
+- `assets.pricing_mode` kent nu drie waarden: `auto`, `derived` en `fcpe`; ze sluiten
+  elkaar uit. Nieuw: `db.set_pricing_mode()`.
+- Nieuwe tabellen `fcpe_readings` en `official_nav`, nieuwe kolom `assets.fcpe_params`.
+- De statuscontrole slaat fondsformule-activa over, net als afgeleide: hun ISIN staat bij
+  geen enkele koersbron, dus elke online poging zou logruis zijn.
+- Het fotomoment (31/12/2025) van zo'n fonds wordt via de formule bepaald, met alleen de
+  waarnemingen die op dat moment bestonden — geen kennis van later.
+
 ## 1.7.0
 Een blinde vlek in de risicoweergave, en drie plekken waar de app onnodig werk van je
 vroeg.

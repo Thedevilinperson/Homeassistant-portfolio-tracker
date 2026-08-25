@@ -9,6 +9,8 @@ from zoneinfo import ZoneInfo
 
 import yfinance as yf
 
+import fcpe_pricing as fcpe
+
 logger = logging.getLogger(__name__)
 
 # ── In-memory cache (5 minuten TTL) ─────────────────────────────────────────
@@ -1960,6 +1962,140 @@ FAIL_CACHE_TTL = 1800  # 30 min — genoeg om herhaling elke 5 min te vermijden,
                        # kort genoeg om een terugkerende bron snel op te pikken
 
 
+
+# ── FCPE-fondsen met de formule van het fonds ────────────────────────────────
+# Naast de lineaire afgeleide koers hierboven kent de app een tweede methode voor
+# werkgeversfondsen: de formule uit het fondsreglement zelf, waarbij de waarde het
+# GEMIDDELDE van zestig maandelijkse waarnemingen volgt in plaats van de spotkoers.
+# Zie fcpe_pricing.py voor de formule en waarom een lineair model haar niet kan
+# nabootsen. Hier staat alleen de aansluiting: parameters ophalen, waarnemingen
+# aanvullen, en de waarde teruggeven aan dezelfde koersketen als elk ander activum.
+
+def _fcpe_cfg(ticker: str) -> dict | None:
+    """Parameters van een fonds dat op de fondsformule gewaardeerd wordt."""
+    try:
+        import database as _db
+        row = _db.get_asset(ticker)
+        if not row or (row.get("pricing_mode") or "auto") != "fcpe":
+            return None
+        par = _db.get_fcpe_params(ticker)
+        if not par or not (par.get("underlying_ticker") or row.get("underlying_ticker")):
+            return None
+        par.setdefault("underlying_ticker", row.get("underlying_ticker"))
+        return par
+    except Exception as exc:
+        logger.warning(f"_fcpe_cfg({ticker}): {exc}")
+        return None
+
+
+def fcpe_reading_dates(cfg: dict) -> list[str]:
+    """Alle waarnemingsdata van dit fonds, van de eerste tot de laatste."""
+    return fcpe.reading_dates(
+        int(cfg.get("n_readings") or 60),
+        day_of_month=int(cfg.get("reading_day") or 15),
+        first_month=cfg.get("first_reading_month") or cfg.get("first_reading"))
+
+
+def fcpe_sync_readings(ticker: str, cfg: dict | None = None,
+                       force: bool = False) -> dict:
+    """Vul de maandelijkse waarnemingen aan met de werkelijke slotkoersen van de
+    onderliggende waarde.
+
+    Dit is de reden dat de formule bruikbaar is zonder handwerk: de app kent de
+    waarnemingsdata uit het reglement en haalt de slotkoers van elke voorbije datum
+    zelf op, ook voor jaren waarin ze zelf nog geen koersen bewaarde. Er wordt
+    bewust met auto_adjust=False gewerkt: het reglement spreekt over de WERKELIJKE
+    slotkoers, niet over een voor dividenden gecorrigeerde reeks.
+
+    Reeds bewaarde waarnemingen worden niet overschreven (tenzij force=True): een
+    vastgelegde waarneming hoort niet meer te bewegen, en een handmatige correctie
+    mag niet stilzwijgend ongedaan gemaakt worden.
+    """
+    import database as _db
+    cfg = cfg or _fcpe_cfg(ticker)
+    out = {"added": 0, "skipped": 0, "missing": [], "underlying": None}
+    if not cfg:
+        return out
+    und = cfg["underlying_ticker"]
+    out["underlying"] = und
+    today = datetime.now().date().isoformat()
+    dates = [d for d in fcpe_reading_dates(cfg) if d <= today]
+    if not dates:
+        return out
+    have = {r["date"] for r in _db.get_fcpe_readings(ticker)} if not force else set()
+    todo = [d for d in dates if d not in have]
+    out["skipped"] = len(dates) - len(todo)
+    if not todo:
+        return out
+
+    # Eén reeks ophalen voor het hele bereik in plaats van een verzoek per datum.
+    series = None
+    try:
+        sym = _yf_symbol(und) or und
+        start = (datetime.strptime(min(todo), "%Y-%m-%d") - timedelta(days=10)).strftime("%Y-%m-%d")
+        end = (datetime.strptime(max(todo), "%Y-%m-%d") + timedelta(days=2)).strftime("%Y-%m-%d")
+        hist = yf.Ticker(sym).history(start=start, end=end, auto_adjust=False)
+        if not hist.empty:
+            series = hist["Close"].copy()
+            series.index = series.index.tz_localize(None).normalize()
+    except Exception as exc:
+        logger.warning(f"fcpe_sync_readings({ticker}): reeks ophalen faalde: {exc}")
+
+    for d in todo:
+        close = None
+        if series is not None:
+            try:
+                import pandas as _pd
+                upto = series[series.index <= _pd.Timestamp(d)]
+                if len(upto):
+                    close = float(upto.iloc[-1])
+            except Exception:
+                close = None
+        if close is None:
+            close = get_close_on_date(und, d)      # terugval: bron per datum
+        if close is None:
+            out["missing"].append(d)
+            continue
+        _db.save_fcpe_reading(ticker, d, round(close, 4), source=f"auto:{und}")
+        out["added"] += 1
+    if out["missing"]:
+        logger.warning(f"fcpe_sync_readings({ticker}): geen slotkoers voor "
+                       f"{len(out['missing'])} datum(s), o.a. {out['missing'][:3]}")
+    return out
+
+
+def fcpe_value(ticker: str, cfg: dict | None = None, on_date: str | None = None,
+               spot: float | None = None, spot_currency: str | None = None,
+               auto_sync: bool = True) -> tuple[dict | None, str | None]:
+    """Waarde van één deelbewijs volgens de fondsformule, met alle tussenstappen."""
+    import database as _db
+    cfg = cfg or _fcpe_cfg(ticker)
+    if not cfg:
+        return None, None
+    und = cfg["underlying_ticker"]
+    if spot is None:
+        spot, spot_currency = (get_close_on_date(und, on_date), cfg.get("currency", "EUR")) \
+            if on_date else get_current_price(und)
+    if auto_sync:
+        try:
+            fcpe_sync_readings(ticker, cfg)
+        except Exception as exc:
+            logger.warning(f"fcpe_value({ticker}): aanvullen waarnemingen faalde: {exc}")
+    readings = _db.get_fcpe_readings(ticker, upto=on_date)
+    res = fcpe.part_value(
+        readings, spot=spot, on_date=on_date,
+        n_readings=int(cfg.get("n_readings") or 60),
+        reference_price=float(cfg.get("reference_price") or 0.0),
+        alpha=float(cfg.get("alpha") or 0.0),
+        subscription_price=float(cfg.get("subscription_price") or 0.0),
+        start_date=cfg.get("start_date"),
+        annual_rate=float(cfg.get("annual_rate", fcpe.DEFAULT_ANNUAL_RATE)),
+        maturity_date=cfg.get("maturity_date"),
+        maturity_return=cfg.get("maturity_return"),
+        md_entries=cfg.get("md_entries"))
+    return res, (spot_currency or "EUR")
+
+
 def get_current_price(ticker: str, _depth: int = 0) -> tuple[float | None, str | None]:
     """Actuele koers + munt. De ISIN is de bron van waarheid voor koersopzoeking
     (uniek en ondubbelzinnig, i.t.t. een Yahoo-ticker met beurssuffix). Volgorde:
@@ -1981,6 +2117,29 @@ def get_current_price(ticker: str, _depth: int = 0) -> tuple[float | None, str |
     # onlinepoging voor zo'n ISIN is bij voorbaat zinloos, en de faalteller van dit
     # activum mag niet oplopen door iets wat geen fout is. Faalt de ONDERLIGGENDE
     # koers, dan blijft die fout bij het onderliggende activum (eigen teller/log).
+    # Fondsformule (FCPE): waarde uit het gemiddelde van de maandelijkse waarnemingen.
+    # Staat vóór de lineaire afgeleide koers: een fonds kan maar één methode hebben, en
+    # deze is de nauwkeurigste wanneer ze ingesteld is.
+    fcfg = _fcpe_cfg(ticker)
+    if fcfg:
+        res, cur = fcpe_value(ticker, fcfg)
+        if res is not None:
+            _store(ticker, res["value"], cur or "EUR")
+            return res["value"], cur or "EUR"
+        try:
+            # database wordt in deze module bewust pas binnen de functie geïmporteerd
+            # (anders ontstaat er een kringloop met database.py).
+            import database as _db
+            mp = _db.get_manual_price(ticker)
+            if mp:
+                return mp["price"], mp["currency"]
+        except Exception:
+            pass
+        logger.warning(f"get_current_price({ticker}): fondsformule kon niet gerekend "
+                       "worden (geen koers voor de onderliggende waarde of parameters "
+                       "onvolledig).")
+        return None, None
+
     dcfg = _derived_cfg(ticker)
     if dcfg:
         if _depth >= _DERIVED_MAX_DEPTH:
@@ -2226,8 +2385,16 @@ def get_close_on_date(ticker: str, on_date: str, _depth: int = 0) -> float | Non
     invoeren. Geen resultaat betekent meestal gewoon dat dit effect op 31/12/2025
     nog niet bestond of niet verhandeld werd (bv. een pas in 2026 uitgegeven
     warrant) — dan is er sowieso geen fotomomentwaarde nodig."""
-    # Afgeleid activum (bv. FCPE): de historische slotkoers is per definitie de
-    # formule toegepast op de historische slotkoers van de ONDERLIGGENDE waarde.
+    # Fondsformule: de historische waarde is de formule toegepast op de waarnemingen
+    # die op die datum al bestonden, plus de slotkoers van die dag voor de rest. Zo
+    # klopt ook het fotomoment (31/12/2025) voor deze fondsen.
+    fcfg = _fcpe_cfg(ticker)
+    if fcfg:
+        res, _ = fcpe_value(ticker, fcfg, on_date=on_date[:10])
+        return res["value"] if res else None
+
+    # Afgeleid activum: de historische slotkoers is per definitie de formule toegepast
+    # op de historische slotkoers van de ONDERLIGGENDE waarde.
     dcfg = _derived_cfg(ticker)
     if dcfg:
         if _depth >= _DERIVED_MAX_DEPTH:
@@ -2401,6 +2568,9 @@ def is_market_open(exchange: str) -> bool:
 def get_market_state(ticker: str, _depth: int = 0) -> str:
     # Afgeleid activum: de 'markt' van een FCPE is die van zijn onderliggende waarde
     # (bv. ENGIE op Euronext). Zo blijven de valse-vlakke-koersalarmen correct.
+    fcfg = _fcpe_cfg(ticker)
+    if fcfg and _depth < _DERIVED_MAX_DEPTH:
+        return get_market_state(fcfg["underlying_ticker"], _depth=_depth + 1)
     dcfg = _derived_cfg(ticker)
     if dcfg and _depth < _DERIVED_MAX_DEPTH:
         return get_market_state(dcfg["underlying_ticker"], _depth=_depth + 1)
