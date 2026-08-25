@@ -2,6 +2,20 @@
 
 Alle noemenswaardige wijzigingen aan de Portfolio Tracker add-on.
 
+## 1.8.4
+Nieuwe sectie **🏢 Activa → 🔗 Koppelingen** met een overzichtstabel van alle
+activa die een afgeleide koers (🧮) of een fondsformule (📐) gebruiken: fonds,
+methode, onderliggende waarde, de kernparameters in één oogopslag (α,
+referentie- en inschrijvingsprijs, aantal vastgelegde waarnemingen,
+majoraties), zodat je niet meer per activum het formulier moet openen om te
+zien wat er precies staat ingesteld.
+
+De configuratiepanelen zelf (**🧮 Afgeleide koers** en **📐 Fondsformule**,
+inclusief de kalibratie tegen de officiële NAV) zijn hierheen verhuisd vanuit
+**📋 Overzicht** — inhoudelijk ongewijzigd, alleen makkelijker terug te vinden
+naast het nieuwe totaaloverzicht. Geen enkel ander gedrag verandert; er is
+geen databankmigratie.
+
 ## 1.8.3
 De kalibratie kon na 1.8.2 nog een onzinnig resultaat opleveren (een te lage
 referentieprijs mét een negatieve inschrijvingsprijs). De oorzaak is wiskundig,
