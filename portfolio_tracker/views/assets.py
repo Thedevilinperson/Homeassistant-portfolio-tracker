@@ -821,7 +821,12 @@ def page_assets():
                         "app ze afleiden uit de gepubliceerde NAV van de beheerder. Laad "
                         "daarvoor de NAV-export van Amundi op (kolommen datum en NAV). Dit is "
                         "een SCHATTING: lees de gevonden afwijking mee, en gebruik de cijfers "
-                        "uit je fondsreglement zodra je die hebt.")
+                        "uit je fondsreglement zodra je die hebt. **Vul éérst de majoraties "
+                        "hierboven in en bewaar ze** — kalibreren zonder schuift de "
+                        "referentieprijs scheef, omdat de sprongen in de officiële NAV dan "
+                        "ergens anders in geperst worden. Neem in de NAV-export bij voorkeur "
+                        "de **oprichtingsdag** mee: die NAV is per reglement exact de "
+                        "inschrijvingsprijs en pint die vast.")
                     st.caption(
                         f"**α blijft vast op {f_alpha:g}.** Die staat in het reglement en is "
                         "geen onbekende. Hem toch laten meebewegen geeft altijd een iets "
@@ -858,7 +863,11 @@ def page_assets():
                                 _parts = [f"**referentieprijs = {fit['reference_price']}**"]
                                 if _fit_alpha:
                                     _parts.insert(0, f"**α = {fit['alpha']}**")
-                                if _fit_sub:
+                                if fit.get("anchored_subscription"):
+                                    _parts.append("**inschrijvingsprijs = "
+                                                  f"{fit['subscription_price']}** (vastgepind "
+                                                  "op de NAV van de oprichtingsdag)")
+                                elif _fit_sub:
                                     _parts.append("**inschrijvingsprijs = "
                                                   f"{fit['subscription_price']}**")
                                 st.info("🎯 Best passend: " + ", ".join(_parts)
@@ -866,6 +875,8 @@ def page_assets():
                                         f"{fit['n_points']} punten). Vast gehouden: "
                                         + (", ".join(fit["fixed"]) or "niets")
                                         + ". Vul deze hierboven in als ze aannemelijk zijn.")
+                                for _w in fit.get("warnings") or []:
+                                    st.warning("⚠️ " + _w)
                                 if fit["rmse"] > 1.0:
                                     st.warning(
                                         "⚠️ De afwijking is groot. Controleer eerst of de "

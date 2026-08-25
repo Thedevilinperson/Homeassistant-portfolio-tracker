@@ -2,6 +2,45 @@
 
 Alle noemenswaardige wijzigingen aan de Portfolio Tracker add-on.
 
+## 1.8.3
+De kalibratie kon na 1.8.2 nog een onzinnig resultaat opleveren (een te lage
+referentieprijs mét een negatieve inschrijvingsprijs). De oorzaak is wiskundig,
+niet numeriek: zolang **geen enkele waarneming onder de referentieprijs ligt**
+— en voor Link Multiple BEL 2022 is dat zo, de laagste slotkoers (13,27 op
+14-06-2024) blijft boven de referentie — wordt er nergens afgetopt en hangt de
+waarde alleen af van de combinatie *(inschrijving − α × referentie)*. Referentie-
+en inschrijvingsprijs zijn dan **onscheidbaar**: elke verschuiving van de één
+compenseert de ander exact, en een gezamenlijke schatting glijdt naar een
+willekeurig punt op die richel.
+
+### ⚓ De oprichtingsdag pint de inschrijvingsprijs vast
+
+De NAV op de Date de Commencement is per reglement (art. 10) exact de
+inschrijvingsprijs — een meting, geen schatting. Staat die datum in de
+NAV-export (voor BEL 2022: 22-12-2022 = 10,52), dan gebruikt de kalibratie hem
+voortaan als anker voor de inschrijvingsprijs en zoekt ze alleen nog de
+referentieprijs. Dat breekt de richel. Wijkt het anker af van de handmatig
+ingevulde inschrijvingsprijs, dan verschijnt een waarschuwing.
+
+### ⚠️ Onbepaaldheid wordt gemeld in plaats van verzwegen
+
+Wordt de inschrijvingsprijs meegeschat zónder anker en blijkt de afwijking over
+een brede strook referentieprijzen vrijwel even klein (de richel), dan zegt het
+resultaat dat nu expliciet, mét de remedie. Een gevonden inschrijvingsprijs van
+nul of lager krijgt een aparte waarschuwing: gebruik dat resultaat niet. De
+kalibratie-uitleg vermeldt bovendien dat de **majoraties éérst** ingevuld en
+bewaard moeten worden — kalibreren zonder perst de dividendsprongen in een
+scheve referentieprijs.
+
+### 🎯 De parameters voor Link Multiple BEL 2022
+
+Uit de NAV-reeks december 2022 – augustus 2026 volgt met het gecorrigeerde model
+exact één consistent stel: **referentieprijs 13,1403 · inschrijvingsprijs 10,52 ·
+α 16 · majoraties 1,48 (2025) en 1,35 (2026)**. Controle: 13,1403 × 0,8 = 10,5122,
+naar boven afgerond op de cent = 10,52 — precies hoe het inschrijvingsprijsbesluit
+werkt. De gemiddelde absolute afwijking over 44 maandpunten zakt daarmee naar
+minder dan één cent.
+
 ## 1.8.2
 De fondsformule week structureel af van de officiële NAV. De vergelijking met de
 gepubliceerde reeks van Link Multiple BEL 2022 (december 2022 – augustus 2026) legde

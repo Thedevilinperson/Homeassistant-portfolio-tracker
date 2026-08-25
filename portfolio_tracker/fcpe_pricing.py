@@ -366,11 +366,14 @@ def fit_parameters(readings, official: dict, *, n_readings: int,
     Op datums waar de Participation boven het Rendement ligt — in de praktijk vrijwel
     elke datum zodra de koers boven de referentie noteert — is dat lineair in α en de
     inschrijvingsprijs, dus daar loopt de kleinstekwadratenschatting over; de
-    gerapporteerde afwijking wordt daarna met het volledige max-model berekend. De
-    oprichtingsdag wordt overgeslagen: daar is de NAV per definitie de
-    inschrijvingsprijs en zegt hij niets over de referentieprijs. Over de
-    referentieprijs zelf lopen we een raster af, dat daarna tweemaal verfijnd wordt
-    rond het beste punt.
+    gerapporteerde afwijking wordt daarna met het volledige max-model berekend. Bevat
+    de NAV-reeks de oprichtingsdag, dan pint die de inschrijvingsprijs vast: de NAV
+    is dan per reglement exact de inschrijvingsprijs. Dat anker is onmisbaar wanneer
+    geen enkele waarneming onder de referentieprijs ligt — er wordt dan nergens
+    afgetopt en alleen de combinatie (inschrijving − α × referentie) is meetbaar.
+    Voor de schatting van de referentieprijs zelf telt de oprichtingsdag niet mee.
+    Over de referentieprijs lopen we een raster af, dat daarna tweemaal verfijnd
+    wordt rond het beste punt.
 
     Returns o.a. 'alpha', 'reference_price', 'subscription_price', 'rmse',
     'fitted' (welke parameters vrijgelaten zijn) en 'fixed'.
@@ -385,6 +388,31 @@ def fit_parameters(readings, official: dict, *, n_readings: int,
     if a_fixed is None and not fit_alpha:
         fit_alpha = True                      # geen α gegeven: dan toch maar schatten
     s_fixed = None if fit_subscription else float(subscription_price)
+
+    # ── Het anker op de oprichtingsdag ──────────────────────────────────────
+    # De NAV op de Date de Commencement IS de inschrijvingsprijs (reglement
+    # art. 10). Dat is een METING, geen schatting — en hij is onmisbaar: zolang
+    # geen enkele waarneming onder de referentieprijs duikt, wordt er nergens
+    # afgetopt en hangt de waarde alleen af van (inschrijving − α × referentie).
+    # Referentie- en inschrijvingsprijs zijn dan perfect onscheidbaar: elke
+    # verschuiving van de één kan door de ander gecompenseerd worden, en een
+    # gezamenlijke schatting glijdt naar een willekeurig punt op die richel
+    # (typisch een te lage referentie mét een onzinnige, zelfs negatieve
+    # inschrijvingsprijs). Het anker breekt de richel.
+    warnings_out = []
+    anchored = False
+    start_a = _as_date(start_date)
+    if start_a:
+        _anchor_dates = [d for d in official if (_as_date(d) or None) and _as_date(d) <= start_a]
+        if _anchor_dates:
+            _anchor = float(official[max(_anchor_dates)])
+            if fit_subscription:
+                s_fixed, fit_subscription, anchored = _anchor, False, True
+            elif abs(_anchor - float(subscription_price)) > 0.005:
+                warnings_out.append(
+                    f"De NAV op de oprichtingsdag ({_anchor:.4f}) wijkt af van de "
+                    f"ingevulde inschrijvingsprijs ({float(subscription_price):.4f}); "
+                    "per reglement zijn die gelijk. Controleer de inschrijvingsprijs.")
 
     def _eval(ref: float):
         """Geeft (afwijking², α, inschrijvingsprijs) voor deze referentieprijs."""
@@ -462,12 +490,15 @@ def fit_parameters(readings, official: dict, *, n_readings: int,
         ref_range = (min(pool) * 0.5, max(pool))
 
     best, lo, hi, step = None, float(ref_range[0]), float(ref_range[1]), float(ref_step)
-    for _ in range(3):                        # grof, dan tweemaal verfijnen
+    _coarse = []                              # (ref, afwijking²) van de grove pas
+    for _pass in range(3):                    # grof, dan tweemaal verfijnen
         ref = lo
         while ref <= hi + 1e-9:
             got = _eval(ref)
             if got:
                 resid, a, sub = got
+                if _pass == 0:
+                    _coarse.append((ref, resid))
                 if best is None or resid < best["residual"]:
                     best = {"reference_price": round(ref, 4), "alpha": round(a, 4),
                             "subscription_price": round(sub, 4), "residual": resid,
@@ -478,9 +509,32 @@ def fit_parameters(readings, official: dict, *, n_readings: int,
         lo, hi = best["reference_price"] - step, best["reference_price"] + step
         step /= 10.0
 
+    # Zonder anker én zonder aftopping is de gezamenlijke schatting van
+    # referentie- en inschrijvingsprijs onbepaald: de afwijking is dan over een
+    # brede strook referentieprijzen vrijwel even klein. Meet dat op de grove
+    # pas en waarschuw — het "beste" punt is dan numeriek toeval.
+    if fit_subscription and len(_coarse) >= 5:
+        _res = [r for _, r in _coarse]
+        _rmin = min(_res)
+        _flat = [ref for ref, r in _coarse if r <= _rmin + max(1e-9, 0.05 * _rmin)]
+        if _flat and (max(_flat) - min(_flat)) > 5 * float(ref_step):
+            warnings_out.append(
+                "Referentie- en inschrijvingsprijs zijn met deze gegevens niet "
+                "afzonderlijk te bepalen: geen enkele waarneming ligt onder de "
+                "referentieprijs, dus alleen hun combinatie is meetbaar. Neem een "
+                "NAV-export mét de oprichtingsdag op (die pint de inschrijvingsprijs "
+                "vast), of vul de inschrijvingsprijs uit het reglement in en laat "
+                "alleen de referentieprijs zoeken.")
+    if best["subscription_price"] <= 0:
+        warnings_out.append(
+            "De gevonden inschrijvingsprijs is nul of negatief — dat is onzinnig en "
+            "wijst op de onbepaaldheid hierboven. Gebruik dit resultaat niet.")
+
     best["fitted"] = ([("α" if fit_alpha else None), "referentieprijs",
                        ("inschrijvingsprijs" if fit_subscription else None)])
     best["fitted"] = [f for f in best["fitted"] if f]
     best["fixed"] = [f for f in (("α" if not fit_alpha else None),
                                  ("inschrijvingsprijs" if not fit_subscription else None)) if f]
+    best["anchored_subscription"] = anchored
+    best["warnings"] = warnings_out
     return best
