@@ -2,6 +2,67 @@
 
 Alle noemenswaardige wijzigingen aan de Portfolio Tracker add-on.
 
+## 1.8.2
+De fondsformule week structureel af van de officiële NAV. De vergelijking met de
+gepubliceerde reeks van Link Multiple BEL 2022 (december 2022 – augustus 2026) legde
+drie oorzaken bloot, waarvan twee in de code zaten.
+
+### ➕→⬆️ Het rendement is een bodem, geen opslag
+
+Het reglement (art. 3.11.1 / 3.12.1) definieert de prestatie als *"la valeur la plus
+haute entre le Rendement et la Participation à la Hausse Moyenne Protégée"* — de
+**hoogste** van de twee. De app telde ze op:
+
+    fout:   waarde = inschrijving + rendement + participatie + majoraties
+    juist:  waarde = inschrijving + max(rendement, participatie) + majoraties
+
+Zodra de koers boven de referentieprijs noteert, wint de participatie en telt het
+rendement niet meer mee. Door de optelling groeide de berekende waarde elk jaar
+≈ €0,16 verder boven de officiële NAV uit (1,5% op €10,52), tot ≈ €0,60 in 2026 —
+precies de langzaam oplopende drift in de vergelijkingstabel. `part_value()` neemt nu
+de max, meldt in `performance_source` welke van de twee de bodem vormt, en zet de
+gevoeligheid op nul zolang het rendement wint (een kleine koersbeweging verandert de
+waarde dan immers niet).
+
+### 🏛️ De oprichtingsdag
+
+Op de Date de Commencement is de valeur liquidative per reglement (art. 10) exact de
+inschrijvingsprijs. De app vulde toen al alle zestig waarnemingen met de spotkoers en
+kwam €7,88 te hoog uit. Op of vóór de aanvangsdatum is de prestatie nu nul.
+
+### 💶 De majoraties ontbraken in de invoer (geen codefout, wel een valkuil)
+
+De sprongen van −€1,47 (mei 2025) en −€1,34 (mei 2026) in de vergelijkingstabel zijn
+het **dividende majoré** van ENGIE: +10% op het dividend voor aandelen die twee volle
+kalenderjaren op naam staan. De FCPE-aandelen staan sinds 22-12-2022 op naam, dus de
+eerste majoration viel op het dividend van 2025 (FY2024: €1,48 → €0,148 × 10 aandelen
+per deelbewijs = **€1,48**) en de tweede op dat van 2026 (FY2025: €1,35 → **€1,35**).
+De formule verwerkte majoraties al, maar het veld stond leeg. Het invoerveld legt nu
+uit hoe het bedrag per deelbewijs berekend wordt en toont de werkelijke waarden als
+voorbeeld; zonder die regels loopt de berekening vanaf mei 2025 blijvend achter.
+
+### 🎯 Kalibratie op het juiste model
+
+`fit_parameters()` schatte de parameters nog op het additieve model en absorbeerde de
+twee fouten hierboven dus in een verkeerde referentie- of inschrijvingsprijs. De
+schatting loopt nu over het max-model: lineair op de datums waar de participatie wint,
+afwijking berekend met het volledige model, en de oprichtingsdag wordt overgeslagen
+(daar is de NAV per definitie de inschrijvingsprijs en zegt hij niets over de
+referentieprijs). **Wie eerder gekalibreerd heeft, kalibreert best één keer opnieuw**
+— of vult gewoon de reglementwaarden in (BEL 2022: α 16, inschrijving 10,52).
+
+### Wat er daarna overblijft
+
+Na deze correcties resteert op de BEL 2022-reeks een vrijwel vlakke afwijking van
+≈ +€0,30 à +€0,44 (≈ 0,3% van de huidige NAV). Die zit niet in de formule maar in de
+invoer: de exacte referentieprijs heeft meer decimalen dan de afgeronde €13,15
+(de VWAP-middeling wordt niet op de cent gepubliceerd; alleen de inschrijvingsprijs
+wel), en de bewaarde slotkoersen kunnen een cent verschillen van de officiële
+Euronext-slotkoers waarmee Amundi rekent. Eén herkalibratie van de referentieprijs
+met het gecorrigeerde model vangt beide op (verwacht ≈ 13,17) en brengt de afwijking
+onder ≈ €0,05. Eén datum blijft dan nog een uitschieter van ≈ €0,15: 14-06-2024 —
+controleer de bewaarde slotkoers van die dag tegen de officiële Euronext-close.
+
 ## 1.8.1
 De kalibratie liet α meebewegen. Dat was fout: α staat in het fondsreglement (16 voor
 de jaargang 2022, 19 voor 2018) en is geen onbekende. Hem als vrije parameter behandelen

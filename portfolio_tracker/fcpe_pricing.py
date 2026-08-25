@@ -9,9 +9,20 @@ Classic/Liberty-fondsen klopt dat exact (één deelbewijs = één aandeel), maar
 Multiple-fondsen niet. Die hangen niet aan de koers van vandaag, maar aan het
 GEMIDDELDE van zestig maandelijkse waarnemingen, elk afgetopt op een ondergrens:
 
-    Deelbewijswaarde = Prix de Souscription + Rendement + Participation
+    Deelbewijswaarde = Prix de Souscription + Performance + Majorations
+    Performance       = max(Rendement, Participation)          ← "la valeur la plus
+                        haute entre le Rendement et la Participation à la Hausse
+                        Moyenne Protégée" (reglement art. 3.11.1 / 3.12.1)
     Participation     = α × (gemiddelde van de Relevés − Prix de Référence)
     Relevé i          = max(slotkoers op waarnemingsdatum i, Prix de Référence)
+
+LET OP: het Rendement is een BODEM, geen opslag. Het reglement neemt de HOOGSTE van
+Rendement en Participation; het wordt dus nooit bij de Participation opgeteld. Tot
+1.8.1 telde deze module beide op, wat een langzaam groeiende overwaardering gaf
+(≈ €0,16 per jaar bij 1,5% op een inschrijvingsprijs van €10,52). Zodra de koers
+boven de referentieprijs noteert, wint de Participation en telt het Rendement niet
+meer mee. Op de dag van oprichting is de waarde per reglement (art. 10) exact de
+inschrijvingsprijs.
 
 Twee gevolgen die een lineair model niet kan nabootsen:
 
@@ -239,8 +250,24 @@ def part_value(readings, *, n_readings: int, reference_price: float, alpha: floa
         if ed is None or ed <= on:
             md_total += amt
 
+    # Performance = de HOOGSTE van Rendement en Participation (reglement 3.12.1) —
+    # niet de som. Het Rendement is een gegarandeerde bodem die alleen telt zolang
+    # de gemiddelde stijging eronder blijft. Op de oprichtingsdag zelf is de waarde
+    # per reglement (art. 10) exact de inschrijvingsprijs: er bestaat dan nog geen
+    # waarneming en geen vervroegde uitstap, dus geen Performance.
+    at_constitution = bool(start and on <= start)
+    if at_constitution:
+        performance, performance_src = 0.0, "oprichting"
+    elif participation >= rendement:
+        performance, performance_src = participation, "participatie"
+    else:
+        performance, performance_src = rendement, "rendement"
+
     return {
-        "value":          round(sub + rendement + participation + md_total, 6),
+        "value":          round(sub + performance + md_total, 6),
+        "performance":    round(performance, 6),
+        "performance_source": performance_src,
+        "at_constitution": at_constitution,
         "md":             round(md_total, 6),
         "subscription":   sub,
         "rendement":      round(rendement, 6),
@@ -257,8 +284,11 @@ def part_value(readings, *, n_readings: int, reference_price: float, alpha: floa
         # Hoeveel verschuift de waarde bij €1 koersbeweging van de onderliggende
         # waarde? Dit is de 'effectieve hefboom' van vandaag, en hij daalt naarmate
         # er minder waarnemingen openstaan. Nul zodra alles vastligt: dan is de
-        # waarde bepaald en beweegt ze niet meer mee.
-        "sensitivity":    round(float(alpha) * n_open / n, 6),
+        # waarde bepaald en beweegt ze niet meer mee. Ook nul zolang het Rendement
+        # de bodem vormt (of op de oprichtingsdag): een kleine koersbeweging
+        # verandert de waarde dan niet, want de Participation ligt eronder.
+        "sensitivity":    round(float(alpha) * n_open / n, 6)
+                          if performance_src == "participatie" else 0.0,
     }
 
 
@@ -331,11 +361,16 @@ def fit_parameters(readings, official: dict, *, n_readings: int,
     meer, alleen nog een kromme die door de punten loopt. Zet fit_alpha enkel aan als
     je het reglement van je jaargang echt niet hebt.
 
-    De waarde is lineair in α en in de inschrijvingsprijs:
-        NAV − majoraties = inschrijving × (1 + rendementsfactor) + α × (gemiddelde − referentie)
-    Voor een gegeven referentieprijs volgen de vrije coëfficiënten dus in één stap uit
-    een kleinstekwadratenschatting; over de referentieprijs zelf lopen we een raster
-    af, dat daarna tweemaal verfijnd wordt rond het beste punt.
+    Het model volgt het reglement:
+        NAV − majoraties = inschrijving + max(Rendement, α × (gemiddelde − referentie))
+    Op datums waar de Participation boven het Rendement ligt — in de praktijk vrijwel
+    elke datum zodra de koers boven de referentie noteert — is dat lineair in α en de
+    inschrijvingsprijs, dus daar loopt de kleinstekwadratenschatting over; de
+    gerapporteerde afwijking wordt daarna met het volledige max-model berekend. De
+    oprichtingsdag wordt overgeslagen: daar is de NAV per definitie de
+    inschrijvingsprijs en zegt hij niets over de referentieprijs. Over de
+    referentieprijs zelf lopen we een raster af, dat daarna tweemaal verfijnd wordt
+    rond het beste punt.
 
     Returns o.a. 'alpha', 'reference_price', 'subscription_price', 'rmse',
     'fitted' (welke parameters vrijgelaten zijn) en 'fixed'.
@@ -353,7 +388,7 @@ def fit_parameters(readings, official: dict, *, n_readings: int,
 
     def _eval(ref: float):
         """Geeft (afwijking², α, inschrijvingsprijs) voor deze referentieprijs."""
-        xs, zs, ys = [], [], []
+        xs, rs, ys = [], [], []
         for d in dates:
             dd = _as_date(d)
             known = [r for r in readings
@@ -367,39 +402,55 @@ def fit_parameters(readings, official: dict, *, n_readings: int,
                               md_entries=md_entries)
             if base is None:
                 return None
+            if base.get("at_constitution"):
+                continue                # NAV = inschrijvingsprijs per definitie
             xs.append(base["participation"])          # (gemiddelde − referentie)
-            zs.append(1.0 + base["rendement"])        # (1 + rendementsfactor)
+            rs.append(base["rendement"])              # rendementsfactor (bodem)
             ys.append(float(official[d]) - base["md"])
-        if not xs:
+        if len(xs) < 2:
             return None
 
-        if fit_alpha and fit_subscription:
-            sxx = sum(x*x for x in xs); szz = sum(z*z for z in zs)
-            sxz = sum(x*z for x, z in zip(xs, zs))
-            sxy = sum(x*y for x, y in zip(xs, ys)); szy = sum(z*y for z, y in zip(zs, ys))
-            det = sxx*szz - sxz*sxz
-            if abs(det) < 1e-12:
-                return None
-            a = (sxy*szz - szy*sxz) / det
-            sub = (szy*sxx - sxy*sxz) / det
-        elif fit_alpha:
-            ys2 = [y - s_fixed*z for y, z in zip(ys, zs)]
-            denom = sum(x*x for x in xs)
-            if denom < 1e-12:
-                return None
-            a = sum(x*y for x, y in zip(xs, ys2)) / denom
-            sub = s_fixed
-        elif fit_subscription:
-            ys2 = [y - a_fixed*x for y, x in zip(ys, xs)]
-            denom = sum(z*z for z in zs)
-            if denom < 1e-12:
-                return None
-            sub = sum(z*y for z, y in zip(zs, ys2)) / denom
-            a = a_fixed
-        else:
-            a, sub = a_fixed, s_fixed
+        def _solve(idx):
+            """Lineaire schatting op de participatie-tak: y = sub + α·x."""
+            X = [xs[i] for i in idx]; Y = [ys[i] for i in idx]
+            m = len(X)
+            if fit_alpha and fit_subscription:
+                sx, sy = sum(X), sum(Y)
+                sxx = sum(x*x for x in X); sxy = sum(x*y for x, y in zip(X, Y))
+                det = m*sxx - sx*sx
+                if abs(det) < 1e-12:
+                    return None
+                a = (m*sxy - sx*sy) / det
+                sub = (sy - a*sx) / m
+            elif fit_alpha:
+                denom = sum(x*x for x in X)
+                if denom < 1e-12:
+                    return None
+                a = sum(x*(y - s_fixed) for x, y in zip(X, Y)) / denom
+                sub = s_fixed
+            elif fit_subscription:
+                sub = sum(y - a_fixed*x for x, y in zip(X, Y)) / m
+                a = a_fixed
+            else:
+                a, sub = a_fixed, s_fixed
+            return a, sub
 
-        resid = sum((a*x + sub*z - y) ** 2 for x, z, y in zip(xs, zs, ys)) / len(xs)
+        # Eerst schatten alsof overal de participatie wint, daarna de datums waar
+        # het Rendement de bodem vormt eruit laten en één keer opnieuw schatten.
+        idx = list(range(len(xs)))
+        got = _solve(idx)
+        if got is None:
+            return None
+        a, sub = got
+        idx2 = [i for i in idx if a * xs[i] >= rs[i] * sub]
+        if idx2 and len(idx2) < len(idx):
+            got = _solve(idx2)
+            if got is not None:
+                a, sub = got
+
+        # Afwijking met het VOLLEDIGE model: y = sub + max(rendement, α·x).
+        resid = sum((sub + max(rs[i] * sub, a * xs[i]) - ys[i]) ** 2
+                    for i in range(len(xs))) / len(xs)
         return resid, a, sub
 
     if ref_range is None:

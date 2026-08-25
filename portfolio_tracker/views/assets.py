@@ -631,8 +631,11 @@ def page_assets():
                 "Die hangen niet aan de koers van vandaag maar aan het **gemiddelde van "
                 "zestig maandelijkse waarnemingen**, elk afzonderlijk afgetopt op de "
                 "referentieprijs:  \n"
-                "**waarde = inschrijvingsprijs + rendement + α × (gemiddelde van de "
-                "waarnemingen − referentieprijs) + majoraties**  \n"
+                "**waarde = inschrijvingsprijs + max(rendement, α × (gemiddelde van de "
+                "waarnemingen − referentieprijs)) + majoraties**  \n"
+                "Het rendement is een **bodem**, geen opslag: het reglement neemt de "
+                "hoogste van rendement en participatie, dus zodra de koers boven de "
+                "referentieprijs noteert telt alleen de participatie.  \n"
                 "Twee gevolgen die de lineaire methode hierboven niet kan nabootsen: de "
                 "gevoeligheid **daalt** naarmate er waarnemingen vastliggen (elke weegt "
                 "1/60), en een eenmaal vastgelegde stijging kan **niet meer verdwijnen**, "
@@ -711,13 +714,19 @@ def page_assets():
                                          step=0.001, format="%.10g", key="fcpe_mret",
                                          help="7,73% op de eindvervaldag.")
 
-                st.caption("**Majorations de Dividende** (optioneel): keert ENGIE een dividend "
-                           "met majoration uit, dan verhoogt dat de prestatie. Eén regel per "
-                           "majoration, als `JJJJ-MM-DD = bedrag per deelbewijs`.")
+                st.caption("**Majorations de Dividende**: keert ENGIE een dividend met "
+                           "majoration uit (+10% voor aandelen die twee volle kalenderjaren "
+                           "op naam staan — voor de jaargang 2022 dus vanaf het dividend van "
+                           "2025), dan verhoogt dat de prestatie. Eén regel per majoration, "
+                           "als `JJJJ-MM-DD = bedrag per deelbewijs`. Het bedrag per "
+                           "deelbewijs = 10 aandelen × 10% × dividend per aandeel; zonder "
+                           "deze regels loopt de berekende waarde vanaf de eerste majoration "
+                           "blijvend achter op de officiële NAV.")
                 f_md_txt = st.text_area(
                     "Majoraties", value="\n".join(
                         f"{e.get('date')} = {e.get('amount')}" for e in (_fp.get("md_entries") or [])),
-                    height=68, key="fcpe_md", placeholder="2024-05-02 = 0.35")
+                    height=68, key="fcpe_md",
+                    placeholder="2025-04-30 = 1.48\n2026-05-05 = 1.35")
 
                 _dates = fcpe.reading_dates(int(f_n), day_of_month=int(f_day),
                                             first_month=str(f_first))
@@ -789,7 +798,10 @@ def page_assets():
                                        "waarnemingen vastliggen; op het einde is ze nul.")
                         st.caption(
                             f"Gemiddelde van de waarnemingen: **{_res['average']:,.4f}** · "
-                            f"rendement **{_res['rendement']:,.2f}** · majoraties "
+                            f"prestatie **{_res.get('performance', 0):,.2f}** = hoogste van "
+                            f"participatie ({_res['participation']:,.2f}) en rendement "
+                            f"({_res['rendement']:,.2f}) — nu wint de "
+                            f"**{_res.get('performance_source', '?')}** · majoraties "
                             f"**{_res['md']:,.2f}** · nog **{_res['n_open']}** waarnemingen open"
                             + (f", ingevuld met **{_res['fill_value']:,.4f}**"
                                if _res["fill_value"] is not None else ""))

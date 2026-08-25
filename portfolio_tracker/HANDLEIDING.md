@@ -287,7 +287,16 @@ lineaire methode exact: één deelbewijs is één aandeel. Een Multiple-fonds ha
 niet aan de koers van vandaag, maar aan het gemiddelde van zestig maandelijkse
 waarnemingen, elk afzonderlijk afgetopt op de referentieprijs:
 
-    waarde = inschrijvingsprijs + rendement + α × (gemiddelde − referentieprijs) + majoraties
+    waarde = inschrijvingsprijs + max(rendement, α × (gemiddelde − referentieprijs)) + majoraties
+
+Het rendement is een **bodem**, geen opslag: het reglement neemt "la valeur la plus
+haute" van rendement en participatie. Zodra de koers boven de referentieprijs noteert,
+wint de participatie en telt het rendement niet meer mee. Op de dag van oprichting is
+de waarde per reglement exact de inschrijvingsprijs. De majoraties (het dividende
+majoré van +10% dat ENGIE betaalt op aandelen die twee volle kalenderjaren op naam
+staan — voor de jaargang 2022 dus vanaf het dividend van 2025) komen daar wél bovenop;
+vul ze in als bedrag per deelbewijs (10 aandelen × 10% × dividend per aandeel), anders
+loopt de berekende waarde vanaf de eerste majoration blijvend achter.
 
 Kies daarvoor `🏢 Activa → Overzicht → 📐 Fondsformule`. Twee dingen gedragen zich daar
 wezenlijk anders dan bij de lineaire methode. De **gevoeligheid daalt**: elke waarneming
