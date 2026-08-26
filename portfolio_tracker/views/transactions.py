@@ -66,26 +66,37 @@ def page_transactions():
             # iets anders staat dan je koos.
             _valid = {"ticker": asset_tickers, "acct": db.get_accounts(),
                       "type": ["buy", "sell"]}
+            _cur_key = pre.pop("_currency_key", None)
+            _cur_val = pre.pop("_currency_val", None)
             for _k, _v in pre.items():
                 if _k.startswith("_"):
                     continue
                 if _k in _valid and _v not in _valid[_k]:
                     continue
                 st.session_state.setdefault(kk(_k), _v)
+            # De muntwidget zit niet in de kk()-familie (haar key hangt af van de
+            # gekozen ticker), dus die zetten we apart — enkel als de waarde ook
+            # echt een geldige optie zal zijn voor die widget.
+            if _cur_key and _cur_val:
+                st.session_state.setdefault(_cur_key, _cur_val)
         # ── Overnemen van een eerdere transactie ─────────────────────────────
-        # Een maandelijkse aankoop verschilt meestal alleen in datum en koers van de
-        # vorige. Alles opnieuw intikken is overbodig werk — en elke keer opnieuw een
-        # kans om je te vergissen in rekening, munt of activum. Dit staat bewust in
-        # het formulier zelf: een knop die van sectie wisselt, botst met de manier
-        # waarop Streamlit widgetwaarden vasthoudt.
+        # Een maandelijkse aankoop verschilt meestal alleen in datum van de vorige —
+        # alles opnieuw intikken is overbodig werk, en elke keer opnieuw een kans om
+        # je te vergissen in rekening, munt, prijs of activum. Daarom neemt dit alle
+        # velden van de gekozen transactie over (datum blijft wél vandaag); je past
+        # nadien aan wat effectief verschilt. Dit staat bewust in het formulier zelf:
+        # een knop die van sectie wisselt, botst met de manier waarop Streamlit
+        # widgetwaarden vasthoudt.
         _recent = db.get_transactions(adjusted=False)[:200]
         if _recent:
             with st.expander("📄 Overnemen van een eerdere transactie"):
                 st.caption(
-                    "Vult activum, type en rekening (en desgewenst het aantal) alvast in. "
-                    "Datum blijft vandaag; prijs, kosten en TOB blijven leeg, want die "
-                    "verschillen per keer. Er wordt niets opgeslagen tot je hieronder op "
-                    "toevoegen klikt.")
+                    "Vult het formulier hieronder volledig in met de gegevens van de "
+                    "gekozen transactie (activum, type, rekening, munt, prijs, kosten, "
+                    "wisselkoers, TOB-instelling, loon/gratis-aandeel, blokkering — en "
+                    "desgewenst het aantal). Enkel de datum blijft vandaag en notities "
+                    "worden niet overgenomen. Er wordt niets opgeslagen tot je hieronder "
+                    "op toevoegen klikt — pas dus gerust nog aan wat deze keer anders is.")
                 _dopts = {t["id"]: (f"#{t['id']} · {t['date'][:10]} · "
                                     f"{'🟢' if t['transaction_type'] == 'buy' else '🔴'} "
                                     f"{num(t['quantity'], 4)} × {fmt(t['ticker'])} @ "
@@ -103,13 +114,50 @@ def page_transactions():
                 if st.button("📄 Overnemen", key="txn_dup_go"):
                     _src = next((t for t in _recent if t["id"] == _pick), None)
                     if _src:
-                        pre = {"ticker": _src["ticker"],
+                        _src_ticker = _src["ticker"]
+                        pre = {"ticker": _src_ticker,
                                "type":   _src["transaction_type"],
                                "acct":   _src.get("account") or db.DEFAULT_ACCOUNT,
+                               "price":  float(_src.get("price_per_unit") or 0.0),
+                               "costs":  float(_src.get("costs") or 0.0),
+                               "fx_man": bool(_src.get("fx_manual")),
+                               "tob_man": bool(_src.get("tob_manual")),
                                "_note": (f"Overgenomen van #{_src['id']} "
-                                         f"({_src['date'][:10]} · {fmt(_src['ticker'])}).")}
+                                         f"({_src['date'][:10]} · {fmt(_src_ticker)}).")}
                         if _keep_qty:
                             pre["qty"] = float(_src["quantity"])
+                        # Kostenmunt: enkel overnemen als ze gegarandeerd een geldige optie
+                        # is (CUR staat altijd in de opties, ongeacht het gekozen activum).
+                        _src_costs_cur = _src.get("costs_currency") or "EUR"
+                        if _src_costs_cur in CUR:
+                            pre["costs_cur"] = _src_costs_cur
+                        # Wisselkoers: enkel zinvol overnemen als ze destijds manueel was
+                        # ingesteld — anders wordt ze toch herberekend op de nieuwe datum.
+                        if _src.get("fx_manual") and _src.get("fx_rate"):
+                            pre["fx_val"] = float(_src["fx_rate"])
+                        # TOB manueel bedrag: enkel als ze destijds manueel overschreven was.
+                        if _src.get("tob_manual"):
+                            pre["tob_val"] = float(_src.get("tob_tax") or 0.0)
+                        # Loon/gratis aandeel — enkel relevant bij een aankoop.
+                        if _src["transaction_type"] == "buy":
+                            pre["perf"] = bool(_src.get("is_performance_share"))
+                            if pre["perf"]:
+                                pre["perf_free"] = not _src.get("income_tax_eur")
+                            if _src.get("lock_until"):
+                                pre["lock_chk"] = True
+                                try:
+                                    pre["lock_date"] = date.fromisoformat(
+                                        str(_src["lock_until"])[:10])
+                                except ValueError:
+                                    pass
+                        # Munt: enkel overnemen als ze gegarandeerd een geldige optie is
+                        # voor de muntwidget van het over te nemen activum (die widget
+                        # aanvaardt CUR + de eigen munt van het activum).
+                        _src_cur = _src.get("currency") or "EUR"
+                        _asset_cur = assets_map.get(_src_ticker, {}).get("currency", "EUR")
+                        if _src_cur in CUR or _src_cur == _asset_cur:
+                            pre["_currency_key"] = f"add_cur_{_src_ticker}_{txn_n + 1}"
+                            pre["_currency_val"] = _src_cur
                         st.session_state["txn_prefill"] = pre
                         # Verse widgets afdwingen: 'txn_add_nonce' bouwt de keys op en is
                         # zelf geen widget-key, dus die mag hier wel gezet worden.

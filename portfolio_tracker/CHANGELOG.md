@@ -2,6 +2,37 @@
 
 Alle noemenswaardige wijzigingen aan de Portfolio Tracker add-on.
 
+## 1.8.6
+### 📄 "Overnemen van een eerdere transactie" neemt nu ook echt alles over
+
+De knop vulde tot nu toe enkel activum, type, rekening en (desgewenst) het
+aantal in — prijs, kosten, wisselkoers, TOB-instelling, loon/gratis-aandeel
+en blokkering bleven leeg, ook al stonden ze net op de gekozen transactie.
+Dat was bewuste keuze in de oorspronkelijke opzet, maar in de praktijk
+betekende het dat je bij elke maandelijkse aankoop toch weer alles moest
+intikken behalve die drie velden.
+
+Overnemen vult nu het volledige formulier in met de gegevens van de gekozen
+transactie:
+- prijs per stuk en munt
+- kosten en kostenmunt
+- eigen wisselkoers — enkel als die destijds manueel was ingesteld (anders
+  wordt ze toch herberekend op de nieuwe datum, dus overnemen zou misleidend
+  zijn)
+- TOB manueel aangepast + het bedrag — enkel als dat destijds manueel was
+- loon/gratis aandeel-vinkjes, inclusief "écht gratis" indien van
+  toepassing (enkel bij aankopen)
+- de blokkeringsdatum, indien aanwezig
+
+Datum blijft bewust op vandaag staan en notities worden niet overgenomen —
+die horen bij de vorige transactie, niet bij de nieuwe. Er wordt niets
+opgeslagen tot je zelf op "Transactie toevoegen" klikt, dus je kan nog
+alles aanpassen wat deze keer wél verschilt.
+
+Ingebouwde veiligheid: een munt die niet geldig is voor het gekozen
+activum, of een rekening die intussen verdwenen is, wordt gewoon
+overgeslagen in plaats van een foutieve of crashende widget te veroorzaken.
+
 ## 1.8.5
 ### 🔁 Herstel van een regressie in 1.8.4
 
