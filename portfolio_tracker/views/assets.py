@@ -17,8 +17,8 @@ import fcpe_pricing as fcpe
 import market_data as md
 
 from views.common import (
-    _cell_eq, _section_radio, _short_ts, _ui_save, asset_label, asset_name_map,
-    clear_cache, compute_eur, multiselect_delete, num, show_df
+    _cell_eq, _section_radio, _short_ts, _ui_save, asset_label, clear_cache,
+    compute_eur, multiselect_delete, num, show_df
 )
 
 logger = logging.getLogger("app.assets")
@@ -848,9 +848,11 @@ def page_assets():
             "waarde) of een **fondsformule** (📐, FCPE Multiple) op één plaats, zodat je "
             "ze niet meer per stuk in het activum-formulier hoeft op te zoeken.")
 
-        _link_names = asset_name_map()
+        assets = db.get_assets()
+        a_names = {a["ticker"]: (a.get("name") or a["ticker"]) for a in assets}
+
         _rows = []
-        for a in db.get_assets():
+        for a in assets:
             _tk = a["ticker"]
             _mode = a.get("pricing_mode") or "auto"
             if _mode == "derived":
@@ -858,9 +860,9 @@ def page_assets():
                 if not _cfg:
                     continue
                 _rows.append({
-                    "Fonds": asset_label(_tk, _link_names),
+                    "Fonds": asset_label(_tk, a_names),
                     "Methode": "🧮 Afgeleide koers",
-                    "Onderliggende waarde": asset_label(_cfg["underlying_ticker"], _link_names),
+                    "Onderliggende waarde": asset_label(_cfg["underlying_ticker"], a_names),
                     "Parameters": (f"basis {_cfg['base']:g} · multiplicator "
                                   f"{_cfg['multiplier']:g} · referentie {_cfg['ref_price']:g}"
                                   + (" · ondergrens" if _cfg.get("floor") else "")),
@@ -876,12 +878,12 @@ def page_assets():
                 _known = len(db.get_fcpe_readings(_tk))
                 _md = _fp.get("md_entries") or []
                 _rows.append({
-                    "Fonds": asset_label(_tk, _link_names),
+                    "Fonds": asset_label(_tk, a_names),
                     "Methode": "📐 Fondsformule",
-                    "Onderliggende waarde": asset_label(_und, _link_names) if _und else "—",
-                    "Parameters": (f"α {_fp.get('alpha', '?'):g} · referentie "
-                                  f"{_fp.get('reference_price', '?'):g} · inschrijving "
-                                  f"{_fp.get('subscription_price', '?'):g} · rendement "
+                    "Onderliggende waarde": asset_label(_und, a_names) if _und else "—",
+                    "Parameters": (f"α {float(_fp.get('alpha', 0) or 0):g} · referentie "
+                                  f"{float(_fp.get('reference_price', 0) or 0):g} · inschrijving "
+                                  f"{float(_fp.get('subscription_price', 0) or 0):g} · rendement "
                                   f"{float(_fp.get('annual_rate', 0) or 0)*100:g}%/"
                                   f"{float(_fp.get('maturity_return', 0) or 0)*100:g}%"),
                     "Waarnemingen": f"{_known} / {_n}",
@@ -895,10 +897,8 @@ def page_assets():
         else:
             show_df(pd.DataFrame(_rows), width="stretch", hide_index=True)
             st.caption(f"{len(_rows)} gekoppeld fonds/fondsen. Klik hieronder open om de "
-                       "instellingen te wijzigen.")
-
-        assets = db.get_assets()
-        a_names = {a["ticker"]: (a.get("name") or a["ticker"]) for a in assets}
+                       "instellingen te wijzigen — de panelen openen meteen op je gekoppelde "
+                       "fonds, niet op een willekeurig activum.")
 
         with st.expander("🧮 Afgeleide koers — koppel aan een onderliggende waarde (FCPE / werkgeversfondsen)"):
             st.caption(
@@ -920,9 +920,39 @@ def page_assets():
                 "Het onderliggende activum moet in de app bestaan; heb je het zelf niet in "
                 "portefeuille (bv. het losse ENGIE-aandeel), voeg het dan gewoon toe zonder "
                 "transacties.")
+            # Standaard tonen we enkel de activa die al een afgeleide koers hebben, en
+            # landen we meteen op de eerste daarvan. Anders opent dit paneel op het
+            # alfabetisch eerste activum uit de hele portefeuille (een willekeurig
+            # aandeel), moet je het juiste fonds elke keer opnieuw opzoeken, en lijken
+            # alle parameters leeg te staan terwijl er niets mis is.
+            _dp_linked = [a["ticker"] for a in assets
+                          if (a.get("pricing_mode") or "auto") == "derived"
+                          and (a.get("underlying_ticker") or "").strip()]
             _all_tk = [a["ticker"] for a in assets]
-            dp_sel = st.selectbox("Activum met afgeleide koers", _all_tk,
-                                  format_func=lambda t: asset_label(t, a_names),
+            if _dp_linked:
+                _dp_only = st.checkbox(
+                    ("Toon enkel het gekoppelde activum" if len(_dp_linked) == 1
+                     else f"Toon enkel de {len(_dp_linked)} gekoppelde activa"),
+                    value=True, key="dp_only_linked",
+                    help="Vink uit om een nieuw activum aan een onderliggende waarde te "
+                         "koppelen — dan verschijnt de volledige lijst.")
+            else:
+                _dp_only = False
+                st.caption("Nog geen enkel activum met een afgeleide koers. Kies er hieronder "
+                           "één om te beginnen.")
+            _dp_opts = (_dp_linked if (_dp_only and _dp_linked)
+                        else _dp_linked + [t for t in _all_tk if t not in _dp_linked])
+            if not _dp_opts:
+                st.warning("Er zijn nog geen activa geregistreerd.")
+                _dp_opts = []
+            # Een eerder gekozen ticker kan buiten de (nu gefilterde) lijst vallen —
+            # bv. na het aanvinken van de filter. Streamlit struikelt over een bewaarde
+            # waarde die niet in de opties zit, dus ruimen we ze op vóór het renderen.
+            if _dp_opts and st.session_state.get("dp_asset") not in _dp_opts:
+                st.session_state.pop("dp_asset", None)
+            dp_sel = st.selectbox("Activum met afgeleide koers", _dp_opts,
+                                  format_func=lambda t: ("🔗 " if t in _dp_linked else "")
+                                                        + asset_label(t, a_names),
                                   key="dp_asset")
             _cur_cfg = db.get_derived_pricing(dp_sel) or {}
             if _cur_cfg:
@@ -1005,8 +1035,11 @@ def page_assets():
                 "Die hangen niet aan de koers van vandaag maar aan het **gemiddelde van "
                 "zestig maandelijkse waarnemingen**, elk afzonderlijk afgetopt op de "
                 "referentieprijs:  \n"
-                "**waarde = inschrijvingsprijs + rendement + α × (gemiddelde van de "
-                "waarnemingen − referentieprijs) + majoraties**  \n"
+                "**waarde = inschrijvingsprijs + max(rendement, α × (gemiddelde van de "
+                "waarnemingen − referentieprijs)) + majoraties**  \n"
+                "Het rendement is een **bodem**, geen opslag: het reglement neemt de "
+                "hoogste van rendement en participatie, dus zodra de koers boven de "
+                "referentieprijs noteert telt alleen de participatie.  \n"
                 "Twee gevolgen die de lineaire methode hierboven niet kan nabootsen: de "
                 "gevoeligheid **daalt** naarmate er waarnemingen vastliggen (elke weegt "
                 "1/60), en een eenmaal vastgelegde stijging kan **niet meer verdwijnen**, "
@@ -1014,7 +1047,34 @@ def page_assets():
                 "haalt. De app haalt de waarnemingen zelf op vanaf de start van het fonds; "
                 "je hoeft niets in te typen.")
 
-            f_sel = st.selectbox("Fonds", _all_tk, format_func=lambda t: asset_label(t, a_names),
+            # Zelfde principe als hierboven: open op een fonds dat écht met de
+            # fondsformule gewaardeerd wordt, niet op het alfabetisch eerste aandeel.
+            # Fondsen met bewaarde parameters tellen ook mee, ook als de methode nog
+            # niet geactiveerd is — anders raak je een half ingevulde configuratie kwijt.
+            _f_linked = [a["ticker"] for a in assets
+                         if (a.get("pricing_mode") or "auto") == "fcpe"
+                         or (a.get("fcpe_params") or "").strip()]
+            if _f_linked:
+                _f_only = st.checkbox(
+                    ("Toon enkel het fonds met een fondsformule" if len(_f_linked) == 1
+                     else f"Toon enkel de {len(_f_linked)} fondsen met een fondsformule"),
+                    value=True, key="fcpe_only_linked",
+                    help="Vink uit om een nieuw fonds in te stellen — dan verschijnt de "
+                         "volledige lijst.")
+            else:
+                _f_only = False
+                st.caption("Nog geen enkel fonds met een fondsformule. Kies er hieronder één "
+                           "om te beginnen.")
+            _f_opts = (_f_linked if (_f_only and _f_linked)
+                       else _f_linked + [t for t in _all_tk if t not in _f_linked])
+            if not _f_opts:
+                st.warning("Er zijn nog geen activa geregistreerd.")
+                _f_opts = []
+            if _f_opts and st.session_state.get("fcpe_asset") not in _f_opts:
+                st.session_state.pop("fcpe_asset", None)
+            f_sel = st.selectbox("Fonds", _f_opts,
+                                 format_func=lambda t: ("📐 " if t in _f_linked else "")
+                                                       + asset_label(t, a_names),
                                  key="fcpe_asset")
             _fp = db.get_fcpe_params(f_sel) or {}
             _row = db.get_asset(f_sel) or {}
@@ -1085,13 +1145,19 @@ def page_assets():
                                          step=0.001, format="%.10g", key="fcpe_mret",
                                          help="7,73% op de eindvervaldag.")
 
-                st.caption("**Majorations de Dividende** (optioneel): keert ENGIE een dividend "
-                           "met majoration uit, dan verhoogt dat de prestatie. Eén regel per "
-                           "majoration, als `JJJJ-MM-DD = bedrag per deelbewijs`.")
+                st.caption("**Majorations de Dividende**: keert ENGIE een dividend met "
+                           "majoration uit (+10% voor aandelen die twee volle kalenderjaren "
+                           "op naam staan — voor de jaargang 2022 dus vanaf het dividend van "
+                           "2025), dan verhoogt dat de prestatie. Eén regel per majoration, "
+                           "als `JJJJ-MM-DD = bedrag per deelbewijs`. Het bedrag per "
+                           "deelbewijs = 10 aandelen × 10% × dividend per aandeel; zonder "
+                           "deze regels loopt de berekende waarde vanaf de eerste majoration "
+                           "blijvend achter op de officiële NAV.")
                 f_md_txt = st.text_area(
                     "Majoraties", value="\n".join(
                         f"{e.get('date')} = {e.get('amount')}" for e in (_fp.get("md_entries") or [])),
-                    height=68, key="fcpe_md", placeholder="2024-05-02 = 0.35")
+                    height=68, key="fcpe_md",
+                    placeholder="2025-04-30 = 1.48\n2026-05-05 = 1.35")
 
                 _dates = fcpe.reading_dates(int(f_n), day_of_month=int(f_day),
                                             first_month=str(f_first))
@@ -1163,7 +1229,10 @@ def page_assets():
                                        "waarnemingen vastliggen; op het einde is ze nul.")
                         st.caption(
                             f"Gemiddelde van de waarnemingen: **{_res['average']:,.4f}** · "
-                            f"rendement **{_res['rendement']:,.2f}** · majoraties "
+                            f"prestatie **{_res.get('performance', 0):,.2f}** = hoogste van "
+                            f"participatie ({_res['participation']:,.2f}) en rendement "
+                            f"({_res['rendement']:,.2f}) — nu wint de "
+                            f"**{_res.get('performance_source', '?')}** · majoraties "
                             f"**{_res['md']:,.2f}** · nog **{_res['n_open']}** waarnemingen open"
                             + (f", ingevuld met **{_res['fill_value']:,.4f}**"
                                if _res["fill_value"] is not None else ""))
@@ -1183,7 +1252,12 @@ def page_assets():
                         "app ze afleiden uit de gepubliceerde NAV van de beheerder. Laad "
                         "daarvoor de NAV-export van Amundi op (kolommen datum en NAV). Dit is "
                         "een SCHATTING: lees de gevonden afwijking mee, en gebruik de cijfers "
-                        "uit je fondsreglement zodra je die hebt.")
+                        "uit je fondsreglement zodra je die hebt. **Vul éérst de majoraties "
+                        "hierboven in en bewaar ze** — kalibreren zonder schuift de "
+                        "referentieprijs scheef, omdat de sprongen in de officiële NAV dan "
+                        "ergens anders in geperst worden. Neem in de NAV-export bij voorkeur "
+                        "de **oprichtingsdag** mee: die NAV is per reglement exact de "
+                        "inschrijvingsprijs en pint die vast.")
                     st.caption(
                         f"**α blijft vast op {f_alpha:g}.** Die staat in het reglement en is "
                         "geen onbekende. Hem toch laten meebewegen geeft altijd een iets "
@@ -1220,7 +1294,11 @@ def page_assets():
                                 _parts = [f"**referentieprijs = {fit['reference_price']}**"]
                                 if _fit_alpha:
                                     _parts.insert(0, f"**α = {fit['alpha']}**")
-                                if _fit_sub:
+                                if fit.get("anchored_subscription"):
+                                    _parts.append("**inschrijvingsprijs = "
+                                                  f"{fit['subscription_price']}** (vastgepind "
+                                                  "op de NAV van de oprichtingsdag)")
+                                elif _fit_sub:
                                     _parts.append("**inschrijvingsprijs = "
                                                   f"{fit['subscription_price']}**")
                                 st.info("🎯 Best passend: " + ", ".join(_parts)
@@ -1228,6 +1306,8 @@ def page_assets():
                                         f"{fit['n_points']} punten). Vast gehouden: "
                                         + (", ".join(fit["fixed"]) or "niets")
                                         + ". Vul deze hierboven in als ze aannemelijk zijn.")
+                                for _w in fit.get("warnings") or []:
+                                    st.warning("⚠️ " + _w)
                                 if fit["rmse"] > 1.0:
                                     st.warning(
                                         "⚠️ De afwijking is groot. Controleer eerst of de "

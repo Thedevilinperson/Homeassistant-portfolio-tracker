@@ -2,6 +2,36 @@
 
 Alle noemenswaardige wijzigingen aan de Portfolio Tracker add-on.
 
+## 1.8.5
+### 🔁 Herstel van een regressie in 1.8.4
+
+In 1.8.4 was `views/assets.py` per ongeluk opgebouwd vanaf de versie van vóór
+1.8.2, waardoor de paneelteksten van 1.8.2 en 1.8.3 terugvielen op hun oude
+vorm: de formule stond weer als *inschrijvingsprijs + rendement + α × (…)*
+(de opgetelde variant), het majoraties-veld was weer "optioneel" met de oude
+voorbeeldwaarde, en de waarschuwingen van de kalibratie (anker op de
+oprichtingsdag, onbepaaldheid, negatieve inschrijvingsprijs) werden niet
+getoond. **De berekening zelf was nooit geraakt** — `fcpe_pricing.py` bleef
+correct, dus waardes en kalibratie klopten al die tijd. Alleen de uitleg op
+het scherm liep achter. Alles staat er weer in.
+
+### 🎯 De panelen openen op je eigen koppeling
+
+Beide configuratiepanelen toonden de volledige activalijst zonder
+voorkeuze, zodat je bij het openklappen op het alfabetisch eerste activum
+belandde (een willekeurig aandeel) in plaats van op je fonds. Alle velden
+leken dan leeg, de onderliggende waarde stond verkeerd en er waren "0"
+bewaarde waarnemingen — terwijl er in werkelijkheid niets mis was.
+
+Voortaan tonen beide panelen standaard **enkel de activa die al gekoppeld
+zijn**, gemarkeerd met 🔗 respectievelijk 📐, en openen ze meteen op de eerste
+daarvan met alle parameters, majoraties en waarnemingen voorgevuld. Een
+checkbox schakelt de volledige lijst in wanneer je een nieuw fonds wilt
+koppelen; de gekoppelde staan dan bovenaan. Is er nog niets gekoppeld, dan
+verschijnt gewoon de volledige lijst met een korte uitleg. Een eerder gekozen
+ticker die buiten de gefilterde lijst valt, wordt netjes opgeruimd in plaats
+van een Streamlit-fout te veroorzaken.
+
 ## 1.8.4
 Nieuwe sectie **🏢 Activa → 🔗 Koppelingen** met een overzichtstabel van alle
 activa die een afgeleide koers (🧮) of een fondsformule (📐) gebruiken: fonds,
