@@ -229,13 +229,32 @@ def year_of(date_str: str | None) -> int | None:
 
 # ── Dividendfiscaliteit (Belgische personenbelasting) ─────────────────────────
 
+def counts_as_dividend_stock(asset: dict) -> bool:
+    """Telt dit activum mee als 'gewoon aandeel' voor de 833-vrijstelling en de
+    FBB (art. 269 §2 / dubbelbelastingverdrag)?
+
+    Standaard enkel effecten met Type 'stock'. Sommige fondsen — met name
+    bepaalde FCPE-werkgeversfondsen — keren in de praktijk gewoon aan Belgische
+    roerende voorheffing onderworpen dividenden uit, ook al staat hun 'Type' op
+    ETF/fonds. Voor die gevallen kan je per activum het vinkje 'Dividend telt als
+    aandeel' aanzetten (🏢 Activa → Overzicht) — dat overschrijft dan de Type-
+    gebaseerde uitsluiting hieronder."""
+    if not asset:
+        return False
+    if asset.get("asset_type") == "stock":
+        return True
+    return bool(asset.get("dividend_as_stock"))
+
+
 def dividend_tax_benefit(year: int | None = None, accounts=None) -> dict:
     """Bereken het fiscale voordeel op dividenden voor de Belgische personenbelasting:
 
       1) Vrijstelling roerende voorheffing: de eerste schijf (standaard €833) 'gewone'
          aandelendividenden per belastingplichtige is vrijgesteld -> je recupereert de
          ingehouden Belgische RV daarop (max €833 × 30% = €249,90 p.p.). Geldt NIET voor
-         dividenden van fondsen/ETF's/beveks.
+         dividenden van fondsen/ETF's/beveks — tenzij het activum expliciet gemarkeerd
+         is met 'Dividend telt als aandeel' (bv. voor FCPE-fondsen die fiscaal gewoon
+         als aandeel behandeld worden).
       2) FBB (optioneel) voor Franse aandelen: forfaitair gedeelte buitenlandse belasting,
          15% van het nettobedrag na Franse bronheffing (verdrag BE-FR).
 
@@ -262,7 +281,6 @@ def dividend_tax_benefit(year: int | None = None, accounts=None) -> dict:
         if year is not None and yr != year:
             continue
         a = assets.get(d["ticker"], {})
-        atype = a.get("asset_type", "stock")
         country = (a.get("country") or "BE").upper()
         fx = d.get("fx_rate") or 1.0
         gross_eur = d.get("gross_eur") if d.get("gross_eur") is not None else (d.get("gross_amount") or 0.0)
@@ -276,9 +294,11 @@ def dividend_tax_benefit(year: int | None = None, accounts=None) -> dict:
         yd = per_year.setdefault(yr, {
             "qualifying_gross": 0.0, "be_rv_qualifying": 0.0,
             "fbb_base_fr": 0.0, "excluded_gross": 0.0})
-        # Enkel individuele aandelen (geen fondsen/ETF's) én echte dividenden
-        # (geen interest / securities lending) komen in aanmerking voor de 833-vrijstelling
-        if atype == "stock" and (d.get("kind") or "dividend") == "dividend":
+        # Enkel individuele aandelen (geen fondsen/ETF's, tenzij expliciet
+        # gemarkeerd met 'Dividend telt als aandeel') én echte dividenden
+        # (geen interest / securities lending) komen in aanmerking voor de
+        # 833-vrijstelling
+        if counts_as_dividend_stock(a) and (d.get("kind") or "dividend") == "dividend":
             yd["qualifying_gross"] += net_after_foreign
             yd["be_rv_qualifying"] += be_rv_eur
             if country == "FR":
@@ -1151,6 +1171,7 @@ def declaration_lines(year: int, accounts=None) -> dict:
             "be_rv_eur": be_rv,
             "country": (assets.get(d.get("ticker"), {}).get("country") or "BE").upper(),
             "asset_type": assets.get(d.get("ticker"), {}).get("asset_type", "stock"),
+            "counts_stock": counts_as_dividend_stock(assets.get(d.get("ticker"), {})),
             "kind": d.get("kind") or "dividend",
         }
         (div_with_rv if be_rv > 0.005 else div_no_rv).append(row)
@@ -1184,9 +1205,11 @@ def declaration_lines(year: int, accounts=None) -> dict:
             f"De eerste {ben['cap_amount']:,.0f} EUR aan dividenden van GEWONE AANDELEN is "
             f"vrijgesteld ({ben['exemption_per_person']:,.0f} EUR × {ben['persons']} "
             "belastingplichtige(n)). Je vult hier de INGEHOUDEN VOORHEFFING in, niet het "
-            "dividend zelf. Dividenden van fondsen, ETF's en beveks tellen niet mee."),
+            "dividend zelf. Dividenden van fondsen, ETF's en beveks tellen niet mee, "
+            "tenzij je het activum onder 🏢 Activa expliciet markeerde met 'Dividend "
+            "telt als aandeel'."),
         "rows": sorted([r for r in div_with_rv
-                        if r["asset_type"] == "stock" and r["kind"] == "dividend"],
+                        if r["counts_stock"] and r["kind"] == "dividend"],
                        key=lambda r: -r["be_rv_eur"]),
         "extra": {
             "In aanmerking komend brutobedrag": byear.get("qualifying_gross", 0.0),
@@ -1207,7 +1230,7 @@ def declaration_lines(year: int, accounts=None) -> dict:
                 "op grond van het dubbelbelastingverdrag Belgie-Frankrijk. Dit is betwiste "
                 "materie: bewaar je rekeninguittreksels als bewijs."),
             "rows": sorted([r for r in (div_no_rv + div_with_rv)
-                            if r["country"] == "FR" and r["asset_type"] == "stock"
+                            if r["country"] == "FR" and r["counts_stock"]
                             and r["kind"] == "dividend"], key=lambda r: r["date"]),
         })
 

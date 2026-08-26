@@ -2,6 +2,30 @@
 
 Alle noemenswaardige wijzigingen aan de Portfolio Tracker add-on.
 
+## 1.8.7
+### 🏢 Optie: dividenden van een fonds laten meetellen als gewoon aandeel
+
+Standaard telt de Belgische 833-vrijstelling op de roerende voorheffing (en de
+FBB voor Franse dividenden) enkel dividenden van activa met Type 'Aandeel' —
+fondsen, ETF's en beveks zijn wettelijk uitgesloten. Sommige FCPE-
+werkgeversfondsen keren echter in de praktijk een gewoon, aan Belgische
+roerende voorheffing onderworpen dividend uit, ook al staat hun Type hier op
+ETF/fonds. Die dividenden werden daardoor standaard NIET meegeteld in de
+Aangiftehulp, terwijl dat voor dat specifieke fonds wél had gemoeten.
+
+Onder 🏢 Activa → Overzicht staat nu een kolom **"Div=aandeel"**. Vink die aan
+voor een activum en de dividenden ervan tellen voortaan mee:
+- voor de 833-vrijstelling (terug te vorderen roerende voorheffing), en
+- voor de FBB op Franse dividenden (indien ingeschakeld).
+
+Dit overschrijft enkel de Type-gebaseerde uitsluiting voor dat ene activum —
+de rest van de fiscale berekening (TOB, meerwaardebelasting, FCPE-koers-
+bepaling) verandert niet. Standaard staat het vinkje UIT voor alles behalve
+'Aandeel' (dat telt sowieso altijd mee, ongeacht dit vinkje). Twijfel je of
+jouw fonds hiervoor in aanmerking komt: laat het uit en vraag het na bij je
+boekhouder of de FOD Financiën — onterecht aanvinken levert een te hoge
+(foutieve) teruggave op.
+
 ## 1.8.6
 ### 📄 "Overnemen van een eerdere transactie" neemt nu ook echt alles over
 

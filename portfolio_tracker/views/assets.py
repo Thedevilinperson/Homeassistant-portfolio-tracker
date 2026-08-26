@@ -414,6 +414,7 @@ def page_assets():
                 "Fotomoment": round(a["snapshot_price"], 4) if a.get("snapshot_price") is not None else None,
                 "Handmatige koers": round(mp, 4) if mp is not None else None,
                 "Enkel handm.": bool(a.get("manual_only")),
+                "Div=aandeel": bool(a.get("dividend_as_stock")),
                 "Mislukt": int(a.get("price_fail_count") or 0),
                 "Laatste koers": round(mp, 4) if mp is not None else (round(lp["price"], 4) if lp else None),
             })
@@ -481,6 +482,16 @@ def page_assets():
                          "handmatige koers. Aanzetten voor effecten die nergens publiek "
                          "genoteerd zijn: dat scheelt vijf mislukte netwerkcalls en evenveel "
                          "foutregels in de log bij elke koersverversing (om de 5 minuten)."),
+                "Div=aandeel": cc.CheckboxColumn(
+                    help="Dividenden van dit activum tellen mee voor de 833-vrijstelling "
+                         "roerende voorheffing en de FBB (🧾 Aangifte), ook al staat 'Type' "
+                         "hierboven op ETF/fonds. Bedoeld voor fondsen die fiscaal gewoon "
+                         "als aandeel behandeld worden — bv. bepaalde FCPE-werkgeversfondsen "
+                         "die een echt, aan Belgische roerende voorheffing onderworpen "
+                         "dividend uitkeren. Standaard UIT voor alles behalve 'Aandeel' "
+                         "(dat telt sowieso altijd mee, dit vinkje is dan overbodig). Twijfel "
+                         "je? Laat uit en vraag het na bij je boekhouder of de FOD Financiën — "
+                         "onterecht aanvinken levert een te hoge (foutieve) teruggave op."),
                 "Laatste koers": cc.NumberColumn(disabled=True, format="%.10g"),
             })
         st.caption("✏️ Bewerk rechtstreeks in de tabel en klik op 'Wijzigingen opslaan'. TOB-tarief, "
@@ -489,7 +500,10 @@ def page_assets():
                    "worden dan via de ISIN opgehaald (Yahoo, onvista, Euronext, Tradegate, L&S, "
                    "Deutsche Börse Live). Vindt geen enkele bron het effect, zet dan een "
                    "**handmatige koers** én vink **Enkel handm.** aan — dat stopt ook de "
-                   "foutmeldingen in de log.")
+                   "foutmeldingen in de log. Keert een fonds (Type ETF) in de praktijk gewone, "
+                   "aan Belgische roerende voorheffing onderworpen dividenden uit — bv. sommige "
+                   "FCPE-werkgeversfondsen — vink dan **Div=aandeel** aan zodat die dividenden "
+                   "meetellen voor de 833-vrijstelling en de FBB op de 🧾 Aangiftepagina.")
 
         _open_t, _closed_t = tax_mod.open_position_tickers()
         if _closed_t:
@@ -568,7 +582,7 @@ def page_assets():
                     if all(_cell_eq(r[k], orig[k]) for k in
                            ("Naam", "Type", "ETF-type", "BE", "Munt", "Land", "Beurs", "ISIN",
                             "Koersdoel", "Fotomoment", "Handmatige koers", "Enkel handm.",
-                            "Sector")):
+                            "Div=aandeel", "Sector")):
                         continue
                     atype = TYPE_KEY.get(str(r["Type"]), a["asset_type"])
                     asub  = SUB_KEY.get(str(r["ETF-type"]), a.get("etf_subtype") or "distributing") or "distributing"
@@ -601,6 +615,7 @@ def page_assets():
                     else:
                         db.set_manual_price(a["ticker"], float(mpv), ncur)
                     db.set_manual_only(a["ticker"], bool(r["Enkel handm."]))
+                    db.set_dividend_as_stock(a["ticker"], bool(r["Div=aandeel"]))
                     n_upd += 1
             except Exception as exc:
                 problems.append(f"Onverwachte fout: {exc}")

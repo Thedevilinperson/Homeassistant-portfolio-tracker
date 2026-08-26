@@ -434,6 +434,15 @@ def _migrate(conn):
     if not _column_exists(cur, "assets", "manual_only"):
         cur.execute("ALTER TABLE assets ADD COLUMN manual_only INTEGER DEFAULT 0")
 
+    # Sommige fondsen (bv. bepaalde FCPE-werkgeversfondsen) keren in de praktijk
+    # gewoon aan Belgische roerende voorheffing onderworpen dividenden uit, ook al
+    # is hun 'Type' hierboven ETF/fonds. Standaard tellen enkel 'gewone aandelen'
+    # mee voor de 833-vrijstelling en de FBB (zie belgian_tax.dividend_tax_benefit) —
+    # dit vinkje laat toe dat per activum te overschrijven voor wie zeker weet dat
+    # zijn fonds fiscaal als een gewoon aandeel behandeld wordt.
+    if not _column_exists(cur, "assets", "dividend_as_stock"):
+        cur.execute("ALTER TABLE assets ADD COLUMN dividend_as_stock INTEGER DEFAULT 0")
+
     # Afgeleide koers — voor effecten zonder eigen (publieke) notering waarvan de
     # waarde een formule op een ONDERLIGGEND activum is, zoals FCPE-werkgeversfondsen
     # (bv. ENGIE Link Classic/Liberty = 1 × ENGIE; Link Multiple = hefboomformule):
@@ -770,6 +779,26 @@ def is_manual_only(ticker) -> bool:
                        (ticker.upper(),)).fetchone()
     conn.close()
     return bool(row and row["manual_only"])
+
+
+def set_dividend_as_stock(ticker, enabled: bool):
+    """Zet/wis de overschrijving 'dividenden tellen als gewoon aandeel' voor een
+    activum. Bedoeld voor fondsen (bv. bepaalde FCPE-werkgeversfondsen) die in de
+    praktijk gewone, aan Belgische roerende voorheffing onderworpen dividenden
+    uitkeren, zodat ze toch meetellen voor de 833-vrijstelling en de FBB."""
+    conn = get_connection()
+    conn.execute("UPDATE assets SET dividend_as_stock=? WHERE ticker=?",
+                 (1 if enabled else 0, ticker.upper()))
+    conn.commit()
+    conn.close()
+
+
+def is_dividend_as_stock(ticker) -> bool:
+    conn = get_connection()
+    row = conn.execute("SELECT dividend_as_stock FROM assets WHERE ticker=?",
+                       (ticker.upper(),)).fetchone()
+    conn.close()
+    return bool(row and row["dividend_as_stock"])
 
 
 def get_accounts() -> list[str]:
