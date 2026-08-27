@@ -2123,6 +2123,26 @@ def fcpe_sync_readings(ticker: str, cfg: dict | None = None,
     return out
 
 
+def _fcpe_formula_params(cfg: dict) -> dict:
+    """De parameters van de fondsformule uit de opgeslagen configuratie.
+
+    Bewust op één plaats: de actuele waarde (fcpe_value) en de historische reeks
+    (get_price_series) moeten met exact dezelfde parameters rekenen, anders zou de
+    grafiek een ander fonds tonen dan het dashboard.
+    """
+    return {
+        "n_readings":         int(cfg.get("n_readings") or 60),
+        "reference_price":    float(cfg.get("reference_price") or 0.0),
+        "alpha":              float(cfg.get("alpha") or 0.0),
+        "subscription_price": float(cfg.get("subscription_price") or 0.0),
+        "start_date":         cfg.get("start_date"),
+        "annual_rate":        float(cfg.get("annual_rate", fcpe.DEFAULT_ANNUAL_RATE)),
+        "maturity_date":      cfg.get("maturity_date"),
+        "maturity_return":    cfg.get("maturity_return"),
+        "md_entries":         cfg.get("md_entries"),
+    }
+
+
 def fcpe_value(ticker: str, cfg: dict | None = None, on_date: str | None = None,
                spot: float | None = None, spot_currency: str | None = None,
                auto_sync: bool = True) -> tuple[dict | None, str | None]:
@@ -2141,17 +2161,8 @@ def fcpe_value(ticker: str, cfg: dict | None = None, on_date: str | None = None,
         except Exception as exc:
             logger.warning(f"fcpe_value({ticker}): aanvullen waarnemingen faalde: {exc}")
     readings = _db.get_fcpe_readings(ticker, upto=on_date)
-    res = fcpe.part_value(
-        readings, spot=spot, on_date=on_date,
-        n_readings=int(cfg.get("n_readings") or 60),
-        reference_price=float(cfg.get("reference_price") or 0.0),
-        alpha=float(cfg.get("alpha") or 0.0),
-        subscription_price=float(cfg.get("subscription_price") or 0.0),
-        start_date=cfg.get("start_date"),
-        annual_rate=float(cfg.get("annual_rate", fcpe.DEFAULT_ANNUAL_RATE)),
-        maturity_date=cfg.get("maturity_date"),
-        maturity_return=cfg.get("maturity_return"),
-        md_entries=cfg.get("md_entries"))
+    res = fcpe.part_value(readings, spot=spot, on_date=on_date,
+                          **_fcpe_formula_params(cfg))
     return res, (spot_currency or "EUR")
 
 
@@ -2555,14 +2566,71 @@ def get_historical_exchange_rate(from_currency: str, on_date: str,
     return get_exchange_rate(from_currency, to_currency)
 
 
-def get_price_series(ticker: str, start: str, end: str | None = None):
+def get_price_series(ticker: str, start: str, end: str | None = None,
+                     auto_adjust: bool = True, _depth: int = 0):
     """
     Dagelijkse slotkoersen (native valuta) als pandas Series, geïndexeerd op datum.
     Cache: 1 uur. Geeft None bij fout. Is het ticker een ISIN zonder Yahoo-notering
     (bv. een warrant), dan wordt eerst een Yahoo-symbool opgezocht — geen rauwe ISIN
     naar yfinance (dat gooit een 'Invalid ISIN number'-exception).
+
+    Voor een GEKOPPELD activum bestaat er geen reeks om op te halen: zijn waarde is
+    een formule op een onderliggend activum. De reeks wordt dan gerekend in plaats van
+    opgevraagd, met dezelfde formule en dezelfde parameters als de actuele koers. Zo
+    verschijnen werkgeversfondsen ook in de gereconstrueerde historiek van 📈 Evolutie;
+    daarvóór vielen ze daar weg omdat hun QS-ISIN bij Yahoo geen notering heeft.
+
+    De onderliggende reeks wordt daarvoor ZONDER dividendcorrectie opgehaald
+    (auto_adjust=False). Dat is geen detail: een gecorrigeerde reeks ligt in het
+    verleden lager dan de werkelijke slotkoersen, en met een hefboom van 16 zou dat
+    verschil de historische waarde van het fonds ver naast de werkelijkheid zetten.
+    De formules van het reglement rekenen op de werkelijke slotkoers, niet op een
+    herrekende.
     """
-    key = f"series:{ticker}:{start}:{end}"
+    # ── Fondsformule ────────────────────────────────────────────────────────
+    # Per dag opnieuw: de waarnemingen die op DIE dag al bestonden, plus de slotkoers
+    # van die dag voor alles wat toen nog openstond. Rekenen met waarnemingen die pas
+    # later gebeurd zijn, zou de grafiek achteraf gelijk geven met kennis die er toen
+    # niet was.
+    # Gerekende reeksen worden bewust niet apart gecachet: de onderliggende reeks zit
+    # al een uur in de cache en de berekening zelf is verwaarloosbaar. Zo werkt een
+    # gewijzigde parameter of een gecorrigeerde waarneming meteen door in de grafiek
+    # in plaats van pas een uur later.
+    fcfg = _fcpe_cfg(ticker)
+    if fcfg and _depth < _DERIVED_MAX_DEPTH:
+        und = get_price_series(fcfg["underlying_ticker"], start, end,
+                               auto_adjust=False, _depth=_depth + 1)
+        if und is None or not len(und):
+            return None
+        try:
+            import database as _db
+            import pandas as _pd
+            spots = {ts.date().isoformat(): float(v) for ts, v in und.items()
+                     if v == v}
+            rows = fcpe.value_series(_db.get_fcpe_readings(ticker), sorted(spots),
+                                     spots=spots, **_fcpe_formula_params(fcfg))
+            if not rows:
+                return None
+            return _pd.Series([r["value"] for r in rows],
+                              index=_pd.to_datetime([r["date"] for r in rows]))
+        except Exception as exc:
+            logger.warning(f"get_price_series({ticker}): fondsformule faalde: {exc}")
+            return None
+
+    # ── Lineaire afgeleide koers ────────────────────────────────────────────
+    dcfg = _derived_cfg(ticker)
+    if dcfg:
+        if _depth >= _DERIVED_MAX_DEPTH:
+            logger.warning(f"get_price_series({ticker}): afgeleide-koersketen te diep "
+                           "(mogelijk circulair) — gestopt.")
+            return None
+        und = get_price_series(dcfg["underlying_ticker"], start, end,
+                               auto_adjust=False, _depth=_depth + 1)
+        if und is None or not len(und):
+            return None
+        return und.map(lambda p: derived_value(p, dcfg))
+
+    key = f"series:{ticker}:{start}:{end}:{int(bool(auto_adjust))}"
     entry = _HIST_CACHE.get(key)
     if entry and (time.time() - entry[0]) < HIST_TTL:
         return entry[1]
@@ -2575,7 +2643,7 @@ def get_price_series(ticker: str, start: str, end: str | None = None):
         yf_ticker = sym
     try:
         end = end or (datetime.now() + timedelta(days=1)).strftime("%Y-%m-%d")
-        hist = yf.Ticker(yf_ticker).history(start=start, end=end, auto_adjust=True)
+        hist = yf.Ticker(yf_ticker).history(start=start, end=end, auto_adjust=auto_adjust)
         if hist.empty:
             return None
         series = hist["Close"].copy()

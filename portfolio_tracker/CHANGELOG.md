@@ -2,6 +2,51 @@
 
 Alle noemenswaardige wijzigingen aan de Portfolio Tracker add-on.
 
+## 1.8.9
+### 📈 Gekoppelde fondsen verschijnen nu ook in de grafiek op Evolutie
+
+De gereconstrueerde historiek op 📈 Evolutie werkte met koersreeksen die
+rechtstreeks bij Yahoo opgehaald worden. Een QS-ISIN heeft daar geen notering,
+dus voor een werkgeversfonds kwam er niets terug en viel het fonds uit de
+reconstructie weg: de grafiek toonde een portefeuille zonder dat fonds, terwijl
+het dashboard, de portefeuillepagina en de fiscale berekening het wel volledig
+meetelden.
+
+Er valt voor zo'n fonds ook niets op te halen — er bestaat geen reeks. De reeks
+wordt daarom gerekend in plaats van opgevraagd, met dezelfde formule en dezelfde
+parameters als de actuele koers. Dat geldt voor beide methodes:
+
+- **Afgeleide koers**: de formule op de historische koers van de onderliggende
+  waarde, ondergrens inbegrepen.
+- **Fondsformule**: per dag opnieuw, met de waarnemingen die op díé dag al
+  bestonden en de slotkoers van die dag voor alles wat toen nog openstond.
+  Rekenen met waarnemingen die pas later gebeurd zijn zou de grafiek achteraf
+  gelijk geven met kennis die er toen niet was.
+
+De koersreeks van de onderliggende waarde wordt daarvoor ZONDER
+dividendcorrectie opgehaald (auto_adjust=False). Dat is geen detail: een
+gecorrigeerde reeks ligt in het verleden lager dan de werkelijke slotkoersen, en
+met een hefboom van 16 zou dat verschil de historische waarde van het fonds ver
+naast de werkelijkheid zetten. De formules van het reglement rekenen op de
+werkelijke slotkoers, niet op een herrekende.
+
+Een kringverwijzing (een gekoppeld activum dat naar zichzelf wijst) wordt na
+drie stappen afgebroken, net als bij de actuele koers en het fotomoment.
+
+### 🔒 Eén plaats voor de formuleparameters
+
+De parameters van de fondsformule worden nu op één plaats uit de configuratie
+gelezen, en van daaruit gebruikt door zowel de actuele waardering als de
+historische reeks. Zo kunnen die twee niet uiteenlopen: de grafiek toont
+gegarandeerd hetzelfde fonds als het dashboard.
+
+### 📖 Handleiding
+
+Hoofdstuk 3.10 vermeldde het ontbreken van gekoppelde fondsen in de
+evolutiegrafiek als bekende beperking. Dat stuk is vervangen door een uitleg van
+hoe de historische reeks nu berekend wordt en waarom de onderliggende reeks
+ongecorrigeerd opgehaald wordt. De tabel met symptomen heeft er een regel bij.
+
 ## 1.8.8
 ### 🕒 FCPE: een waarneming wordt pas vastgelegd na sluiting van de beurs
 

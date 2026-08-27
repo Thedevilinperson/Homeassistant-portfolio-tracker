@@ -1,6 +1,6 @@
 # Portfolio Tracker - Handleiding
 
-Versie 1.8.8
+Versie 1.8.9
 
 ---
 
@@ -433,7 +433,8 @@ fonds zich als elk ander activum:
   formule wordt dan toegepast op de historische koers van de onderliggende waarde, en
   bij de fondsformule op de waarnemingen die op díé datum al bestonden;
 - de **blootstelling per onderliggende waarde** op de portefeuillepagina, die het fonds
-  economisch bij zijn onderliggende aandeel optelt.
+  economisch bij zijn onderliggende aandeel optelt;
+- de **gereconstrueerde historiek** op `📈 Evolutie`.
 
 Er wordt daarbij **geen enkele netwerkcall voor het fonds zelf** gedaan. Dat is niet
 alleen sneller: elke poging op zo'n QS-ISIN is bij voorbaat zinloos, en de faalteller
@@ -441,11 +442,18 @@ van het fonds mag niet oplopen door iets wat geen fout is. Faalt de koers van de
 ónderliggende waarde, dan blijft die fout waar ze hoort — bij het onderliggende
 activum, met zijn eigen teller en logregel.
 
-Eén uitzondering, en die is bewust zichtbaar: de gereconstrueerde grafiek op
-`📈 Evolutie` werkt met historische reeksen die rechtstreeks bij Yahoo opgehaald worden,
-en een QS-ISIN heeft daar geen notering. Gekoppelde fondsen ontbreken dus in die ene
-reconstructie. Overal elders — dashboard, portefeuille, fiscale berekening — tellen ze
-volledig mee.
+Die laatste verdient een woord uitleg, want daar valt niets op te halen: een QS-ISIN
+heeft bij Yahoo geen notering, dus er bestaat geen historische reeks voor het fonds.
+Die reeks wordt daarom **gerekend in plaats van opgevraagd**, met dezelfde formule en
+dezelfde parameters als de actuele koers. Bij de fondsformule gebeurt dat per dag met
+de waarnemingen die op díé dag al bestonden — rekenen met waarnemingen die pas later
+gebeurd zijn, zou de grafiek achteraf gelijk geven met kennis die er toen niet was.
+
+De koersreeks van de onderliggende waarde wordt daarvoor **zonder dividendcorrectie**
+opgehaald. Dat is geen detail: een gecorrigeerde reeks ligt in het verleden lager dan
+de werkelijke slotkoersen, en met een hefboom van 16 zou dat verschil de historische
+waarde van het fonds ver naast de werkelijkheid zetten. De formules van het reglement
+rekenen op de werkelijke slotkoers, niet op een herrekende.
 
 **De principes erachter.** Vier regels lopen door de hele koppelingsmachinerie en
 verklaren de meeste keuzes hierboven:
@@ -474,6 +482,7 @@ verklaren de meeste keuzes hierboven:
 | De berekende waarde loopt stelselmatig achter | Een majoration ontbreekt | vul ze in en kalibreer opnieuw |
 | De kalibratie geeft een negatieve inschrijvingsprijs | De reeks bevat de oprichtingsdag niet | exporteer de NAV vanaf de start |
 | Het fonds heeft helemaal geen koers | De onderliggende waarde geeft er geen | kijk bij het onderliggende activum, niet bij het fonds |
+| Het fonds ontbreekt in de grafiek op 📈 Evolutie | De onderliggende waarde levert geen historische reeks | kijk bij het onderliggende activum, niet bij het fonds |
 
 ### 3.11 Werkgeversfondsen (FCPE): stockdividend en blokkering
 
