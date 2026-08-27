@@ -1,6 +1,6 @@
 # Portfolio Tracker - Handleiding
 
-Versie 1.8.1
+Versie 1.8.8
 
 ---
 
@@ -259,65 +259,226 @@ Omdat er geen enkel juist antwoord bestaat op de vraag wat zulke aandelen je nu
 De eerste twee geven hetzelfde nettoresultaat; ze verschillen alleen in hoe het
 uitgesplitst wordt. De keuze verschijnt alleen als je zulke producten hebt.
 
-### 3.10 Werkgeversfondsen (FCPE): waardering, stockdividend en blokkering
+### 3.10 Gekoppelde koersen: effecten zonder eigen notering
 
-Fondsen uit aandelenplannen van je werkgever — zoals de Amundi/ENGIE Link-fondsen
-(Classic, Liberty, Multiple) — gedragen zich op drie punten anders dan gewone
-effecten, en de app heeft voor elk punt een eigen bouwsteen.
+Sommige effecten staan bij geen enkele koersbron. Werkgeversfondsen zoals de
+Amundi/ENGIE Link-fondsen (Classic, Liberty, Multiple) hebben een QS-ISIN die nergens
+publiek genoteerd is; de beheerder publiceert de waarde enkel op zijn eigen portaal.
+Toch is die waarde geen mysterie: ze is een **formule op een gewoon beursgenoteerd
+aandeel**. De app kan die formule zelf rekenen, en dan volgt het fonds mee zonder dat
+er ooit een koers voor het fonds zelf opgezocht moet worden.
 
-**Ze noteren nergens.** Hun QS-ISIN staat bij geen enkele koersbron; Amundi
-publiceert de waarde enkel op zijn eigen portaal. Maar de waarde ís een formule op
-een gewoon beursgenoteerd aandeel. Koppel het fonds daarom aan een **onderliggende
-waarde** via `🏢 Activa → Overzicht → 🧮 Afgeleide koers`:
+Alles daarrond staat op één plaats: `🏢 Activa` → `🔗 Koppelingen`. Bovenaan zie je een
+tabel met elk gekoppeld fonds, de gebruikte methode, de onderliggende waarde, de
+parameters, hoeveel waarnemingen er al vastliggen en welke majoraties ingevuld zijn.
+De panelen eronder openen meteen op een gekoppeld fonds — niet op het alfabetisch
+eerste activum — en alle velden staan al ingevuld.
+
+**Twee methodes, en hoe je kiest.**
+
+| | 🧮 Afgeleide koers | 📐 Fondsformule |
+|---|---|---|
+| Bedoeld voor | 1:1-fondsen (Classic, Liberty), eenvoudige hefbomen, warrants | hefboomfondsen op een maandgemiddelde (Multiple) |
+| De waarde volgt | de koers van vandaag | het gemiddelde van zestig maandelijkse waarnemingen |
+| Gevoeligheid voor de koers | vast, elke dag dezelfde | daalt naarmate er waarnemingen vastliggen |
+| Bescherming tegen een koersval | optionele ondergrens op de totale waarde | elke waarneming apart afgetopt |
+| Onderhoud | geen | de maandelijkse waarneming, automatisch opgehaald |
+
+Een activum heeft er altijd maar één. Staat de fondsformule aan, dan wint die: ze is
+nauwkeuriger zodra ze correct ingesteld is. De lineaire methode is geen slechtere
+versie van de fondsformule, maar de juiste methode voor een ander soort product — voor
+een 1:1-fonds is ze exact.
+
+**De lineaire afgeleide koers.** De formule is:
 
     koers = basis + multiplicator × (koers onderliggend − referentiekoers)
 
-Voor een 1:1-fonds (Classic, Liberty: één deelbewijs = één aandeel ENGIE) is dat
-basis 0, multiplicator 1, referentie 0. Voor een hefboomfonds (Multiple) haal je de
-parameters uit je plandocumentatie: het gegarandeerde bedrag per deelbewijs als
-basis, de hefboomfactor als multiplicator, de referentiekoers van het plan, en de
-ondergrens aangevinkt zodat de koers nooit onder de garantie zakt. Het onderliggende
-activum moet in de app bestaan; heb je het losse aandeel niet in portefeuille, voeg
-het dan gewoon toe zonder transacties. Vanaf dan volgen de actuele koers, het
-dagresultaat, de koershistoriek én de fotomomentwaarde automatisch de onderliggende
-waarde — zonder één netwerkcall voor het fonds zelf.
+Voor een 1:1-fonds is dat basis 0, multiplicator 1, referentie 0: de koers van het
+fonds ís de koers van het aandeel. Voor een eenvoudig hefboomproduct haal je de
+parameters uit je plandocumentatie: het gegarandeerde bedrag per deelbewijs als basis,
+de hefboomfactor als multiplicator, de referentiekoers van het plan, en het vinkje
+**ondergrens** aan zodat de koers nooit onder de basis zakt.
 
-**De Multiple-fondsen volgen een andere formule.** Voor Classic en Liberty klopt de
-lineaire methode exact: één deelbewijs is één aandeel. Een Multiple-fonds hangt echter
-niet aan de koers van vandaag, maar aan het gemiddelde van zestig maandelijkse
-waarnemingen, elk afzonderlijk afgetopt op de referentieprijs:
+Het onderliggende activum moet in de app bestaan. Heb je het losse aandeel niet in
+portefeuille, voeg het dan gewoon toe zonder transacties — het dient enkel als
+koersbron. Een gekoppeld activum mag zelf naar een ander gekoppeld activum verwijzen,
+maar de app stopt na drie stappen. Dat is geen willekeurige grens: ze vangt meteen ook
+een kringverwijzing af, zodat er niets kan blijven hangen.
+
+**De fondsformule.** Een Multiple-fonds hangt niet aan de koers van vandaag maar aan
+het gemiddelde van zestig maandelijkse waarnemingen, elk afzonderlijk afgetopt op de
+referentieprijs:
 
     waarde = inschrijvingsprijs + max(rendement, α × (gemiddelde − referentieprijs)) + majoraties
+    waarneming i = max(slotkoers op waarnemingsdatum i, referentieprijs)
 
-Het rendement is een **bodem**, geen opslag: het reglement neemt "la valeur la plus
-haute" van rendement en participatie. Zodra de koers boven de referentieprijs noteert,
-wint de participatie en telt het rendement niet meer mee. Op de dag van oprichting is
-de waarde per reglement exact de inschrijvingsprijs. De majoraties (het dividende
-majoré van +10% dat ENGIE betaalt op aandelen die twee volle kalenderjaren op naam
-staan — voor de jaargang 2022 dus vanaf het dividend van 2025) komen daar wél bovenop;
-vul ze in als bedrag per deelbewijs (10 aandelen × 10% × dividend per aandeel), anders
-loopt de berekende waarde vanaf de eerste majoration blijvend achter.
+Drie dingen daaraan zijn makkelijk mis te lezen.
 
-Kies daarvoor `🏢 Activa → Overzicht → 📐 Fondsformule`. Twee dingen gedragen zich daar
-wezenlijk anders dan bij de lineaire methode. De **gevoeligheid daalt**: elke waarneming
-weegt 1/60, dus naarmate er meer vastliggen beweegt de waarde steeds minder mee met de
-koers — op het einde helemaal niet meer. En **verworven stijging verdwijnt niet meer**:
-omdat elke waarneming apart wordt afgetopt, kan een koersval onder de referentieprijs het
-gemiddelde niet omlaag halen. Het paneel toont de gevoeligheid van vandaag expliciet.
+Het rendement is een **bodem, geen opslag**. Het reglement neemt "la valeur la plus
+haute" van het rendement en de participatie; het telt ze niet op. Zodra de koers boven
+de referentieprijs noteert wint de participatie, en telt het rendement niet meer mee.
+Wie ze optelt, krijgt een langzaam groeiende overwaardering — bij 1,5 procent op een
+inschrijvingsprijs van 10,52 euro loopt dat op met ongeveer 16 cent per jaar.
 
-De parameters (α, referentieprijs, inschrijvingsprijs, data, rendement) staan in het
-reglement van jouw jaargang. Voor Link Multiple BEL 2022 is α = 16, loopt de eerste
-waarneming op 13 januari 2023 en de laatste op 15 december 2027, en bedraagt het rendement
-1,5% per jaar bij vervroegde uitstap of 7,73% op de eindvervaldag. Ken je de referentie- of
-inschrijvingsprijs niet, laad dan de NAV-export van de beheerder op: de app leidt ze af en
-toont hoe goed ze passen. α blijft daarbij vast op de waarde uit het reglement — dat is
-geen onbekende, en hem laten meebewegen zou een fout elders (een verkeerde aanvangsdatum,
-ontbrekende waarnemingen) verbergen in een te hoge of te lage hefboom.
+Op de **dag van oprichting** is de waarde per reglement exact de inschrijvingsprijs.
+Er is dan nog geen enkele waarneming en geen uitstap, dus ook geen prestatie.
 
-De waarnemingsdata bepaalt de app zelf uit het reglement (de 15e, of de beursdag ervóór —
-inclusief de Franse feestdagen, want daar schuift de reeks effectief op), en met
-*Waarnemingen ophalen* haalt ze de slotkoersen op vanaf de start van het fonds. Daarna
-gebeurt dat maandelijks vanzelf. Je typt niets in.
+De **majoraties** komen er wél gewoon bovenop. Dat is het dividende majoré van +10
+procent dat ENGIE betaalt op aandelen die twee volle kalenderjaren op naam staan —
+voor de jaargang 2022 dus vanaf het dividend van 2025. Vul ze in als bedrag per
+deelbewijs (tien aandelen × 10 procent × dividend per aandeel), anders loopt de
+berekende waarde vanaf de eerste majoration blijvend achter. Voor Link Multiple BEL
+2022 is dat 1,48 euro in april 2025 en 1,35 euro in mei 2026; de volgende wordt in mei
+2027 verwacht.
+
+**Waarom een maandgemiddelde tóch elke dag beweegt.** Dit is de vraag die het vaakst
+terugkomt: als de waarde op zestig maandwaarnemingen berust, waarom verandert ze dan
+dagelijks? Omdat het reglement dat zo voorschrijft. Bij een vervroegde uitstap op
+datum t wordt het gemiddelde berekend over (i) de waarnemingen die tussen de start en
+datum t effectief gebeurd zijn, en (ii) — om aan zestig te komen — de slotkoers van het
+aandeel op datum t, of de referentieprijs als die hoger is, herhaald voor élke
+waarneming die nog moet volgen.
+
+De app rekent dus altijd de **uitstapwaarde van vandaag**. De waarnemingen die al
+gebeurd zijn liggen vast; de rest wordt ingevuld met de koers van dit moment. Dat de
+waarde dagelijks beweegt is geen benadering en geen fout, maar precies de formule.
+
+Wat wél verandert, is hoe hard ze beweegt. Elke waarneming weegt 1/60, dus een
+koersbeweging van één euro verschuift de waarde met α × (openstaand ÷ 60) euro:
+
+| Moment | Vastgelegd | Open | Beweging bij €1 koersverschil |
+|---|---|---|---|
+| bij de start (jan 2023) | 0 | 60 | €16,00 |
+| augustus 2026 | 44 | 16 | €4,27 |
+| eind 2027 | 60 | 0 | €0,00 |
+
+Twee gevolgen die de lineaire methode per definitie niet kan nabootsen. De
+**gevoeligheid daalt**: naar het einde toe beweegt de waarde nauwelijks nog mee, en na
+de laatste waarneming helemaal niet meer — ze ligt dan vast. En **verworven stijging
+verdwijnt niet meer**: omdat elke waarneming apart op de referentieprijs wordt
+afgetopt, kan een koersval onder die prijs het gemiddelde niet omlaag halen. Een
+ondergrens op de totale waarde, zoals de lineaire methode die kent, beschermt pas op
+het einde en laat opgebouwde winst wél weer wegvallen. Het paneel toont de
+gevoeligheid van vandaag expliciet, naast het aantal vastgelegde waarnemingen.
+
+**De waarnemingen.** De data komen uit het reglement en bepaalt de app zelf: de 15e van
+de maand, of de beursdag ervóór als de 15e geen beursdag is. Daarbij tellen ook de
+Franse wettelijke feestdagen mee, niet alleen de sluitingsdagen van Euronext — op 14
+juli en 15 augustus schuift de gepubliceerde reeks effectief een dag terug. De
+gebruikte kalender is nagerekend tegen 44 gepubliceerde waarnemingsdata uit 2023 tot
+2026: alle 44 komen exact uit.
+
+Met `🔄 Waarnemingen ophalen` haalt de app de werkelijke slotkoersen op vanaf de start
+van het fonds. Daarna gebeurt dat maandelijks vanzelf. Je typt niets in. Drie regels
+bewaken de kwaliteit van die reeks:
+
+- **Een waarneming is een slotkoers.** Ze wordt daarom pas vastgelegd nadat de beurs
+  die dag gesloten is (18u Parijse tijd; Euronext sluit om 17u30, met slotveiling tot
+  17u35). Vóór dat uur blijft de waarnemingsdag open en telt de actuele koers gewoon
+  mee als invulling — precies zoals bij elke andere openstaande waarneming. Zonder die
+  regel zou de koers van dat moment als officiële waarneming worden weggeschreven, en
+  daar blijft ze dan in zitten: één zo'n fout weegt α ÷ 60, oftewel ongeveer 27 cent
+  per euro afwijking, voorgoed.
+- **Wat de app zelf ophaalde, controleert ze ook opnieuw.** De ophaalknop legt de al
+  bewaarde automatische waarnemingen (bron `auto:…`) opnieuw naast de definitieve
+  slotkoers en werkt ze bij als ze afwijken. Gebeurt dat, dan meldt ze het expliciet —
+  want dan zijn ook je gekalibreerde parameters op verouderde cijfers gebaseerd.
+- **Wat jij invulde, blijft staan.** Handmatig ingevoerde of gecorrigeerde
+  waarnemingen worden nooit aangeraakt door de controlepas.
+
+Vind je een waarneming niet terug (de app meldt dat per datum), vul ze dan met de hand
+aan in de tabel `📅 Waarnemingen` onder het paneel. Dat is beter dan een gat: een
+ontbrekende waarneming wordt anders met de koers van vandaag ingevuld, en dat is een
+andere dag.
+
+**Parameters: eerst het reglement, dan pas kalibreren.** α, de referentieprijs, de
+inschrijvingsprijs, de data en het rendement staan in het reglement van jouw jaargang.
+Voor Link Multiple BEL 2022 is α = 16, loopt de eerste waarneming op 13 januari 2023
+en de laatste op 15 december 2027, en bedraagt het rendement 1,5 procent per jaar bij
+vervroegde uitstap of 7,73 procent op de eindvervaldag.
+
+Ken je de referentie- of inschrijvingsprijs niet, laad dan de NAV-export van de
+beheerder op onder `🎯 Parameters kalibreren tegen de officiële NAV`. De app leidt ze af
+en toont hoe goed ze passen. Vier dingen zijn daarbij belangrijk:
+
+- **α blijft vast.** Het is geen onbekende maar een getal uit het reglement. Hem laten
+  meebewegen geeft altijd een kleinere afwijking — een extra vrijheidsgraad past per
+  definitie beter — maar verbergt een fout elders (een verkeerde begindatum,
+  ontbrekende waarnemingen) in een te hoge of te lage hefboom. Het vinkje bestaat
+  alleen voor wie het reglement van zijn jaargang écht niet heeft.
+- **Vul eerst je majoraties in.** Doe je dat niet, dan ziet de kalibratie op elke
+  majoration een sprong in de NAV die de formule niet verklaart, en gaat ze die
+  goedmaken met verkeerde parameters.
+- **Neem de oprichtingsdag mee in je export.** Op die dag ís de NAV per reglement de
+  inschrijvingsprijs. Dat anker is onmisbaar zodra geen enkele waarneming onder de
+  referentieprijs ligt: er wordt dan nergens afgetopt en alleen de combinatie
+  (inschrijving − α × referentie) is meetbaar. Referentie- en inschrijvingsprijs zijn
+  dan niet los van elkaar te bepalen, en de schatting glijdt naar een willekeurig punt
+  op die richel — typisch een te lage referentie met een onzinnige, soms zelfs
+  negatieve inschrijvingsprijs. De app herkent die situatie en waarschuwt ervoor in
+  plaats van een mooi ogend maar betekenisloos resultaat te tonen.
+- **De officiële NAV is de waarheid, niet de berekening.** Wijken de berekende waarden
+  stelselmatig af, dan klopt er een parameter niet. De vergelijkingstabel toont het
+  verschil per datum, in euro en in procent.
+
+**Waar een gekoppelde koers overal doorwerkt.** Zodra de koppeling staat, gedraagt het
+fonds zich als elk ander activum:
+
+- de **actuele koers** en het **dagresultaat**, met dezelfde cache van vijf minuten;
+- de **marktstatus**: de app kijkt naar de beurs van de onderliggende waarde, zodat de
+  waarschuwing voor een vlakke koers correct blijft;
+- de **koershistoriek** in `price_history`, die de scheduler elke vijf minuten
+  bijwerkt — vanaf het moment dat de koppeling bestaat;
+- de **fotomomentwaarde** van 31/12/2025, en elke andere historische slotkoers: de
+  formule wordt dan toegepast op de historische koers van de onderliggende waarde, en
+  bij de fondsformule op de waarnemingen die op díé datum al bestonden;
+- de **blootstelling per onderliggende waarde** op de portefeuillepagina, die het fonds
+  economisch bij zijn onderliggende aandeel optelt.
+
+Er wordt daarbij **geen enkele netwerkcall voor het fonds zelf** gedaan. Dat is niet
+alleen sneller: elke poging op zo'n QS-ISIN is bij voorbaat zinloos, en de faalteller
+van het fonds mag niet oplopen door iets wat geen fout is. Faalt de koers van de
+ónderliggende waarde, dan blijft die fout waar ze hoort — bij het onderliggende
+activum, met zijn eigen teller en logregel.
+
+Eén uitzondering, en die is bewust zichtbaar: de gereconstrueerde grafiek op
+`📈 Evolutie` werkt met historische reeksen die rechtstreeks bij Yahoo opgehaald worden,
+en een QS-ISIN heeft daar geen notering. Gekoppelde fondsen ontbreken dus in die ene
+reconstructie. Overal elders — dashboard, portefeuille, fiscale berekening — tellen ze
+volledig mee.
+
+**De principes erachter.** Vier regels lopen door de hele koppelingsmachinerie en
+verklaren de meeste keuzes hierboven:
+
+1. **Beschermd tegen overschrijven is niet hetzelfde als uitgesloten van
+   herberekening.** Wat jij met de hand invulde, blijft staan. Maar alles wat daaruit
+   berekend wordt, wordt wél gewoon opnieuw gerekend.
+2. **Liever geen waarde dan een verzonnen waarde.** Ontbreekt de koers van de
+   onderliggende waarde terwijl er nog waarnemingen openstaan, dan geeft de app geen
+   getal terug in plaats van er een te bedenken. Stilzwijgend terugvallen op een
+   plausibel ogende waarde is de gevaarlijkste soort fout: ze valt niet op.
+3. **De ISIN is het startpunt, niet de ticker.** Ook hier: het fonds wordt herkend aan
+   zijn ISIN, en het onderliggende activum wordt op zijn eigen ISIN opgezocht.
+4. **Een parameter uit een reglement is geen schatting.** α wordt niet gekalibreerd, de
+   waarnemingsdata worden niet geraden, en de waarde op de oprichtingsdag wordt niet
+   berekend maar overgenomen.
+
+**Nakijken en problemen oplossen.**
+
+| Wat je ziet | Wat er aan de hand is | Wat je doet |
+|---|---|---|
+| De waarde beweegt dagelijks, terwijl het een maandgemiddelde is | Correct: de openstaande waarnemingen worden met de koers van vandaag ingevuld | niets |
+| De waarde beweegt nauwelijks nog | Normaal: er staan weinig waarnemingen meer open | kijk naar de gevoeligheid in het paneel |
+| De waarde beweegt helemaal niet bij een koersbeweging | Het rendement vormt de bodem, of alle waarnemingen liggen vast | het paneel toont welke van de twee wint |
+| Melding "🩺 … waarneming(en) bijgewerkt" | Er zat een niet-definitieve koers in de reeks | kalibreer je parameters opnieuw |
+| De berekende waarde loopt stelselmatig achter | Een majoration ontbreekt | vul ze in en kalibreer opnieuw |
+| De kalibratie geeft een negatieve inschrijvingsprijs | De reeks bevat de oprichtingsdag niet | exporteer de NAV vanaf de start |
+| Het fonds heeft helemaal geen koers | De onderliggende waarde geeft er geen | kijk bij het onderliggende activum, niet bij het fonds |
+
+### 3.11 Werkgeversfondsen (FCPE): stockdividend en blokkering
+
+Naast hun waardering (zie 3.10) gedragen werkgeversfondsen zich op twee punten anders
+dan gewone effecten.
 
 **Ze keren dividenden uit in deelbewijzen.** De kapitalisatie van het onderliggende
 dividend is fiscaal gewoon een dividend (roerende voorheffing, €833-vrijstelling),
@@ -590,9 +751,6 @@ Hier zitten ook de gereedschappen:
 - De kolom **Sector** met een keuzelijst. `—` betekent nog niet toegewezen.
 - `🏭 Sectoren beheren en in één keer ophalen`, zie hieronder.
 - `📸 Fotomoment ophalen` voor de slotkoers van 31/12/2025.
-- `🧮 Afgeleide koers` voor effecten zonder eigen notering waarvan de waarde een
-  formule op een ander activum is (werkgeversfondsen/FCPE); zie
-  [3.10](#310-werkgeversfondsen-fcpe-afgeleide-koers-stockdividend-en-blokkering).
 - `🔬 Bronnen diagnose` als een koers niet gevonden wordt: dit test elke bron apart en
   toont wat er precies terugkomt.
 - De FSMA-lijst van in België aangeboden fondsen, om het TOB-tarief van je fondsen
@@ -621,6 +779,11 @@ Fondsen en trackers krijgen bij Yahoo meestal **geen** sector. Dat is geen fout:
 brede indextracker zit in alle sectoren tegelijk. Zet die op *Gediversifieerd
 (index/fonds)*, anders lijkt je portefeuille geconcentreerder dan ze is.
 
+**Koppelingen.** Alles rond effecten zonder eigen notering: het overzicht van je
+gekoppelde fondsen, het paneel `🧮 Afgeleide koers` en het paneel `📐 Fondsformule`, met
+de waarnemingen en de kalibratie tegen de officiële NAV. De volledige werking en de
+principes staan in [3.10](#310-gekoppelde-koersen-effecten-zonder-eigen-notering).
+
 **Splitsingen.** Een aandelensplitsing registreer je hier. De app past die niet
 automatisch toe, ook al detecteert ze er een: dat zou je kostbasis wijzigen zonder je
 medeweten. Pas na je bevestiging worden de transacties en de kostbasis aangepast.
@@ -646,7 +809,7 @@ opgeslagen tot je zelf op toevoegen klikt.
 - **Performance share**: voor toegekende in plaats van gekochte stukken.
 - **🔒 (Nog) niet vrij verhandelbaar**: geef een aankooplot een 'vrij vanaf'-datum
   mee (werkgeversplannen/FCPE). Het lot telt tot die datum als geblokkeerd kapitaal;
-  zie [3.10](#310-werkgeversfondsen-fcpe-afgeleide-koers-stockdividend-en-blokkering).
+  zie [3.11](#311-werkgeversfondsen-fcpe-stockdividend-en-blokkering).
   In de overzichtstabel is dit de kolom **Vrij vanaf** (JJJJ-MM-DD, leeg = nooit
   geblokkeerd).
 - **Koersdoel**: optioneel, handmatig of via AI.
@@ -704,7 +867,7 @@ worden toegekend in plaats van cash (bv. FCPE-werkgeversfondsen): vink
 De fiscale keten loopt zoals bij elk dividend, maar er wordt niets in het
 cash-grootboek geboekt en er verschijnt automatisch een gekoppelde aanwastransactie
 (brutowaarde als kostbasis, geen cash, geen TOB, desgewenst meteen geblokkeerd). Zie
-[3.10](#310-werkgeversfondsen-fcpe-afgeleide-koers-stockdividend-en-blokkering).
+[3.11](#311-werkgeversfondsen-fcpe-stockdividend-en-blokkering).
 
 **Eigen wisselkoers.** Keert een aandeel uit in een vreemde munt, dan rekent je broker
 om tegen *zijn* koers — vaak met een wisselmarge erin verwerkt. Vink
@@ -1560,6 +1723,15 @@ Windows: de nieuwe bestanden overschrijven en `start.bat` opnieuw draaien. Wijzi
 | Basissymbool | het deel van een ticker vóór het beurssuffix (BMW.DE → BMW) |
 | Eigen wisselkoers | de koers die je broker effectief gebruikte, bewaard bij de lijn en nooit door de marktkoers vervangen |
 | Wisselmarge | het verschil tussen de brokerkoers en de marktkoers, vaak al in de koers verwerkt (auto-FX) |
+| Gekoppelde koers | de koers van een effect zonder eigen notering, berekend uit een onderliggend activum |
+| Onderliggende waarde | het beursgenoteerde activum waaruit een gekoppelde koers berekend wordt |
+| FCPE | Fonds Commun de Placement d'Entreprise: een Frans werkgeversfonds |
+| Waarneming (Relevé) | de maandelijkse slotkoers van de onderliggende waarde, afgetopt op de referentieprijs |
+| Referentieprijs | de ondergrens per waarneming én het startpunt van de participatie in de fondsformule |
+| Inschrijvingsprijs | de prijs per deelbewijs bij oprichting van het fonds, en de basis van de formule |
+| α (alfa) | de hefboomfactor uit het fondsreglement; geen schatting, maar een vast gegeven |
+| Majoration de dividende | de dividendbonus (+10% bij ENGIE) die bovenop de prestatie komt |
+| Gevoeligheid | hoeveel de waarde van een fonds verschuift bij €1 koersbeweging van de onderliggende waarde |
 
 ### 12.2 Bestandsindeling
 
@@ -1581,7 +1753,8 @@ Binnen `portfolio_tracker/`:
 | `views/` | een module per pagina, plus de gedeelde bouwstenen (zie hieronder) |
 | `database.py` | opslag, schema, migraties, statuscontroles |
 | `belgian_tax.py` | FIFO, TOB, meerwaardebelasting, dividendketen |
-| `market_data.py` | koersen, wisselkoersen, bronnen, FSMA-lijsten |
+| `market_data.py` | koersen, wisselkoersen, bronnen, FSMA-lijsten, gekoppelde koersen |
+| `fcpe_pricing.py` | de fondsformule van de FCPE Multiple-fondsen: waarnemingsdata, waarde per deelbewijs, kalibratie |
 | `ai_advisor.py` | de OpenAI-integratie |
 | `scheduler.py` | de geplande achtergrondtaken |
 | `bulk_import.py` | de Excel-import |

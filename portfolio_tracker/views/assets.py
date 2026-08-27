@@ -1205,24 +1205,44 @@ def page_assets():
                     st.rerun()
                 if b2.button("🔄 Waarnemingen ophalen", key="fcpe_sync",
                              help="Haalt de slotkoers van de onderliggende waarde op voor elke "
-                                  "voorbije waarnemingsdatum, vanaf de start van het fonds. "
-                                  "Reeds bewaarde waarnemingen blijven ongemoeid."):
-                    with st.spinner("Slotkoersen ophalen…"):
-                        r = md.fcpe_sync_readings(f_sel)
+                                  "voorbije waarnemingsdatum, vanaf de start van het fonds, en "
+                                  "controleert meteen de eerder automatisch opgehaalde "
+                                  "waarnemingen tegen de definitieve slotkoers. Handmatig "
+                                  "ingevoerde waarnemingen blijven ongemoeid."):
+                    with st.spinner("Slotkoersen ophalen en controleren…"):
+                        r = md.fcpe_sync_readings(f_sel, verify=True)
                     if r["added"]:
                         st.success(f"✅ {r['added']} waarneming(en) opgehaald "
                                    f"({r['skipped']} stonden er al).")
                     elif r["skipped"]:
                         st.info(f"Alle {r['skipped']} voorbije waarnemingen stonden er al.")
-                    else:
+                    elif not r.get("corrected"):
                         st.warning("Niets opgehaald — controleer de parameters en de "
                                    "onderliggende waarde.")
+                    if r.get("corrected"):
+                        st.warning(f"🩺 {r['corrected']} eerder opgehaalde waarneming(en) week(en) "
+                                   "af van de definitieve slotkoers en zijn bijgewerkt. Kalibreer "
+                                   "je parameters opnieuw als je dat eerder op deze cijfers deed.")
+                    if r.get("pending"):
+                        if r["pending"] == date.today().isoformat():
+                            st.caption("De waarneming van vandaag wordt pas vastgelegd na "
+                                       "sluiting van de beurs (18u Parijse tijd) — een Relevé is "
+                                       "de slotkoers van die dag, niet de koers van dit moment. "
+                                       "Tot dan telt de actuele koers gewoon mee als invulling "
+                                       "van de openstaande waarnemingen.")
+                        else:
+                            st.caption(f"Volgende waarneming: **{r['pending']}**.")
                     if r["missing"]:
                         st.warning(f"Geen slotkoers gevonden voor {len(r['missing'])} datum(s): "
                                    + ", ".join(r["missing"][:5])
                                    + ("…" if len(r["missing"]) > 5 else "")
                                    + ". Vul die desnoods handmatig aan in de tabel hieronder.")
-                    st.rerun()
+                    md._CACHE.pop(f_sel, None)
+                    # Bewust GEEN st.rerun(): die gooit het net getekende scherm weg,
+                    # inclusief de meldingen hierboven — je klikte dan op de knop en
+                    # zag niets gebeuren. Alles wat hieronder staat (de tabel met
+                    # waarnemingen, de waarde, de metrieken) wordt in deze zelfde run
+                    # opnieuw uit de database gelezen en is dus al bijgewerkt.
                 if _active and b3.button("🗑️ Formule uitschakelen", key="fcpe_off"):
                     db.set_pricing_mode(f_sel, "auto")
                     md._CACHE.pop(f_sel, None)

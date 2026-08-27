@@ -48,7 +48,7 @@ from datetime import date, datetime, timedelta
 
 __all__ = [
     "market_holidays", "is_trading_day", "previous_trading_day", "reading_dates",
-    "monthly_reading_dates", "reading_value", "part_value",
+    "reading_value", "part_value",
     "value_series", "compare_with_official", "fit_parameters",
     "DEFAULT_ANNUAL_RATE",
 ]
@@ -142,27 +142,6 @@ def reading_dates(count: int, *, day_of_month: int = 15,
     for _ in range(count):
         day = min(day_of_month, calendar.monthrange(y, m)[1])
         out.append(previous_trading_day(date(y, m, day)).isoformat())
-        m += 1
-        if m > 12:
-            m, y = 1, y + 1
-    return out
-
-def monthly_reading_dates(first: str | date, count: int) -> list[str]:
-    """Waarnemingsdata: de laatste dag van elke maand, 'count' maanden lang, te
-    beginnen met de maand van 'first'.
-
-    Het reglement zegt "de laatste beursdag van de maand". Die kan een dag eerder
-    vallen dan de laatste kalenderdag (weekend, feestdag). Deze functie geeft de
-    laatste KALENDERDAG en is dus enkel een vertrekpunt: de werkelijke waarnemingen
-    worden per stuk bewaard en mogen afwijken. Voor de waardering telt alleen de
-    bewaarde waarde, niet de datum waarop ze theoretisch hoorde te vallen.
-    """
-    d = _as_date(first)
-    if d is None or count < 1:
-        return []
-    out, y, m = [], d.year, d.month
-    for _ in range(count):
-        out.append(date(y, m, calendar.monthrange(y, m)[1]).isoformat())
         m += 1
         if m > 12:
             m, y = 1, y + 1

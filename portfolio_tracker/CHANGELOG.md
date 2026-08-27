@@ -2,6 +2,78 @@
 
 Alle noemenswaardige wijzigingen aan de Portfolio Tracker add-on.
 
+## 1.8.8
+### 🕒 FCPE: een waarneming wordt pas vastgelegd na sluiting van de beurs
+
+Een "Relevé i" is per fondsreglement de SLOTKOERS van de waarnemingsdatum (de
+15e van de maand, of de beursdag ervoor). De app haalde die datum al op zodra
+ze aanbrak — dus ook midden op de dag, terwijl de beurs nog open was. De
+koers van dat moment werd dan als officiele waarneming weggeschreven, en
+omdat een bewaarde waarneming niet meer overschreven wordt, bleef die fout er
+voorgoed in zitten. Elke fout van dat type zit met een gewicht van 1/60 en
+een factor alfa (16) in de waarde: 10 cent verschil op een waarneming is
+ongeveer 2,7 cent per deelbewijs, permanent.
+
+Vanaf nu telt een waarnemingsdatum pas mee vanaf 18u Parijse tijd (Euronext
+sluit om 17u30, slotveiling tot 17u35). Tot dan blijft de waarneming open en
+wordt ze — net als alle nog niet gebeurde waarnemingen — ingevuld met de
+actuele koers, precies zoals het reglement voorschrijft bij een vervroegde
+uitstap.
+
+### 🩺 Controlepas op eerder opgehaalde waarnemingen
+
+De knop "🔄 Waarnemingen ophalen" legt de al bewaarde waarnemingen nu opnieuw
+naast de definitieve slotkoers en werkt ze bij als ze afwijken. Zo verdwijnt
+een intraday-koers die eerder werd vastgelegd alsnog uit de reeks. Enkel
+waarnemingen die de app zelf ophaalde (bron "auto:...") komen daarvoor in
+aanmerking; handmatig ingevoerde of gecorrigeerde waarnemingen blijven
+onaangeroerd. Werd er iets bijgewerkt, dan meldt de app dat expliciet — je
+parameters (referentieprijs, inschrijvingsprijs) zijn dan gekalibreerd op
+cijfers die intussen veranderd zijn en verdienen een herkalibratie.
+
+De automatische koersverversing (om de 5 minuten) doet die controlepas NIET:
+ze haalt daarvoor telkens de volledige koershistoriek opnieuw op.
+
+### 👀 De meldingen van "Waarnemingen ophalen" zijn nu ook echt zichtbaar
+
+De knop toonde het resultaat en deed daarna meteen een herlaadbeurt, waardoor
+het net getekende scherm — inclusief die meldingen — werd weggegooid. Je klikte
+dus op de knop en zag ogenschijnlijk niets gebeuren. Die herlaadbeurt is
+geschrapt: alles wat onder de knop staat (de tabel met waarnemingen, de waarde,
+de metrieken) wordt in dezelfde beurt opnieuw uit de database gelezen en is dus
+sowieso al bijgewerkt.
+
+### 📖 Handleiding: een volledig hoofdstuk over gekoppelde koersen
+
+Hoofdstuk 3.10 heet nu **"Gekoppelde koersen: effecten zonder eigen notering"** en
+behandelt de hele machinerie op één plaats: waarom sommige effecten nergens
+noteren, de twee methodes (lineaire afgeleide koers en fondsformule) met een
+vergelijkingstabel, de formules zelf, waarom een maandgemiddelde tóch elke dag
+beweegt (de clausule over vervroegde uitstap), hoe de gevoeligheid daalt van 16
+naar 0 over de looptijd, hoe de waarnemingen bepaald en opgehaald worden, hoe je
+de parameters vindt en kalibreert, waar een gekoppelde koers overal in doorwerkt,
+de vier principes erachter, en een tabel met symptomen en oplossingen.
+
+De twee overgebleven eigenschappen van werkgeversfondsen (uitkering in
+deelbewijzen en geblokkeerde loten) staan nu apart in 3.11. Verwijzingen elders in
+het document zijn mee bijgewerkt, en de woordenlijst en de bestandsindeling zijn
+aangevuld.
+
+Ook eerlijk vermeld: de gereconstrueerde grafiek op 📈 Evolutie werkt met
+historische reeksen die rechtstreeks bij Yahoo opgehaald worden, en een QS-ISIN
+heeft daar geen notering. Gekoppelde fondsen ontbreken dus in die ene grafiek —
+overal elders tellen ze volledig mee.
+
+De handleiding in de root van de repository stond nog op 1.5.0 en liep dus ver
+achter op die van de add-on. Beide zijn nu gelijk.
+
+### 🧹 Opgeruimd
+
+`monthly_reading_dates()` is uit `fcpe_pricing.py` verwijderd. Die functie
+werd nergens gebruikt en beweerde in haar toelichting dat de waarnemingen op
+"de laatste beursdag van de maand" vallen — dat klopt niet met het reglement
+(de 15e) en sprak de rest van de module tegen.
+
 ## 1.8.7
 ### 🏢 Optie: dividenden van een fonds laten meetellen als gewoon aandeel
 

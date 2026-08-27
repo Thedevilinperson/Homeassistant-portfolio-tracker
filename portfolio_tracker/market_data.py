@@ -1996,8 +1996,34 @@ def fcpe_reading_dates(cfg: dict) -> list[str]:
         first_month=cfg.get("first_reading_month") or cfg.get("first_reading"))
 
 
+FCPE_CLOSE_HOUR = 18        # Euronext sluit om 17u30 Parijse tijd, slotveiling tot 17u35
+
+
+def fcpe_reading_is_final(d: str, now=None) -> bool:
+    """Is de waarneming van datum d definitief, of moet de beurs nog sluiten?
+
+    Een Relevé is per reglement de SLOTKOERS van die dag. Haalt de app hem op
+    terwijl de beurs nog open is, dan legt ze een intraday-koers vast als de
+    officiële waarneming — en omdat een bewaarde waarneming daarna niet meer
+    overschreven wordt, blijft die fout er voorgoed in zitten. Een waarneming
+    telt dus pas mee vanaf FCPE_CLOSE_HOUR op de dag zelf; alles van vóór
+    vandaag is sowieso definitief.
+    """
+    try:
+        now = now or datetime.now(ZoneInfo("Europe/Paris"))
+    except Exception:                       # geen tijdzonedatabank (Windows zonder tzdata)
+        now = now or datetime.now()
+    today = now.date().isoformat()
+    d = str(d)[:10]
+    if d < today:
+        return True
+    if d > today:
+        return False
+    return now.hour >= FCPE_CLOSE_HOUR
+
+
 def fcpe_sync_readings(ticker: str, cfg: dict | None = None,
-                       force: bool = False) -> dict:
+                       force: bool = False, verify: bool = False) -> dict:
     """Vul de maandelijkse waarnemingen aan met de werkelijke slotkoersen van de
     onderliggende waarde.
 
@@ -2010,20 +2036,43 @@ def fcpe_sync_readings(ticker: str, cfg: dict | None = None,
     Reeds bewaarde waarnemingen worden niet overschreven (tenzij force=True): een
     vastgelegde waarneming hoort niet meer te bewegen, en een handmatige correctie
     mag niet stilzwijgend ongedaan gemaakt worden.
+
+    Een waarnemingsdatum telt pas mee zodra de beurs die dag gesloten is (zie
+    fcpe_reading_is_final): anders zou de waarneming van de 15e worden vastgelegd
+    op de koers van dat moment in plaats van op de slotkoers.
+
+    verify=True doet er een controlepas bij: waarnemingen die de app zélf ophaalde
+    (source 'auto:…') worden opnieuw tegen de historische slotkoers gelegd en
+    bijgewerkt als ze afwijken. Zo verdwijnt een eerder vastgelegde intraday-koers
+    alsnog. HANDMATIG ingevoerde of gecorrigeerde waarnemingen blijven ook dan
+    onaangeroerd — beschermd tegen overschrijven, maar niet uitgesloten van
+    controle. Deze pas hoort bij de knop in de interface, niet bij de automatische
+    koersverversing: ze haalt telkens de volledige reeks opnieuw op.
     """
     import database as _db
     cfg = cfg or _fcpe_cfg(ticker)
-    out = {"added": 0, "skipped": 0, "missing": [], "underlying": None}
+    out = {"added": 0, "corrected": 0, "skipped": 0, "missing": [],
+           "pending": None, "underlying": None}
     if not cfg:
         return out
     und = cfg["underlying_ticker"]
     out["underlying"] = und
-    today = datetime.now().date().isoformat()
-    dates = [d for d in fcpe_reading_dates(cfg) if d <= today]
+    all_dates = fcpe_reading_dates(cfg)
+    dates = [d for d in all_dates if fcpe_reading_is_final(d)]
+    _pending = [d for d in all_dates if d not in dates]
+    out["pending"] = _pending[0] if _pending else None
     if not dates:
         return out
-    have = {r["date"] for r in _db.get_fcpe_readings(ticker)} if not force else set()
-    todo = [d for d in dates if d not in have]
+
+    existing = {r["date"]: r for r in _db.get_fcpe_readings(ticker)}
+    if force:
+        todo = list(dates)
+    else:
+        todo = [d for d in dates if d not in existing]
+        if verify:
+            todo += [d for d in dates if d in existing
+                     and str(existing[d].get("source") or "").startswith("auto:")]
+            todo = sorted(set(todo))
     out["skipped"] = len(dates) - len(todo)
     if not todo:
         return out
@@ -2056,8 +2105,18 @@ def fcpe_sync_readings(ticker: str, cfg: dict | None = None,
         if close is None:
             out["missing"].append(d)
             continue
-        _db.save_fcpe_reading(ticker, d, round(close, 4), source=f"auto:{und}")
-        out["added"] += 1
+        close = round(close, 4)
+        prev = existing.get(d)
+        if prev is not None and abs(float(prev.get("close") or 0.0) - close) < 5e-5:
+            out["skipped"] += 1                 # stond er al en klopt nog steeds
+            continue
+        _db.save_fcpe_reading(ticker, d, close, source=f"auto:{und}")
+        if prev is None:
+            out["added"] += 1
+        else:
+            out["corrected"] += 1
+            logger.info(f"fcpe_sync_readings({ticker}): waarneming {d} bijgewerkt van "
+                        f"{prev.get('close')} naar {close}.")
     if out["missing"]:
         logger.warning(f"fcpe_sync_readings({ticker}): geen slotkoers voor "
                        f"{len(out['missing'])} datum(s), o.a. {out['missing'][:3]}")
