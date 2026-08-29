@@ -1,6 +1,6 @@
 # Portfolio Tracker - Handleiding
 
-Versie 1.8.11
+Versie 1.8.12
 
 ---
 
@@ -459,6 +459,14 @@ en toont hoe goed ze passen. Vier dingen zijn daarbij belangrijk:
   op die richel — typisch een te lage referentie met een onzinnige, soms zelfs
   negatieve inschrijvingsprijs. De app herkent die situatie en waarschuwt ervoor in
   plaats van een mooi ogend maar betekenisloos resultaat te tonen.
+- **Lees alleen de regels van dit fonds in.** Een export van de beheerder bevat
+  meestal alle fondsen van je plan onder elkaar, elk met zijn eigen
+  waarderingsdata. De app toont daarom eerst welke reeksen ze in het bestand vindt en
+  laat je aanvinken welke bij dit fonds horen, en welke kolom de NAV is. Lees je ze
+  allemaal in, dan krijg je meerdere waarden per maand en legt de kalibratie een
+  formule door punten van verschillende fondsen — de gevonden referentieprijs is dan
+  onbruikbaar. Staan er toch meerdere NAV's in dezelfde maand, dan meldt de
+  vergelijkingstabel dat; wis de reeks en lees ze opnieuw in.
 - **De officiële NAV is de waarheid, niet de berekening.** Wijken de berekende waarden
   stelselmatig af, dan klopt er een parameter niet. De vergelijkingstabel toont het
   verschil per datum, in euro en in procent.
@@ -524,6 +532,8 @@ verklaren de meeste keuzes hierboven:
 | De berekende waarde loopt stelselmatig achter | Een majoration ontbreekt | laat ze voorstellen uit de dividendhistoriek en kalibreer opnieuw |
 | Je hebt net de verkeerde parameters opgeslagen | Het verkeerde fonds stond geselecteerd | ↩️ Vorige parameters terugzetten |
 | De kalibratie geeft een negatieve inschrijvingsprijs | De reeks bevat de oprichtingsdag niet | exporteer de NAV vanaf de start |
+| Er staan twee NAV's per maand in de vergelijking | Er zijn regels van een ander fonds mee ingelezen | wis de reeks en lees ze opnieuw in met de juiste selectie |
+| De berekende waarde is een tijd lang exact de inschrijvingsprijs | De aanvangsdatum ligt ná die periode | controleer de Date de Commencement |
 | Het fonds heeft helemaal geen koers | De onderliggende waarde geeft er geen | kijk bij het onderliggende activum, niet bij het fonds |
 | Het fonds ontbreekt in de grafiek op 📈 Evolutie | De onderliggende waarde levert geen historische reeks | kijk bij het onderliggende activum, niet bij het fonds |
 | De waarnemingen lijken van een ander fonds te komen | De parameters in de velden horen bij een ander fonds | controleer welk fonds er in de keuzelijst staat |

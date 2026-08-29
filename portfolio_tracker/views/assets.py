@@ -59,34 +59,110 @@ def _d_or(value, fallback):
         return fallback
 
 
-def _import_official_nav(ticker: str, upload) -> int:
-    """Lees de NAV-export van de beheerder in.
+def _nav_number(cell):
+    """Een getal uit een cel, ook als de export er tekst van maakt ('1 234,56')."""
+    if isinstance(cell, bool):
+        return None
+    if isinstance(cell, (int, float)):
+        return float(cell) if cell == cell else None
+    if not isinstance(cell, str):
+        return None
+    s = cell.strip().replace("\u202f", "").replace(" ", "")
+    if not s or not any(c.isdigit() for c in s):
+        return None
+    if "," in s and "." in s:                      # 1.234,56 -> 1234.56
+        s = s.replace(".", "").replace(",", ".")
+    else:
+        s = s.replace(",", ".")
+    try:
+        return float(s)
+    except ValueError:
+        return None
 
-    De export van Amundi heeft een kop van enkele regels boven de eigenlijke tabel,
-    dus we zoeken zelf de kolom met datums en die met bedragen in plaats van een vaste
-    positie aan te nemen — dan blijft het werken als de export er volgend jaar anders
-    uitziet.
+
+def _nav_date(cell):
+    """Alleen echte datums, nooit een getal.
+
+    Een NAV van 13,46 mag niet als tijdstempel gelezen worden, en een jaartal in een
+    kolom evenmin als 1 januari. Daarom komen alleen datumobjecten en datumteksten in
+    aanmerking.
     """
-    if str(getattr(upload, "name", "")).lower().endswith(".csv"):
-        raw = pd.read_csv(upload, header=None)
+    if isinstance(cell, (datetime, date)):
+        d = cell.date() if isinstance(cell, datetime) else cell
+        return d.isoformat() if 1990 < d.year < 2100 else None
+    if not isinstance(cell, str):
+        return None
+    s = cell.strip()
+    if len(s) < 6:
+        return None
+    try:
+        # Een ISO-datum eerst: die is ondubbelzinnig, en 'dag eerst' erop loslaten
+        # levert alleen een waarschuwing op. Pas daarna de Europese schrijfwijze.
+        ts = (pd.to_datetime(s, format="%Y-%m-%d", errors="raise") if s[:4].isdigit()
+              and len(s) >= 10 and s[4] in "-/" else
+              pd.to_datetime(s, errors="raise", dayfirst=True))
+    except Exception:
+        return None
+    return ts.date().isoformat() if 1990 < ts.year < 2100 else None
+
+
+def _scan_official_nav(upload) -> list[dict]:
+    """Inventariseer een NAV-export zonder er iets van te bewaren.
+
+    De export van een beheerder bevat vaak ALLE fondsen van je plan onder elkaar, elk
+    met zijn eigen waarderingsdata. Blind inlezen levert dan meerdere waarden per maand
+    op, waarvan er maar één bij dit fonds hoort. Daarom leest de app eerst wat er in
+    het bestand zit en laat ze jou kiezen welke regels je bedoelt.
+
+    Per regel: de datum, de tekst die erbij staat (fondsnaam, ISIN — de 'groep'), en
+    alle getallen met hun kolomnummer, zodat je ook de juiste kolom kunt aanwijzen.
+    """
+    name = str(getattr(upload, "name", "")).lower()
+    if name.endswith(".csv"):
+        # Het scheidingsteken laten herkennen: een Franse export gebruikt vaak een
+        # kommapunt, juist omdát de komma daar het decimaalteken is.
+        try:
+            raw = pd.read_csv(upload, header=None, dtype=str, sep=None,
+                              engine="python", on_bad_lines="skip")
+        except Exception:
+            upload.seek(0)
+            raw = pd.read_csv(upload, header=None, dtype=str, on_bad_lines="skip")
     else:
         raw = pd.read_excel(upload, header=None)
-    n = 0
+    out = []
     for _, row in raw.iterrows():
-        d = v = None
-        for cell in row:
-            if d is None:
-                try:
-                    ts = pd.to_datetime(cell, errors="raise")
-                    if 1990 < ts.year < 2100:
-                        d = ts.date().isoformat()
-                        continue
-                except Exception:
-                    pass
-            if d is not None and v is None and isinstance(cell, (int, float)) and cell == cell:
-                v = float(cell)
-        if d and v and v > 0:
-            db.save_official_nav(ticker, d, v, source="import")
+        cells = list(row)
+        d = None
+        for cell in cells:
+            d = _nav_date(cell)
+            if d:
+                break
+        if not d:
+            continue
+        values, labels = {}, []
+        for i, cell in enumerate(cells):
+            if _nav_date(cell):
+                continue
+            v = _nav_number(cell)
+            if v is not None:
+                values[i] = v
+            elif isinstance(cell, str) and cell.strip():
+                labels.append(cell.strip())
+        if values:
+            out.append({"date": d, "group": " · ".join(labels[:3]), "values": values})
+    return out
+
+
+def _import_official_nav(ticker: str, rows: list[dict], column: int | None = None) -> int:
+    """Bewaar de geselecteerde regels als officiële NAV van dit fonds."""
+    n = 0
+    for r in rows:
+        vals = r["values"]
+        v = vals.get(column) if column is not None else None
+        if v is None:
+            v = next((vals[k] for k in sorted(vals) if vals[k] > 0), None)
+        if v is not None and v > 0:
+            db.save_official_nav(ticker, r["date"], v, source="import")
             n += 1
     return n
 
@@ -1509,9 +1585,67 @@ def page_assets():
                              "elders iets niet.")
                     _up = st.file_uploader("NAV-export (.xlsx)", type=["xlsx", "xls", "csv"],
                                            key=_f_key("fcpe_nav_up"))
-                    if _up is not None and st.button("📥 Inlezen en kalibreren", key="fcpe_cal"):
+                    _sel_rows, _sel_col = [], None
+                    if _up is not None:
                         try:
-                            _n = _import_official_nav(f_sel, _up)
+                            _scan = _scan_official_nav(_up)
+                        except Exception as exc:
+                            _scan = []
+                            st.error(f"Bestand niet leesbaar: {exc}")
+                        if not _scan:
+                            st.warning("Geen regels met een datum én een bedrag gevonden.")
+                        else:
+                            _groups = {}
+                            for r in _scan:
+                                _groups.setdefault(r["group"], []).append(r)
+                            if len(_groups) > 1:
+                                # Een export van de beheerder bevat vaak ALLE fondsen van
+                                # je plan. Ze allemaal inlezen geeft meerdere waarden per
+                                # maand, waarvan er maar één bij dit fonds hoort.
+                                st.info(f"Dit bestand bevat **{len(_groups)}** reeksen — "
+                                        "waarschijnlijk meerdere fondsen van je plan. Kies "
+                                        "welke bij dit fonds horen.")
+                                _hint = [k for k in _groups
+                                         if f_sel.lower() in k.lower()
+                                         or (a_names.get(f_sel, "").lower() in k.lower()
+                                             and a_names.get(f_sel))]
+                                _pick = st.multiselect(
+                                    "Reeksen die bij dit fonds horen",
+                                    sorted(_groups, key=lambda k: -len(_groups[k])),
+                                    default=_hint or None,
+                                    format_func=lambda k: (f"{k or '(zonder omschrijving)'} — "
+                                                           f"{len(_groups[k])} regels, "
+                                                           f"{_groups[k][0]['date']} t/m "
+                                                           f"{_groups[k][-1]['date']}"),
+                                    key=_f_key("fcpe_nav_groups"))
+                                _sel_rows = [r for k in _pick for r in _groups[k]]
+                            else:
+                                _sel_rows = _scan
+                            _cols = sorted({c for r in _sel_rows for c in r["values"]})
+                            if len(_cols) > 1:
+                                _sel_col = st.selectbox(
+                                    "Welke kolom is de NAV?", _cols,
+                                    format_func=lambda c: (
+                                        f"kolom {c + 1} — bv. "
+                                        + ", ".join(f"{r['values'][c]:g}" for r in _sel_rows[:3]
+                                                    if c in r["values"])),
+                                    key=_f_key("fcpe_nav_col"))
+                            if _sel_rows:
+                                _months = [r["date"][:7] for r in _sel_rows]
+                                _dbl = sorted({m for m in _months if _months.count(m) > 1})
+                                st.caption(f"➡️ **{len(_sel_rows)}** regels, "
+                                           f"{_sel_rows[0]['date']} t/m {_sel_rows[-1]['date']}.")
+                                if _dbl:
+                                    st.warning(
+                                        f"⚠️ In {len(_dbl)} maand(en) staan er meerdere "
+                                        f"waarden ({', '.join(_dbl[:4])}"
+                                        + (" …" if len(_dbl) > 4 else "")
+                                        + "). Een fonds heeft één NAV per waarderingsdag, dus "
+                                          "waarschijnlijk zit er nog een tweede fonds bij je "
+                                          "selectie. Kijk de keuze hierboven na.")
+                    if _sel_rows and st.button("📥 Inlezen en kalibreren", key="fcpe_cal"):
+                        try:
+                            _n = _import_official_nav(f_sel, _sel_rows, _sel_col)
                             st.success(f"✅ {_n} NAV-regel(s) ingelezen.")
                             _off = {r["date"]: r["nav"] for r in db.get_official_nav(f_sel)}
                             _rdd = db.get_fcpe_readings(f_sel)
@@ -1569,7 +1703,28 @@ def page_assets():
                             st.caption("Ligt dit dicht bij nul, dan kloppen je parameters. "
                                        "Wijkt het stelselmatig af, dan is de officiële NAV de "
                                        "waarheid en niet de berekening.")
+                            # Twee NAV's in dezelfde maand kan niet: een fonds heeft één
+                            # waarde per waarderingsdag. Staan ze er toch, dan zijn er
+                            # regels van een ANDER fonds mee ingelezen, en die trekken de
+                            # kalibratie scheef.
+                            _m = [r["Datum"][:7] for r in _cmp_rows]
+                            _dm = sorted({x for x in _m if _m.count(x) > 1})
+                            if _dm:
+                                st.warning(
+                                    f"⚠️ In {len(_dm)} maand(en) staan er meerdere NAV's "
+                                    f"({', '.join(_dm[:4])}"
+                                    + (" …" if len(_dm) > 4 else "")
+                                    + "). Dat kan niet voor één fonds: er zijn regels van een "
+                                      "ander fonds mee ingelezen. Wis de reeks hieronder en "
+                                      "lees ze opnieuw in, nu met de juiste reeks aangevinkt. "
+                                      "Zolang die regels erin zitten, is de gevonden "
+                                      "referentieprijs onbruikbaar.")
                             show_df(_cd, width="stretch", hide_index=True, height=240)
+                            if st.button(f"🗑️ Alle {len(_offr)} ingelezen NAV-regels wissen",
+                                         key=_f_key("fcpe_nav_clear")):
+                                _n = db.delete_official_nav(f_sel)
+                                st.success(f"✅ {_n} regel(s) gewist. Laad de export opnieuw op.")
+                                st.rerun()
 
 
     if _asec == "🔀 Splitsingen":

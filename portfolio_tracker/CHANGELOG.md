@@ -2,6 +2,48 @@
 
 Alle noemenswaardige wijzigingen aan de Portfolio Tracker add-on.
 
+## 1.8.12
+### 📥 De NAV-export wordt niet meer blind ingelezen
+
+Een export van de beheerder bevat meestal ALLE fondsen van je plan onder elkaar,
+elk met zijn eigen waarderingsdata. De inlezer nam per regel de eerste datum en
+het eerste getal dat hij tegenkwam, zonder te kijken bij welk fonds die regel
+hoorde. Alles belandde daardoor bij één fonds: meerdere NAV-waarden per maand,
+waarvan er maar één klopte. De kalibratie probeerde vervolgens een formule door
+punten van drie verschillende fondsen te leggen, wat een referentieprijs oplevert
+die nergens op slaat.
+
+De app leest nu eerst wat er in het bestand zit en toont wat ze vindt:
+
+- **Welke reeksen** erin zitten, met per reeks het aantal regels en de
+  datumperiode. Bevat het bestand er meer dan één, dan kies je zelf welke bij dit
+  fonds horen; reeksen waarvan de omschrijving het ticker of de naam van je fonds
+  bevat, staan al aangevinkt.
+- **Welke kolom de NAV is**, als er meerdere getalkolommen zijn — met een paar
+  voorbeeldwaarden erbij, zodat je het bedrag herkent en niet per ongeluk het
+  aantal deelbewijzen inleest.
+- **Hoeveel regels** je gaat inlezen en over welke periode, met een waarschuwing
+  als er nog steeds meerdere waarden in dezelfde maand zitten.
+
+Ook het lezen zelf is steviger: het scheidingsteken van een csv wordt herkend
+(een Franse export gebruikt vaak een kommapunt, juist omdát de komma het
+decimaalteken is), bedragen als "1.234,56" worden correct gelezen, en een getal
+kan niet langer per ongeluk als datum geïnterpreteerd worden.
+
+### 🗑️ Ingelezen NAV wissen
+
+Onder de vergelijkingstabel staat een knop om de volledige ingelezen reeks van
+dit fonds te wissen. Zonder die knop was een verkeerd ingelezen bestand alleen
+via een herstel uit back-up weg te krijgen.
+
+### ⚠️ Meerdere NAV's in dezelfde maand worden gemeld
+
+De vergelijkingstabel controleert nu of er maanden zijn met meer dan één
+officiële NAV. Dat kan voor één fonds niet, dus het betekent dat er regels van
+een ander fonds tussen zitten. De app zegt dat met zoveel woorden, met de
+betrokken maanden erbij, en waarschuwt dat de gekalibreerde referentieprijs
+zolang onbruikbaar is.
+
 ## 1.8.11
 ### ↩️ Vorige parameters terugzetten
 

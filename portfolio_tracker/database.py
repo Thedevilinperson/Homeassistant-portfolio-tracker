@@ -3179,6 +3179,25 @@ def get_official_nav(ticker: str) -> list[dict]:
              "source": r["source"]} for r in rows]
 
 
+def delete_official_nav(ticker: str, nav_date: str | None = None) -> int:
+    """Wis de ingelezen NAV van een fonds: één datum, of alles.
+
+    Nodig omdat een export van de beheerder vaak MEERDERE fondsen bevat. Werden er
+    per ongeluk regels van een ander fonds ingelezen, dan moet je die weer kwijt
+    kunnen zonder de hele database terug te zetten.
+    """
+    conn = get_connection()
+    if nav_date:
+        cur = conn.execute("DELETE FROM official_nav WHERE ticker=? AND nav_date=?",
+                           (ticker.upper(), str(nav_date)[:10]))
+    else:
+        cur = conn.execute("DELETE FROM official_nav WHERE ticker=?", (ticker.upper(),))
+    n = cur.rowcount or 0
+    conn.commit()
+    conn.close()
+    return n
+
+
 def latest_official_nav(ticker: str) -> dict | None:
     rows = get_official_nav(ticker)
     return rows[-1] if rows else None
