@@ -2,6 +2,29 @@
 
 Alle noemenswaardige wijzigingen aan de Portfolio Tracker add-on.
 
+## 1.8.14
+### ⚠️ Posities zonder koers verdwenen stilzwijgend uit je totalen
+
+Een positie waarvoor geen koers bekend is, telde als niets. Ze stond wel in de
+tabel, met een lege kolom Koers en een lege Huidige waarde, maar in "Totale
+waarde", op het dashboard en in de blootstelling ontbrak ze volledig — zonder
+enige melding. Bij een gewoon aandeel is dat een tijdelijke hapering. Bij een
+werkgeversfonds is het de normale toestand: een QS-ISIN noteert nergens, dus
+zolang er geen koppeling ingesteld is, blijft die koers uit, hoe vaak je ook
+ververst.
+
+Twee plaatsen zeggen dit nu:
+
+- **💼 Portefeuille** meldt onder de totalen hoeveel posities zonder koers er
+  zijn, welke dat zijn, en dat ze niet meegeteld zijn.
+- **🏢 Activa → 🔗 Koppelingen** toont bovenaan de posities die je wél bezit maar
+  die noch een koers noch een koppeling hebben, met de suggestie om ze te
+  koppelen. Voor een 1:1-fonds (Classic, Liberty) is dat basis 0, multiplicator
+  1 en referentie 0.
+
+De lijst gebruikt dezelfde FIFO-berekening als het dashboard, zodat hij niet uit
+de pas kan lopen met wat je elders ziet.
+
 ## 1.8.13
 ### 🎯 Kalibreren werkt nu ook als de NAV op andere dagen gepubliceerd wordt
 

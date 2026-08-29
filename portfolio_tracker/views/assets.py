@@ -1015,6 +1015,34 @@ def page_assets():
                        "instellingen te wijzigen — de panelen openen meteen op je gekoppelde "
                        "fonds, niet op een willekeurig activum.")
 
+        # Posities die je wél bezit maar waarvoor geen koers bestaat en geen koppeling
+        # ingesteld is. Die tellen voor niets mee in je totalen — en bij een fonds dat
+        # nergens noteert blijft dat zo tot je het koppelt, hoe vaak je ook ververst.
+        # Posities die je wél bezit maar waarvoor geen koers bestaat en geen koppeling
+        # ingesteld is. Die tellen voor niets mee in je totalen — en bij een fonds dat
+        # nergens noteert blijft dat zo tot je het koppelt, hoe vaak je ook ververst.
+        # Dezelfde FIFO-bron als het dashboard, zodat de lijst niet uiteen kan lopen.
+        try:
+            _pos, _ = tax_mod.build_fifo_positions(db.get_transactions())
+            _held = {t for t, p in (_pos or {}).items()
+                     if float(p.get("total_quantity") or 0) > 1e-6}
+        except Exception as _exc:
+            logger.warning(f"koppelingen: posities bepalen faalde: {_exc}")
+            _held = set()
+        _linked_all = {a["ticker"] for a in assets
+                       if (a.get("pricing_mode") or "auto") in ("derived", "fcpe")}
+        _prices_now = md.get_prices_for_tickers(sorted(_held)) if _held else {}
+        _orphan = sorted(t for t in _held
+                         if t not in _linked_all and not (_prices_now.get(t) or {}).get("price"))
+        if _orphan:
+            st.warning(
+                f"⚠️ **{len(_orphan)} positie(s) zonder koers én zonder koppeling**: "
+                + ", ".join(f"**{asset_label(t, a_names)}**" for t in _orphan)
+                + ". Die tellen voor niets mee in je portefeuillewaarde en op het "
+                  "dashboard. Gaat het om een werkgeversfonds, koppel het dan hieronder "
+                  "aan zijn onderliggende aandeel — een 1:1-fonds (Classic, Liberty) met "
+                  "basis 0, multiplicator 1 en referentie 0.")
+
         with st.expander("🧮 Afgeleide koers — koppel aan een onderliggende waarde (FCPE / werkgeversfondsen)"):
             st.caption(
                 "Voor effecten **zonder eigen publieke notering** waarvan de waarde een formule "

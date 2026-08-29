@@ -281,6 +281,24 @@ def page_portfolio():
         st.caption(f"💶 **Beschikbare cash** (deze selectie): **{eur(_cash)}** — beheer stortingen en "
                    "opnames via de **💶 Cash**-pagina.")
 
+        # Een positie zonder koers telt voor niets mee in het totaal. Dat gebeurde
+        # stilzwijgend, waardoor de portefeuille kleiner leek dan ze is — en juist bij
+        # werkgeversfondsen, die nergens noteren, is dat de normale toestand zolang er
+        # geen koppeling ingesteld is.
+        _no_price = [t for t, p in pv.items()
+                     if (p.get("quantity") or 0) > 0 and not p.get("current_value")]
+        if _no_price:
+            _nm = asset_name_map()
+            st.warning(
+                f"⚠️ **{len(_no_price)} positie(s) zonder koers** tellen niet mee in de "
+                f"totale waarde hierboven: "
+                + ", ".join(f"**{asset_label(t, _nm)}**" for t in _no_price[:6])
+                + (" …" if len(_no_price) > 6 else "")
+                + ". Gaat het om een werkgeversfonds of een ander effect zonder eigen "
+                  "notering, stel dan een koppeling in via **🏢 Activa → 🔗 Koppelingen**. "
+                  "Anders helpt `🔬 Bronnen diagnose` op de Activa-pagina, of stel een "
+                  "handmatige koers in.")
+
     def render_realized():
         st.subheader("📊 Gerealiseerde meer-/minwaarden (historiek)")
         if acct:

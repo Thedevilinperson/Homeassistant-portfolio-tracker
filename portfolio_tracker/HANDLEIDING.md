@@ -1,6 +1,6 @@
 # Portfolio Tracker - Handleiding
 
-Versie 1.8.13
+Versie 1.8.14
 
 ---
 
@@ -289,6 +289,15 @@ nauwkeuriger zodra ze correct ingesteld is. De lineaire methode is geen slechter
 versie van de fondsformule, maar de juiste methode voor een ander soort product — voor
 een 1:1-fonds is ze exact.
 
+**Een fonds zonder koppeling telt voor niets mee.** Bestaat er geen koers, dan draagt de
+positie nul bij aan je portefeuillewaarde, aan het dashboard en aan de blootstelling.
+Ze staat wel in de tabel, met een lege kolom Koers. Bij een werkgeversfonds is dat de
+normale toestand zolang je het niet gekoppeld hebt: een QS-ISIN noteert nergens, dus
+ververs je zoveel je wil zonder resultaat. De portefeuillepagina meldt onder de totalen
+welke posities zonder koers zitten, en het overzicht bovenaan `🔗 Koppelingen` toont
+welke daarvan nog geen koppeling hebben. Heb je meerdere fondsen uit hetzelfde plan, ga
+dan even af of ze er allemaal in staan — één vergeten fonds valt niet op in een totaal.
+
 **Meer dan één gekoppeld fonds.** Heb je fondsen van verschillende jaargangen naast
 elkaar, houd dan in de gaten welk fonds er in de keuzelijst bovenaan het paneel staat:
 alle velden eronder horen bij dát fonds, en `💾 Opslaan en activeren` schrijft ze daar
@@ -543,6 +552,7 @@ verklaren de meeste keuzes hierboven:
 | Er staan twee NAV's per maand in de vergelijking | Er zijn regels van een ander fonds mee ingelezen | wis de reeks en lees ze opnieuw in met de juiste selectie |
 | De berekende waarde is een tijd lang exact de inschrijvingsprijs | De aanvangsdatum ligt ná die periode | controleer de Date de Commencement |
 | Het fonds heeft helemaal geen koers | De onderliggende waarde geeft er geen | kijk bij het onderliggende activum, niet bij het fonds |
+| Een fonds staat in de tabel maar zonder waarde | Er is geen koers en geen koppeling ingesteld | koppel het via 🔗 Koppelingen |
 | Het fonds ontbreekt in de grafiek op 📈 Evolutie | De onderliggende waarde levert geen historische reeks | kijk bij het onderliggende activum, niet bij het fonds |
 | De waarnemingen lijken van een ander fonds te komen | De parameters in de velden horen bij een ander fonds | controleer welk fonds er in de keuzelijst staat |
 
