@@ -1,6 +1,6 @@
 # Portfolio Tracker - Handleiding
 
-Versie 1.8.9
+Versie 1.8.11
 
 ---
 
@@ -289,6 +289,22 @@ nauwkeuriger zodra ze correct ingesteld is. De lineaire methode is geen slechter
 versie van de fondsformule, maar de juiste methode voor een ander soort product — voor
 een 1:1-fonds is ze exact.
 
+**Meer dan één gekoppeld fonds.** Heb je fondsen van verschillende jaargangen naast
+elkaar, houd dan in de gaten welk fonds er in de keuzelijst bovenaan het paneel staat:
+alle velden eronder horen bij dát fonds, en `💾 Opslaan en activeren` schrijft ze daar
+weg. Elke jaargang heeft een eigen α, referentieprijs, inschrijvingsprijs,
+aanvangsdatum, eindvervaldag en eerste waarnemingsmaand — er is geen enkel getal dat je
+zomaar van de ene jaargang naar de andere kunt overnemen. Kies je een fonds dat nog niet
+ingesteld is, dan zegt de app dat erbij: de waarden die je dan ziet zijn voorbeelden en
+geen gegevens.
+
+De waarnemingen zelf worden per fonds apart bewaard, dus ze kunnen niet van het ene
+fonds naar het andere overlopen. Valt er toch een bewaarde waarneming buiten de data die
+uit de ingevulde parameters volgen, dan meldt de app dat en biedt ze aan precies die
+waarnemingen te verwijderen. Dat gebeurt bijvoorbeeld als je de eerste waarnemingsmaand
+achteraf corrigeert: de oude reeks blijft dan staan en zou anders stilzwijgend
+meetellen in het gemiddelde.
+
 **De lineaire afgeleide koers.** De formule is:
 
     koers = basis + multiplicator × (koers onderliggend − referentiekoers)
@@ -330,6 +346,32 @@ deelbewijs (tien aandelen × 10 procent × dividend per aandeel), anders loopt d
 berekende waarde vanaf de eerste majoration blijvend achter. Voor Link Multiple BEL
 2022 is dat 1,48 euro in april 2025 en 1,35 euro in mei 2026; de volgende wordt in mei
 2027 verwacht.
+
+**De majoraties invullen, of laten voorstellen.** Je kunt de regels met de hand
+intypen als `JJJJ-MM-DD = bedrag per deelbewijs`, of ze laten afleiden uit de
+dividendhistoriek van de onderliggende waarde. Dat tweede zit onder
+`🌐 Majoraties voorstellen uit de dividendhistoriek`: de app haalt de uitkeringen op en
+rekent per stuk `aandelen per deelbewijs × percentage × dividend per aandeel` (standaard
+10 × 10 procent). Ze bepaalt zelf vanaf welk jaar er recht op bestaat — twee volle
+kalenderjaren op naam, dus voor een fonds dat op 22 december 2022 begint is dat het
+dividend van 2025, en voor een fonds van februari 2024 dat van 2027.
+
+Het resultaat is een tabel, geen automatische invulling. Per regel zie je de ex-datum,
+het dividend per aandeel, het berekende bedrag, en of die datum al ingevuld staat: 🆕
+nieuw, ✅ gelijk of ⚠️ wijkt af. Alleen de nieuwe regels kunnen met één knop toegevoegd
+worden. Wat jij al ingevuld hebt, wordt nooit aangepast — een koersdatabank weet niet
+welke uitkeringen effectief in aanmerking kwamen (een interimdividend, een uitkering in
+stukken, een ex-datum die een dag verschilt van de betaaldatum van de beheerder), en
+alleen de afrekening van de beheerder weet dat wel. Een ⚠️ is dus een signaal om na te
+kijken, niet om jouw cijfer te vervangen.
+
+**Een vergissing terugdraaien.** Elke opslag bewaart de parameterset die er stond. Ging
+er iets mis — het verkeerde fonds geselecteerd, een parameter verkeerd overgetypt — dan
+staat onder de knoppen wanneer die vorige set bewaard is en welke kernparameters
+verschillen, met `↩️ Vorige parameters terugzetten` ernaast. Het terugzetten is zelf ook
+omkeerbaar, zodat je heen en weer kunt tot je zeker bent. Alleen de laatste stap wordt
+bewaard; voor iets van langer geleden is de back-up van vóór die bewerking nodig
+(`⚙️ Instellingen → 🗃️ Data → 💾 Back-up en herstel`).
 
 **Waarom een maandgemiddelde tóch elke dag beweegt.** Dit is de vraag die het vaakst
 terugkomt: als de waarde op zestig maandwaarnemingen berust, waarom verandert ze dan
@@ -479,10 +521,12 @@ verklaren de meeste keuzes hierboven:
 | De waarde beweegt nauwelijks nog | Normaal: er staan weinig waarnemingen meer open | kijk naar de gevoeligheid in het paneel |
 | De waarde beweegt helemaal niet bij een koersbeweging | Het rendement vormt de bodem, of alle waarnemingen liggen vast | het paneel toont welke van de twee wint |
 | Melding "🩺 … waarneming(en) bijgewerkt" | Er zat een niet-definitieve koers in de reeks | kalibreer je parameters opnieuw |
-| De berekende waarde loopt stelselmatig achter | Een majoration ontbreekt | vul ze in en kalibreer opnieuw |
+| De berekende waarde loopt stelselmatig achter | Een majoration ontbreekt | laat ze voorstellen uit de dividendhistoriek en kalibreer opnieuw |
+| Je hebt net de verkeerde parameters opgeslagen | Het verkeerde fonds stond geselecteerd | ↩️ Vorige parameters terugzetten |
 | De kalibratie geeft een negatieve inschrijvingsprijs | De reeks bevat de oprichtingsdag niet | exporteer de NAV vanaf de start |
 | Het fonds heeft helemaal geen koers | De onderliggende waarde geeft er geen | kijk bij het onderliggende activum, niet bij het fonds |
 | Het fonds ontbreekt in de grafiek op 📈 Evolutie | De onderliggende waarde levert geen historische reeks | kijk bij het onderliggende activum, niet bij het fonds |
+| De waarnemingen lijken van een ander fonds te komen | De parameters in de velden horen bij een ander fonds | controleer welk fonds er in de keuzelijst staat |
 
 ### 3.11 Werkgeversfondsen (FCPE): stockdividend en blokkering
 

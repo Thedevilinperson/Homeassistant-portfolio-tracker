@@ -50,8 +50,15 @@ __all__ = [
     "market_holidays", "is_trading_day", "previous_trading_day", "reading_dates",
     "reading_value", "part_value",
     "value_series", "compare_with_official", "fit_parameters",
-    "DEFAULT_ANNUAL_RATE",
+    "first_majoration_year", "majoration_proposals",
+    "DEFAULT_ANNUAL_RATE", "DEFAULT_SHARES_PER_PART", "DEFAULT_MAJORATION_RATE",
 ]
+
+# Een deelbewijs van een Link Multiple vertegenwoordigt tien aandelen, en de
+# majoration bedraagt tien procent van het dividend. Beide staan in het reglement en
+# kunnen per jaargang verschillen, dus ze zijn instelbaar.
+DEFAULT_SHARES_PER_PART = 10
+DEFAULT_MAJORATION_RATE = 0.10
 
 DEFAULT_ANNUAL_RATE = 0.015          # 1,5% — het tarief uit de aangehaalde documenten
 
@@ -293,6 +300,77 @@ def value_series(readings, dates, *, spots=None, **params) -> list[dict]:
             res["date"] = dd.isoformat()
             rows.append(res)
     return rows
+
+
+def first_majoration_year(start_date, *, full_years: int = 2) -> int | None:
+    """Het eerste jaar waarin een dividend recht geeft op een majoration.
+
+    De majoration geldt voor aandelen die twee volle kalenderjaren op naam staan.
+    Schrijf je in op 22 december 2022, dan zijn 2023 en 2024 de twee volle jaren en
+    is het dividend van 2025 het eerste met majoration — wat klopt met de eerste
+    majoration die het fonds Link Multiple BEL 2022 effectief uitkeerde (april 2025).
+
+    Valt de aanvang precies op 1 januari, dan is dat jaar zelf al een volledig
+    kalenderjaar en schuift alles een jaar naar voren.
+    """
+    d = _as_date(start_date)
+    if d is None:
+        return None
+    first_full = d.year if (d.month, d.day) == (1, 1) else d.year + 1
+    return first_full + full_years
+
+
+def majoration_proposals(dividends, *, start_date,
+                         shares_per_part: int = DEFAULT_SHARES_PER_PART,
+                         rate: float = DEFAULT_MAJORATION_RATE,
+                         full_years: int = 2, existing=None,
+                         upto=None) -> list[dict]:
+    """Zet een dividendhistoriek om in voorgestelde majoraties per deelbewijs.
+
+        bedrag per deelbewijs = aantal aandelen per deelbewijs × percentage × dividend
+
+    'dividends' is een reeks {'date', 'amount'} met het dividend PER AANDEEL.
+    'existing' zijn de al ingevulde majoraties; elk voorstel krijgt een status mee:
+    'nieuw', 'gelijk' of 'wijkt af'. Bestaande bedragen worden nooit aangepast — dit
+    is een voorstel, geen herberekening. Dat is bewust: een dividendhistoriek zegt
+    niet welke uitkeringen effectief in aanmerking kwamen, en enkel de afrekening van
+    de beheerder doet dat wel.
+    """
+    first_year = first_majoration_year(start_date, full_years=full_years)
+    if first_year is None:
+        return []
+    have = {}
+    for e in (existing or []):
+        d = _as_date(e.get("date") if isinstance(e, dict) else None)
+        if d is not None:
+            try:
+                have[d.isoformat()] = float(e.get("amount"))
+            except (TypeError, ValueError):
+                pass
+    limit = _as_date(upto) or date.today()
+    out = []
+    for e in (dividends or []):
+        d = _as_date(e.get("date") if isinstance(e, dict) else None)
+        if d is None or d.year < first_year or d > limit:
+            continue
+        try:
+            per_share = float(e.get("amount"))
+        except (TypeError, ValueError):
+            continue
+        if per_share <= 0:
+            continue
+        amount = round(shares_per_part * rate * per_share, 4)
+        key = d.isoformat()
+        if key not in have:
+            status = "nieuw"
+        elif abs(have[key] - amount) < 5e-5:
+            status = "gelijk"
+        else:
+            status = "wijkt af"
+        out.append({"date": key, "dividend_per_share": round(per_share, 6),
+                    "amount": amount, "status": status,
+                    "current": have.get(key)})
+    return sorted(out, key=lambda r: r["date"])
 
 
 def compare_with_official(computed: dict, official: dict) -> dict:

@@ -2,6 +2,86 @@
 
 Alle noemenswaardige wijzigingen aan de Portfolio Tracker add-on.
 
+## 1.8.11
+### ↩️ Vorige parameters terugzetten
+
+Elke opslag van een fondsformule bewaart voortaan de set die er stond. Onder de
+knoppen verschijnt dan wanneer die bewaard is en welke kernparameters
+verschillen, met een knop om ze terug te zetten. Zo kost een vergissing — het
+verkeerde fonds geselecteerd, een parameter verkeerd overgetypt — één klik in
+plaats van een herstel uit back-up, waarbij je al je andere werk van die dag
+kwijtspeelt.
+
+Het terugzetten is zelf ook omkeerbaar: de teruggezette set wordt op haar beurt
+de "vorige", zodat je heen en weer kunt tot je zeker bent welke de juiste is.
+Alleen de laatste stap wordt bewaard; dat volstaat voor dit soort vergissing en
+houdt de opslag klein.
+
+Let op: dit werkt vanaf deze versie. Een overschrijving van vóór 1.8.11 kan de
+app niet terughalen — daarvoor is de back-up van vóór die bewerking nodig.
+
+### 🌐 Majoraties voorstellen uit de dividendhistoriek
+
+Onder het majoratieveld zit een nieuw blok dat de dividendhistoriek van de
+onderliggende waarde ophaalt en daaruit de majorations berekent:
+
+    bedrag per deelbewijs = aandelen per deelbewijs × percentage × dividend per aandeel
+
+Beide factoren zijn instelbaar (standaard 10 aandelen en 10 procent) en worden
+mee opgeslagen. De app bepaalt zelf vanaf welk jaar een dividend recht geeft op
+een majoration: twee volle kalenderjaren op naam, dus voor een fonds dat op 22
+december 2022 begint is dat het dividend van 2025, en voor een fonds van
+februari 2024 dat van 2027. Oudere dividenden worden niet voorgesteld.
+
+Het resultaat is een TABEL, geen automatische invulling. Per regel staat de
+ex-datum, het dividend per aandeel, het berekende bedrag en of die datum al
+ingevuld is: 🆕 nieuw, ✅ gelijk of ⚠️ wijkt af. Enkel de nieuwe regels kunnen met
+één knop toegevoegd worden; wat jij al ingevuld hebt wordt nooit aangepast.
+
+Dat laatste is bewust. Een koersdatabank weet niet welke uitkeringen effectief
+in aanmerking kwamen — een interimdividend, een uitkering in stukken, een
+ex-datum die een dag verschilt van de betaaldatum van de beheerder — en alleen
+de afrekening van de beheerder weet dat wel. Wijkt een voorstel af van jouw
+cijfer, dan is dat een signaal om na te kijken, geen reden om jouw cijfer te
+overschrijven.
+
+## 1.8.10
+### 🐛 Bij het omschakelen naar een ander gekoppeld fonds bleven de parameters van het vorige staan
+
+Wie een tweede fonds koppelde (bijvoorbeeld een Link Multiple van een andere
+jaargang naast die van 2022), kreeg na het omschakelen in de keuzelijst nog
+steeds de parameters van het eerste fonds in de invoervelden te zien: α,
+referentieprijs, inschrijvingsprijs, aanvangsdatum, eerste waarnemingsmaand. Het
+scherm toonde dan een mengeling: de groene balk en de berekende waarde hoorden
+bij het geselecteerde fonds, de velden eronder bij het vorige. En omdat de
+waarnemingsdata uit die velden volgen, leek het nieuwe fonds de waarnemingsreeks
+van het oude over te nemen.
+
+De oorzaak zat in Streamlit: een invoerveld met een vaste sleutel negeert zijn
+'value'-argument zodra er voor die sleutel al iets in de sessietoestand staat.
+Alle velden van beide koppelingspanelen deelden zo'n vaste sleutel, dus ze
+werden bij het wisselen van fonds nooit opnieuw uit de database gevuld. Elk veld
+heeft nu een sleutel per activum.
+
+Dit was niet alleen verwarrend maar ook riskant: op 'Opslaan en activeren'
+drukken schreef de parameters van het ene fonds weg bij het andere. Ga daarom
+na plaatsing je gekoppelde fondsen even na (zie de plaatsingsgids).
+
+### 🆕 Duidelijke waarschuwing bij een fonds zonder parameters
+
+Kies je een fonds dat nog niet ingesteld is, dan meldt de app nu expliciet dat
+de getoonde waarden VOORBEELDEN uit de jaargang 2022 zijn en niet voor een
+andere jaargang gelden. Elke jaargang heeft een eigen α, referentieprijs,
+inschrijvingsprijs, aanvangsdatum, eindvervaldag en eerste waarnemingsmaand.
+
+### 🧹 Waarnemingen die niet bij de reeks horen worden gemeld
+
+Bewaarde waarnemingen waarvan de datum niet voorkomt in de waarnemingsdata die
+uit de ingevulde parameters volgen, horen bij een andere reeks. Ze telden wel
+gewoon mee in de waardering. De app meldt ze nu, met de eerste vijf datums
+erbij, en biedt een knop om precies die waarnemingen te verwijderen. De rest
+blijft staan.
+
 ## 1.8.9
 ### 📈 Gekoppelde fondsen verschijnen nu ook in de grafiek op Evolutie
 

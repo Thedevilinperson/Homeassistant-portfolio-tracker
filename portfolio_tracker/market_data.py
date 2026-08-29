@@ -2566,6 +2566,51 @@ def get_historical_exchange_rate(from_currency: str, on_date: str,
     return get_exchange_rate(from_currency, to_currency)
 
 
+def get_dividend_history(ticker: str, start: str | None = None) -> list[dict]:
+    """Uitgekeerde dividenden PER AANDEEL van de onderliggende waarde, oudste eerst.
+
+    Bedoeld om de majorations van een FCPE-fonds voor te stellen. De datum is de
+    ex-datum zoals Yahoo ze levert; die kan een dag verschillen van de betaaldatum
+    die de beheerder in zijn afrekening zet. Daarom is het resultaat een VOORSTEL dat
+    de gebruiker bevestigt, en geen automatische invulling.
+
+    Voor een gekoppeld activum heeft de vraag geen betekenis: een fonds keert zelf
+    geen dividend per aandeel uit. We volgen dan de onderliggende waarde.
+    """
+    fcfg = _fcpe_cfg(ticker)
+    if fcfg:
+        return get_dividend_history(fcfg["underlying_ticker"], start)
+    dcfg = _derived_cfg(ticker)
+    if dcfg:
+        return get_dividend_history(dcfg["underlying_ticker"], start)
+
+    sym = _yf_symbol(ticker) or ticker
+    key = f"div:{sym}:{start}"
+    entry = _HIST_CACHE.get(key)
+    if entry and (time.time() - entry[0]) < HIST_TTL:
+        return entry[1]
+    try:
+        ser = yf.Ticker(sym).dividends
+    except Exception as exc:
+        logger.warning(f"get_dividend_history({ticker}): {exc}")
+        return []
+    if ser is None or not len(ser):
+        return []
+    out = []
+    lo = (start or "")[:10]
+    for ts, val in ser.items():
+        try:
+            d = ts.date().isoformat()
+            amount = float(val)
+        except Exception:
+            continue
+        if amount > 0 and (not lo or d >= lo):
+            out.append({"date": d, "amount": amount})
+    out.sort(key=lambda r: r["date"])
+    _HIST_CACHE[key] = (time.time(), out)
+    return out
+
+
 def get_price_series(ticker: str, start: str, end: str | None = None,
                      auto_adjust: bool = True, _depth: int = 0):
     """
