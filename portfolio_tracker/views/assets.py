@@ -1647,9 +1647,13 @@ def page_assets():
                         try:
                             _n = _import_official_nav(f_sel, _sel_rows, _sel_col)
                             st.success(f"✅ {_n} NAV-regel(s) ingelezen.")
-                            _off = {r["date"]: r["nav"] for r in db.get_official_nav(f_sel)}
                             _rdd = db.get_fcpe_readings(f_sel)
-                            _spots = {r["date"]: r["close"] for r in _rdd}
+                            _off = {r["date"]: r["nav"] for r in db.get_official_nav(f_sel)}
+                            # De koers van de onderliggende waarde op ELKE NAV-datum,
+                            # niet alleen op de waarnemingsdata: de beheerder waardeert
+                            # niet noodzakelijk op dezelfde dagen als de Relevés.
+                            _spots = md.fcpe_spots(f_sel, sorted(_off),
+                                                   cfg={"underlying_ticker": f_und})
                             _md_now = (db.get_fcpe_params(f_sel) or {}).get("md_entries")
                             fit = fcpe.fit_parameters(
                                 _rdd, _off, n_readings=int(f_n), subscription_price=f_sub,
@@ -1682,8 +1686,30 @@ def page_assets():
                                         "de waarnemingsregel kloppen — een verkeerde "
                                         "referentieprijs is zelden de enige oorzaak.")
                             else:
-                                st.warning("Kalibratie niet mogelijk — haal eerst de "
-                                           "waarnemingen op.")
+                                # Niet meer klakkeloos "haal eerst de waarnemingen op":
+                                # die stonden er vaak wél, en de echte oorzaak was een
+                                # andere. Zeg wat er ontbreekt.
+                                _usable = sorted(set(_off) & set(_spots))
+                                if not _off:
+                                    st.warning("Er is nog geen officiële NAV ingelezen.")
+                                elif not _rdd:
+                                    st.warning("Er zijn nog geen waarnemingen — haal ze "
+                                               "eerst op met de knop hierboven.")
+                                elif len(_usable) < 3:
+                                    st.warning(
+                                        f"Te weinig bruikbare datums: {len(_usable)} van de "
+                                        f"{len(_off)} NAV-regels, en er zijn er minstens 3 "
+                                        f"nodig. Voor de andere kon de slotkoers van "
+                                        f"**{f_und}** niet opgehaald worden. Controleer of "
+                                        "de onderliggende waarde klopt en of de NAV-datums "
+                                        "binnen haar koershistoriek vallen.")
+                                else:
+                                    st.warning(
+                                        "Kalibratie niet gelukt op "
+                                        f"{len(_usable)} datums. Controleer de "
+                                        "aanvangsdatum: valt die ná je NAV-reeks, dan is de "
+                                        "berekende waarde overal de inschrijvingsprijs en "
+                                        "valt er niets te passen.")
                         except Exception as exc:
                             st.error(f"Inlezen mislukt: {exc}")
                     _offr = db.get_official_nav(f_sel)

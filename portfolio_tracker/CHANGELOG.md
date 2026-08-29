@@ -2,6 +2,30 @@
 
 Alle noemenswaardige wijzigingen aan de Portfolio Tracker add-on.
 
+## 1.8.13
+### 🎯 Kalibreren werkt nu ook als de NAV op andere dagen gepubliceerd wordt
+
+De kalibratie gebruikte als koers van de onderliggende waarde uitsluitend de
+bewaarde WAARNEMINGEN. Ze kon daardoor alleen rekenen op datums waarop toevallig
+zowel een waarneming als een gepubliceerde NAV stond. Voor een fonds dat op de
+15e wordt waargenomen maar op de 25e gewaardeerd, overlapte er geen enkele
+datum: de kalibratie haakte af met de melding "haal eerst de waarnemingen op",
+terwijl die er wel degelijk stonden.
+
+De koers wordt nu voor ELKE NAV-datum bepaald. Bestaat er een waarneming op die
+dag, dan krijgt die voorrang — die is gecontroleerd. Voor de rest wordt de
+koershistoriek van de onderliggende waarde gebruikt, zonder dividendcorrectie en
+met de laatste slotkoers op of vóór die dag, zodat een NAV-datum die op een
+feestdag valt niet wegvalt.
+
+### 💬 De melding zegt nu wat er werkelijk ontbreekt
+
+"Haal eerst de waarnemingen op" verscheen bij elke reden waarom de kalibratie
+niet startte. Er staat nu wat er echt aan de hand is: geen NAV ingelezen, geen
+waarnemingen, te weinig bruikbare datums (met hoeveel er bruikbaar zijn en
+waarom), of een aanvangsdatum die ná de NAV-reeks ligt — in dat laatste geval is
+de berekende waarde overal de inschrijvingsprijs en valt er niets te passen.
+
 ## 1.8.12
 ### 📥 De NAV-export wordt niet meer blind ingelezen
 

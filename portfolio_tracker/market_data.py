@@ -2611,6 +2611,46 @@ def get_dividend_history(ticker: str, start: str | None = None) -> list[dict]:
     return out
 
 
+def fcpe_spots(ticker: str, dates, cfg: dict | None = None) -> dict:
+    """Slotkoers van de onderliggende waarde op elk van deze datums.
+
+    Nodig om te kunnen kalibreren tegen de gepubliceerde NAV. De waarnemingen zelf
+    dekken maar twaalf datums per jaar, en de beheerder publiceert zijn NAV niet
+    noodzakelijk op diezelfde dagen — het ene fonds wordt op de 15e gewaardeerd, het
+    andere op de 25e. Vroeger werden alleen de waarnemingsdata gebruikt, waardoor er
+    voor zo'n fonds geen enkel bruikbaar punt overbleef en de kalibratie afhaakte met
+    de melding dat er geen waarnemingen waren — terwijl die er wel degelijk stonden.
+
+    De reeds vastgelegde waarnemingen krijgen voorrang: die zijn gecontroleerd. Voor
+    de overige datums wordt de koershistoriek van de onderliggende waarde gebruikt,
+    zonder dividendcorrectie, met de laatste slotkoers op of vóór die datum (zodat een
+    NAV-datum die op een feestdag valt niet wegvalt).
+    """
+    import database as _db
+    cfg = cfg or _fcpe_cfg(ticker) or {}
+    und = cfg.get("underlying_ticker")
+    want = sorted({str(d)[:10] for d in (dates or [])})
+    out = {r["date"]: float(r["close"]) for r in _db.get_fcpe_readings(ticker)
+           if r["date"] in want}
+    missing = [d for d in want if d not in out]
+    if not missing or not und:
+        return out
+    series = get_price_series(und, min(missing), None, auto_adjust=False)
+    if series is None or not len(series):
+        return out
+    try:
+        idx = [ts.date().isoformat() for ts in series.index]
+        vals = [float(v) for v in series.values]
+    except Exception as exc:
+        logger.warning(f"fcpe_spots({ticker}): reeks onbruikbaar: {exc}")
+        return out
+    for d in missing:
+        prev = [v for k, v in zip(idx, vals) if k <= d and v == v]
+        if prev:
+            out[d] = prev[-1]
+    return out
+
+
 def get_price_series(ticker: str, start: str, end: str | None = None,
                      auto_adjust: bool = True, _depth: int = 0):
     """

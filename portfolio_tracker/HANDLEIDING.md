@@ -1,6 +1,6 @@
 # Portfolio Tracker - Handleiding
 
-Versie 1.8.12
+Versie 1.8.13
 
 ---
 
@@ -467,6 +467,13 @@ en toont hoe goed ze passen. Vier dingen zijn daarbij belangrijk:
   formule door punten van verschillende fondsen — de gevonden referentieprijs is dan
   onbruikbaar. Staan er toch meerdere NAV's in dezelfde maand, dan meldt de
   vergelijkingstabel dat; wis de reeks en lees ze opnieuw in.
+- **De waarderingsdag van de beheerder hoeft niet je waarnemingsdag te zijn.** Het ene
+  fonds wordt op de 15e gewaardeerd, het andere op de 25e, terwijl de Relevés hun eigen
+  data volgen. De app haalt de koers van de onderliggende waarde daarom op voor elke
+  NAV-datum; bestaat er een waarneming op die dag, dan krijgt die voorrang. Wijkt de
+  waarderingsdag van je fonds af van de 15e, controleer dan wel of ook de
+  **waarnemingsdag** in je reglement anders ligt — die twee zijn verschillende dingen,
+  maar ze worden makkelijk verward.
 - **De officiële NAV is de waarheid, niet de berekening.** Wijken de berekende waarden
   stelselmatig af, dan klopt er een parameter niet. De vergelijkingstabel toont het
   verschil per datum, in euro en in procent.
@@ -532,6 +539,7 @@ verklaren de meeste keuzes hierboven:
 | De berekende waarde loopt stelselmatig achter | Een majoration ontbreekt | laat ze voorstellen uit de dividendhistoriek en kalibreer opnieuw |
 | Je hebt net de verkeerde parameters opgeslagen | Het verkeerde fonds stond geselecteerd | ↩️ Vorige parameters terugzetten |
 | De kalibratie geeft een negatieve inschrijvingsprijs | De reeks bevat de oprichtingsdag niet | exporteer de NAV vanaf de start |
+| "Te weinig bruikbare datums" bij het kalibreren | De slotkoers van de onderliggende waarde ontbreekt voor die datums | controleer de onderliggende waarde en haar koershistoriek |
 | Er staan twee NAV's per maand in de vergelijking | Er zijn regels van een ander fonds mee ingelezen | wis de reeks en lees ze opnieuw in met de juiste selectie |
 | De berekende waarde is een tijd lang exact de inschrijvingsprijs | De aanvangsdatum ligt ná die periode | controleer de Date de Commencement |
 | Het fonds heeft helemaal geen koers | De onderliggende waarde geeft er geen | kijk bij het onderliggende activum, niet bij het fonds |
