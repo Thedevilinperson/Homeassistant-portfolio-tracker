@@ -106,7 +106,26 @@ def page_dashboard():
     # 'sinds vorige keer' die zichzelf blijft bijwerken altijd nul tonen. We lezen de
     # vorige stand één keer uit, schrijven meteen de nieuwe weg, en houden de vorige
     # in de sessie vast zolang je in de app blijft.
+    #
+    # De waarde die hier gemeten wordt, is ALTIJD die van de VOLLEDIGE portefeuille —
+    # nooit die van de rekeningfilter die toevallig aanstaat. Anders hing het bedrag
+    # af van de weergave: met één rekening geselecteerd verscheen de aangroei van
+    # alleen die rekening als "je portefeuille ging X vooruit". Erger nog, dat
+    # gefilterde bedrag werd ook als referentie weggeschreven, zodat je bij een
+    # volgend bezoek met een ándere filter een verschil zag dat nergens op sloeg.
+    # Deze meting is een eigenschap van je portefeuille, niet van je schermkeuze.
+    _visit_val = total_val
+    if acct:
+        try:
+            _full_ov, _, _ = get_overview(year, None)
+            _visit_val = _full_ov["total_portfolio_value"]
+        except Exception as exc:
+            logger.warning(f"bezoekblok: totale portefeuillewaarde niet bepaald ({exc})")
+            _visit_val = None
+
     def _visit_block():
+        if _visit_val is None:
+            return
         if not st.session_state.get("_visit_loaded"):
             st.session_state["_visit_prev_at"] = db.get_setting("last_visit_at")
             _pv = db.get_setting("last_visit_value")
@@ -116,7 +135,7 @@ def page_dashboard():
                 st.session_state["_visit_prev_value"] = None
             st.session_state["_visit_loaded"] = True
             db.set_setting("last_visit_at", datetime.now().strftime("%Y-%m-%d %H:%M:%S"))
-            db.set_setting("last_visit_value", str(round(total_val, 2)))
+            db.set_setting("last_visit_value", str(round(_visit_val, 2)))
 
         prev_at = st.session_state.get("_visit_prev_at")
         prev_val = st.session_state.get("_visit_prev_value")
@@ -138,8 +157,8 @@ def page_dashboard():
             ago = f"op {prev_dt.strftime('%d/%m/%Y')}"
 
         bits = []
-        if prev_val is not None and total_val:
-            delta = total_val - prev_val
+        if prev_val is not None and _visit_val:
+            delta = _visit_val - prev_val
             if abs(delta) >= 0.01:
                 pctd = (delta / prev_val * 100) if prev_val else 0.0
                 bits.append(f"je portefeuille ging **{eur(delta)}** "
@@ -161,9 +180,66 @@ def page_dashboard():
                         "gewijzigd")
         if not bits:
             return
-        st.info(f"👋 **Sinds je vorige bezoek** ({ago}): " + ", ".join(bits) + ".")
+        st.info(f"👋 **Sinds je vorige bezoek** ({ago}): " + ", ".join(bits) + "."
+                + ("  \n_Het bedrag slaat op je **volledige** portefeuille, niet op de "
+                   "rekeningfilter die nu aanstaat._" if acct else ""))
 
     _visit_block()
+
+    # ── Aankomende ex-dividenddatums ─────────────────────────────────────────
+    # Zowel voor wat je BEZIT als voor wat de AI VOORSTELT. Bij een positie die je
+    # al hebt, is dit een aankondiging van inkomsten (en van de koersval op de
+    # ex-datum, want die hoort erbij). Bij een suggestie is het een timingsgegeven:
+    # koop je ná de ex-datum, dan mis je die uitkering. De lijst is puur
+    # informatief — er wordt niets geboekt.
+    def _ex_dividend_block():
+        _days = 14
+        _today = datetime.now().strftime("%Y-%m-%d")
+        _until = (datetime.now() + pd.Timedelta(days=_days)).strftime("%Y-%m-%d")
+        _held = sorted(pv.keys())
+        try:
+            _since = (datetime.now() - pd.Timedelta(days=30)).strftime("%Y-%m-%d")
+            _idea = db.get_idea_tickers_since(_since, limit=200)
+        except Exception as exc:
+            logger.info(f"ex-dividendblok: suggesties niet opgehaald ({exc})")
+            _idea = []
+        _all = sorted(set(_held) | set(_idea))
+        if not _all:
+            return
+        try:
+            _cal = db.get_dividend_calendar(_all, since=_today, until=_until)
+        except Exception as exc:
+            logger.warning(f"ex-dividendblok: kalender niet gelezen ({exc})")
+            return
+        if not _cal:
+            return
+        _nm = asset_name_map()
+        _heldset = {t.upper() for t in _held}
+        _lines = []
+        for c in _cal:
+            _tk = c["ticker"].upper()
+            _who = "in portefeuille" if _tk in _heldset else "AI-suggestie"
+            _amt = (f" · {c['amount']:g} {c.get('currency') or ''} per aandeel"
+                    if c.get("amount") else "")
+            _pay = f" · betaalbaar {c['pay_date']}" if c.get("pay_date") else ""
+            _lines.append(f"- **{_nm.get(c['ticker'], c['ticker'])}** ({c['ticker']}) · "
+                          f"ex-datum **{c['ex_date']}** ({_who}){_amt}{_pay}")
+        with st.container(border=True):
+            st.markdown(f"📅 **Ex-dividend binnen {_days} dagen** — "
+                        f"{len(_lines)} aankondiging(en)")
+            st.markdown("\n".join(_lines))
+            st.caption("Vanaf de ex-datum noteert het aandeel zonder recht op het "
+                       "dividend: koop je op of ná die dag, dan krijg je deze uitkering "
+                       "niet meer. De koers zakt op de ex-datum doorgaans ongeveer met "
+                       "het dividendbedrag — er ontstaat dus geen gratis winst door net "
+                       "ervoor te kopen. Bedragen zijn BRUTO per aandeel, vóór "
+                       "voorheffing, en zijn een aankondiging die nog kan wijzigen. "
+                       "De volledige kalender staat op 💰 Dividenden → 📅 Kalender.")
+
+    try:
+        _ex_dividend_block()
+    except Exception as exc:
+        logger.warning(f"ex-dividendblok overgeslagen: {exc}")
 
     # ── KPI-rij ──────────────────────────────────────────────────────────────
     c1, c2, c3, c4, c5 = st.columns(5)
@@ -252,6 +328,9 @@ def page_dashboard():
         # is wat de achtergrondplanner het recentst wegschreef. Zo zie je meteen of een
         # koers (bv. een US-aandeel) écht recent is of al dagen stilstaat.
         _chg = db.get_last_price_changes(list(dpl))
+        # Gemiddeld AI-koersdoel van de laatste 30 dagen (uitschieters eruit) — zodat
+        # je de beweging van vandaag meteen naast het doel op termijn kunt leggen.
+        _ai30 = db.get_ai_target_averages(list(dpl), days=30)
         drows = []
         for t in sorted(dpl, key=lambda x: dpl[x]["pl_eur"], reverse=True):
             d = dpl[t]
@@ -262,6 +341,10 @@ def page_dashboard():
                 _mark = f"📥 {num(d['bought_today'], 4)}"
             elif d["sold_today"]:
                 _mark = f"📤 {num(d['sold_today'], 4)}"
+            _a30 = _ai30.get(t.upper())
+            _up30 = None
+            if _a30 and d["price"]:
+                _up30 = (_a30["value"] - d["price"]) / d["price"] * 100
             drows.append({
                 "": sign_icon(d["pl_eur"]),
                 "Activum":        asset_label(t, names_dp),
@@ -271,6 +354,8 @@ def page_dashboard():
                 "Referentie":     d["ref"],
                 "Koers nu":       d["price"],
                 "Δ vandaag (%)":  d["change_pct"],
+                "🎯 AI 30d":      (_a30["value"] if _a30 else None),
+                "Pot. 30d":       _up30,
                 "Dag-P/L (€)":    d["pl_eur"],
                 "Huidige waarde": pv[t]["current_value"],
                 "Vandaag":        _mark,
@@ -298,6 +383,17 @@ def page_dashboard():
                      "toegerekend van vóór je aankoop."),
             "Koers nu":       st.column_config.NumberColumn(format="%.10g"),
             "Δ vandaag (%)":  st.column_config.NumberColumn(format="%+.10g%%"),
+            "🎯 AI 30d":      st.column_config.NumberColumn(
+                format="%.10g",
+                help="Het GEMIDDELDE koersdoel dat de AI de afgelopen 30 dagen gaf "
+                     "(native munt, dus vergelijkbaar met 'Koers nu'), met de uitschieters "
+                     "eruit: een bepaling die ver van de mediaan van de reeks ligt, telt "
+                     "niet mee. Zo sleurt één wilde waarde het gemiddelde niet mee. Bij "
+                     "minder dan drie bepalingen wordt er niets geweerd. Leeg = geen "
+                     "AI-koersdoelen in die periode."),
+            "Pot. 30d":       st.column_config.NumberColumn(
+                format="%+.10g%%",
+                help="Het 30-daagse AI-gemiddelde ten opzichte van de koers van nu."),
             "Dag-P/L (€)":    st.column_config.NumberColumn(format="€ %+.10g"),
             "Huidige waarde": st.column_config.NumberColumn(format="€ %.10g"),
             "Vandaag":        st.column_config.TextColumn(

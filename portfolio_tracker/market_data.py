@@ -4,7 +4,8 @@ Haalt koersen, wisselkoersen (actueel + historisch) en basisbedrijfsinfo op.
 """
 import time
 import logging
-from datetime import datetime, timedelta
+from datetime import date as date_cls
+from datetime import datetime, timedelta, timezone
 from zoneinfo import ZoneInfo
 
 import yfinance as yf
@@ -2608,6 +2609,323 @@ def get_dividend_history(ticker: str, start: str | None = None) -> list[dict]:
             out.append({"date": d, "amount": amount})
     out.sort(key=lambda r: r["date"])
     _HIST_CACHE[key] = (time.time(), out)
+    return out
+
+
+def _as_date(v) -> str | None:
+    """Wat een gegevensbron als datum teruggeeft, omzetten naar 'JJJJ-MM-DD'.
+
+    Yahoo levert die datums in minstens drie gedaanten: een unix-tijdstempel, een
+    datetime/date, of gewoon een tekst. Ze elk apart afhandelen op de plek waar ze
+    toevallig opduiken, is vragen om een stille fout — vandaar één omzetting.
+    """
+    if v is None:
+        return None
+    try:
+        if isinstance(v, (int, float)) and not isinstance(v, bool):
+            # Yahoo gebruikt seconden sinds 1970; alles onder 1e11 is dus geen ms.
+            if v <= 0:
+                return None
+            return datetime.fromtimestamp(float(v), tz=timezone.utc).date().isoformat()
+        if hasattr(v, "date") and not isinstance(v, str):
+            return v.date().isoformat()
+        if isinstance(v, date_cls):
+            return v.isoformat()
+        s = str(v).strip()[:10]
+        if len(s) == 10 and s[4] == "-" and s[7] == "-":
+            datetime.strptime(s, "%Y-%m-%d")
+            return s
+    except Exception:
+        return None
+    return None
+
+
+def _divcal_yahoo(sym: str, history_years: int, base_ticker: str) -> tuple[list[dict], str]:
+    """Yahoo als basisbron: de volledige uitkeringshistoriek plus de eerstvolgende
+    aankondiging. Geeft (rijen, munt).
+
+    De historiek bevat ELKE uitkering apart, dus ook een interimdividend (acompte)
+    naast het saldodividend — die staan er gewoon als twee lijnen met hun eigen
+    ex-datum. Wat Yahoo NIET geeft, is de betaaldatum van voorbije uitkeringen: die
+    kent het enkel voor de eerstvolgende. Die blijft dus leeg in plaats van geraden.
+    """
+    rows: dict[str, dict] = {}
+    currency = "EUR"
+    try:
+        tkr = yf.Ticker(sym)
+    except Exception as exc:
+        logger.warning(f"_divcal_yahoo({sym}): {exc}")
+        return [], currency
+
+    start = (datetime.now() - timedelta(days=int(history_years) * 366)).strftime("%Y-%m-%d")
+    for h in get_dividend_history(base_ticker, start):
+        rows[h["date"]] = {"ex_date": h["date"], "pay_date": None,
+                           "amount": h["amount"], "currency": currency,
+                           "source": "yahoo", "note": None}
+
+    info = {}
+    try:
+        info = tkr.info or {}
+    except Exception as exc:
+        logger.info(f"_divcal_yahoo({sym}): info niet beschikbaar ({exc})")
+    currency = (info.get("currency") or currency).upper()
+    for r in rows.values():
+        r["currency"] = currency
+
+    cal = {}
+    try:
+        cal = tkr.calendar or {}
+    except Exception as exc:
+        logger.info(f"_divcal_yahoo({sym}): calendar niet beschikbaar ({exc})")
+    if not isinstance(cal, dict):
+        cal = {}
+
+    ex = _as_date(cal.get("Ex-Dividend Date")) or _as_date(info.get("exDividendDate"))
+    pay = _as_date(cal.get("Dividend Date")) or _as_date(info.get("dividendDate"))
+    # Enkel 'lastDividendValue' is een bedrag PER UITKERING. 'dividendRate' is het
+    # jaarbedrag: bij een kwartaaldividend zou dat vier keer te hoog staan, en bij een
+    # aandeel met een acompte en een saldo klopt geen van beide. Een kalender die een
+    # verkeerd bedrag aankondigt is erger dan een kalender zonder bedrag.
+    try:
+        amount = float(info["lastDividendValue"]) if info.get("lastDividendValue") else None
+    except (TypeError, ValueError):
+        amount = None
+    if amount is not None and amount <= 0:
+        amount = None
+    if ex:
+        cur = rows.get(ex, {})
+        rows[ex] = {"ex_date": ex,
+                    "pay_date": pay or cur.get("pay_date"),
+                    "amount": cur.get("amount") or amount,
+                    "currency": currency,
+                    "source": "yahoo",
+                    "note": ("aangekondigd" if ex >= datetime.now().strftime("%Y-%m-%d")
+                             else None)}
+    return list(rows.values()), currency
+
+
+FMP_BASE = "https://financialmodelingprep.com/stable"
+
+
+def fmp_key() -> str:
+    """API-sleutel voor Financial Modeling Prep, of "" als er geen ingesteld is."""
+    try:
+        import database as _db
+        return (_db.get_setting("fmp_api_key", "") or "").strip()
+    except Exception:
+        return ""
+
+
+def _divcal_fmp(symbol: str) -> list[dict]:
+    """Financial Modeling Prep als tweede bron — enkel als er een sleutel ingesteld is.
+
+    Waarom deze bron erbij: Yahoo kent van voorbije uitkeringen alleen de ex-datum.
+    FMP geeft per uitkering ook de BETAALDATUM (paymentDate) en de frequentie, en
+    zet een acompte en een saldo als aparte lijnen met elk hun eigen datums. Dat is
+    precies wat een kalender op betaaldatum nodig heeft.
+
+    Let op: op het gratis plan van FMP zitten alleen Amerikaanse noteringen; voor
+    Euronext-namen heb je een betalend plan nodig. Zonder sleutel wordt deze bron
+    gewoon overgeslagen en blijft alles werken op Yahoo alleen.
+    """
+    key = fmp_key()
+    if not key or not symbol:
+        return []
+    import requests
+    try:
+        resp = requests.get(f"{FMP_BASE}/dividends",
+                            params={"symbol": symbol, "apikey": key}, timeout=12)
+    except Exception as exc:
+        logger.info(f"_divcal_fmp({symbol}): {exc}")
+        return []
+    if resp.status_code != 200:
+        logger.info(f"_divcal_fmp({symbol}): HTTP {resp.status_code}")
+        return []
+    try:
+        data = resp.json()
+    except Exception as exc:
+        logger.info(f"_divcal_fmp({symbol}): antwoord niet leesbaar ({exc})")
+        return []
+    if isinstance(data, dict):
+        data = data.get("historical") or []          # ouder antwoordformaat
+    if not isinstance(data, list):
+        return []
+    out = []
+    for d in data:
+        if not isinstance(d, dict):
+            continue
+        ex = _as_date(d.get("date"))
+        if not ex:
+            continue
+        try:
+            amt = float(d.get("dividend")) if d.get("dividend") is not None else None
+        except (TypeError, ValueError):
+            amt = None
+        _freq = (d.get("frequency") or "").strip()
+        out.append({"ex_date": ex,
+                    "pay_date": _as_date(d.get("paymentDate")),
+                    "amount": amt if (amt and amt > 0) else None,
+                    "currency": None,     # FMP geeft geen munt; die komt van Yahoo
+                    "source": "fmp",
+                    "note": _freq or None})
+    return out
+
+
+def get_dividend_calendar(ticker: str, history_years: int = 3) -> list[dict]:
+    """Uitkeringen van één activum: ex-datum, BETAALDATUM en bruto bedrag per aandeel.
+
+    Levert lijnen {'ex_date', 'pay_date', 'amount', 'currency', 'source', 'note'},
+    oplopend op ex-datum. Elke uitkering staat apart, dus een interimdividend
+    (acompte) en het saldodividend zijn twee lijnen met elk hun eigen datums en
+    bedrag — precies zoals ze ook uitbetaald worden.
+
+    Twee bronnen, in deze volgorde:
+      1. Yahoo — altijd. Volledige historiek van ex-datums en bedragen, plus de
+         eerstevolgende aankondiging met haar betaaldatum.
+      2. Financial Modeling Prep — enkel met een ingestelde sleutel. Vult vooral de
+         BETAALDATUMS aan, die Yahoo van voorbije uitkeringen niet geeft.
+    De bedragen van Yahoo krijgen voorrang (dat zijn de effectief uitgekeerde
+    bedragen in de munt van de notering); FMP vult enkel aan wat ontbreekt.
+
+    Dit is INFORMATIE, geen boeking: brutobedragen per aandeel vóór eender welke
+    voorheffing, en een aankondiging kan nog wijzigen. Wat je effectief ontvangt,
+    boek je zelf in — al kan dat met één klik vanuit de kalender.
+
+    Een gekoppeld fonds (FCPE/afgeleid) keert zelf niets uit: dan volgen we de
+    onderliggende waarde, net zoals get_dividend_history doet.
+    """
+    fcfg = _fcpe_cfg(ticker)
+    if fcfg:
+        return get_dividend_calendar(fcfg["underlying_ticker"], history_years)
+    dcfg = _derived_cfg(ticker)
+    if dcfg:
+        return get_dividend_calendar(dcfg["underlying_ticker"], history_years)
+
+    sym = _yf_symbol(ticker)
+    if not sym:
+        return []
+    key = f"divcal:{sym}:{history_years}:{'k' if fmp_key() else '0'}"
+    entry = _HIST_CACHE.get(key)
+    if entry and (time.time() - entry[0]) < HIST_TTL:
+        return entry[1]
+
+    rows, currency = _divcal_yahoo(sym, history_years, ticker)
+    by_ex = {r["ex_date"]: r for r in rows}
+
+    _lo = (datetime.now() - timedelta(days=int(history_years) * 366)).strftime("%Y-%m-%d")
+    for f in _divcal_fmp(sym):
+        if f["ex_date"] < _lo:
+            continue
+        cur = by_ex.get(f["ex_date"])
+        if cur is None:
+            by_ex[f["ex_date"]] = {**f, "currency": currency}
+            continue
+        # Aanvullen, niet overschrijven: een betaaldatum die Yahoo niet heeft, is pure
+        # winst; een bedrag dat Yahoo wél heeft, is het effectief uitgekeerde bedrag.
+        if not cur.get("pay_date") and f.get("pay_date"):
+            cur["pay_date"] = f["pay_date"]
+            cur["source"] = "yahoo+fmp" if cur.get("source") == "yahoo" else cur["source"]
+        if cur.get("amount") is None and f.get("amount") is not None:
+            cur["amount"] = f["amount"]
+        if not cur.get("note") and f.get("note"):
+            cur["note"] = f["note"]
+
+    out = sorted(by_ex.values(), key=lambda r: r["ex_date"])
+    _HIST_CACHE[key] = (time.time(), out)
+    return out
+
+
+def refresh_dividend_calendar(tickers) -> dict:
+    """Haal de dividendkalender op voor een reeks activa en bewaar ze.
+
+    Geeft {'updated': {ticker: n}, 'empty': [...], 'errors': {ticker: melding}} terug.
+    Een activum zonder gegevens is geen fout: lang niet elk aandeel keert uit, en een
+    tracker die kapitaliseert al helemaal niet.
+    """
+    import database as _db
+    res = {"updated": {}, "empty": [], "errors": {}}
+    for t in tickers or []:
+        try:
+            rows = get_dividend_calendar(t)
+        except Exception as exc:
+            logger.warning(f"refresh_dividend_calendar({t}): {exc}")
+            res["errors"][t] = str(exc)
+            continue
+        if not rows:
+            res["empty"].append(t)
+            continue
+        res["updated"][t] = _db.save_dividend_calendar(t, rows)
+    return res
+
+
+# ── Voortschrijdend gemiddelde (200 dagen) ───────────────────────────────────
+
+def get_moving_average(ticker: str, window: int = 200) -> dict | None:
+    """Voortschrijdend gemiddelde over 'window' BEURSDAGEN, plus de verhouding van
+    de huidige koers tot dat gemiddelde.
+
+    Waarom beursdagen en geen kalenderdagen: het 200-daags gemiddelde is per afspraak
+    200 slotkoersen, niet 200 dagen op de kalender. Er wordt daarom ruim opgehaald
+    (ongeveer anderhalf jaar) en dan pas afgeteld.
+
+    auto_adjust=False: de reeks moet de WERKELIJKE slotkoersen bevatten. Een
+    dividendgecorrigeerde reeks ligt in het verleden lager, waardoor het gemiddelde
+    te laag uitkomt en de verhouding te rooskleurig — precies de fout die je bij een
+    signaallijn niet wil maken.
+
+    Geeft None als er te weinig historiek is. Er wordt NOOIT met een korter venster
+    gerekend zonder dat te zeggen: 'n' vermeldt op hoeveel slotkoersen het gemiddelde
+    berust, en 'volledig' of dat er 'window' waren.
+    """
+    try:
+        w = max(2, int(window))
+    except (TypeError, ValueError):
+        return None
+    start = (datetime.now() - timedelta(days=int(w * 1.9) + 40)).strftime("%Y-%m-%d")
+    try:
+        series = get_price_series(ticker, start, auto_adjust=False)
+    except Exception as exc:
+        logger.warning(f"get_moving_average({ticker}): {exc}")
+        return None
+    if series is None or not len(series):
+        return None
+    try:
+        vals = [float(v) for v in series.values if v == v]
+    except Exception:
+        return None
+    if len(vals) < 2:
+        return None
+    used = vals[-w:]
+    ma = sum(used) / len(used)
+    if ma <= 0:
+        return None
+    last = vals[-1]
+    return {
+        "ticker": (ticker or "").upper(),
+        "ma": round(ma, 6),
+        "price": round(last, 6),
+        "ratio": round(last / ma, 6),
+        "ratio_pct": round((last / ma - 1) * 100, 4),
+        "n": len(used),
+        "window": w,
+        "volledig": len(used) >= w,
+        "laatste_datum": (series.index[-1].date().isoformat()
+                          if hasattr(series.index[-1], "date") else None),
+    }
+
+
+def moving_average_map(tickers, window: int = 200) -> dict:
+    """{TICKER: get_moving_average(...)} voor een reeks activa; stille overslag bij
+    activa zonder bruikbare historiek."""
+    out = {}
+    for t in tickers or []:
+        try:
+            r = get_moving_average(t, window)
+        except Exception as exc:
+            logger.info(f"moving_average_map({t}): {exc}")
+            continue
+        if r:
+            out[str(t).upper()] = r
     return out
 
 

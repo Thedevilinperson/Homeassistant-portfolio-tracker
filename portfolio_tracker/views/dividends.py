@@ -6,32 +6,307 @@ from __future__ import annotations
 import logging
 from datetime import date
 from datetime import datetime
+from datetime import timedelta
 
 import pandas as pd
 import streamlit as st
 
 import belgian_tax as tax_mod
 import database as db
+import market_data as md
 
 from views.common import (
     _cell_eq, _date_or_none, _div_fx_widget, _recompute_dividend_chain,
-    asset_label, asset_name_map, clear_cache, compute_eur,
-    dividend_gross_eur, dividend_net_eur, eur, multiselect_delete, show_df
+    _section_radio, _short_ts, asset_label, asset_name_map, clear_cache,
+    compute_eur, dividend_gross_eur, dividend_net_eur, eur, multiselect_delete,
+    show_df
 )
+from views.common import calendar_rows as common_calendar_rows
 
 logger = logging.getLogger("app.dividends")
 
 
 # ── PAGINA: Dividenden ────────────────────────────────────────────────────────
 
+# ── Dividendkalender ─────────────────────────────────────────────────────────
+
+def _calendar_section(assets):
+    """Overzicht van de uitkeringen per activum: betaaldatum, bedrag en ex-datum.
+
+    De kalender is INFORMATIE en geen boekhouding. Ze wordt daarom nooit automatisch
+    in je dividenden geschreven: een bron die een dag naast de betaaldatum zit of een
+    aangekondigd bedrag dat nog wijzigt, zou anders stilzwijgend in je fiscale keten
+    belanden. Boeken doe je met de knop onderaan, waarna je in het gewone formuier
+    alles nog kan nakijken.
+    """
+    st.subheader("📅 Dividendkalender")
+    st.caption(
+        "Per activum de uitkeringen met hun **betaaldatum** (de dag waarop het geld "
+        "op je rekening komt — dat is ook de datum waarop een dividend geboekt hoort "
+        "te worden), het brutobedrag per aandeel en de **ex-datum**. Vanaf de "
+        "ex-datum noteert het aandeel zonder recht op die uitkering: koop je óp of "
+        "ná die dag, dan krijg je ze niet meer. Elke uitkering staat apart, dus een "
+        "interimdividend (acompte) en het saldo zijn twee lijnen met elk hun eigen "
+        "datums en bedrag.")
+
+    _open, _ = tax_mod.open_position_tickers()
+    names = asset_name_map()
+
+    cc1, cc2 = st.columns([1, 2])
+    with cc1:
+        if st.button("🔄 Kalender ophalen", type="primary", key="divcal_refresh"):
+            _since = (date.today() - timedelta(days=30)).isoformat()
+            _idea = []
+            try:
+                _idea = db.get_idea_tickers_since(_since, limit=100)
+            except Exception as exc:
+                logger.info(f"kalender: suggesties niet opgehaald ({exc})")
+            _targets = sorted(set(_open) | set(_idea))
+            if not _targets:
+                st.warning("Geen open posities of AI-suggesties om op te halen.")
+            else:
+                with st.spinner(f"Dividendgegevens ophalen voor {len(_targets)} activum(s)..."):
+                    res = md.refresh_dividend_calendar(_targets)
+                db.set_setting("divcal_last_refresh",
+                               datetime.now().strftime("%Y-%m-%d %H:%M:%S"))
+                st.success(f"✅ {sum(res['updated'].values())} lijn(en) bijgewerkt voor "
+                           f"{len(res['updated'])} activum(s).")
+                if res["empty"]:
+                    st.info("Geen dividendgegevens gevonden voor: "
+                            + ", ".join(res["empty"])
+                            + ". Dat is normaal voor kapitaliserende trackers en voor "
+                              "aandelen die niet uitkeren.")
+                if res["errors"]:
+                    st.warning("Ophalen mislukt voor: " + ", ".join(res["errors"]))
+                st.rerun()
+    with cc2:
+        _last = db.get_setting("divcal_last_refresh", "")
+        st.caption((f"Laatst opgehaald: {_short_ts(_last)}. " if _last else
+                    "Nog niet opgehaald. ")
+                   + "De planner ververst dit ook dagelijks om 23:40.")
+        if not md.fmp_key():
+            st.caption("ℹ️ Enkel Yahoo als bron: die kent van **voorbije** uitkeringen "
+                       "alleen de ex-datum, niet de betaaldatum. Wil je ook die, stel "
+                       "dan een sleutel van Financial Modeling Prep in bij "
+                       "⚙️ Instellingen → 📊 Gegevensbronnen. Voor Euronext-namen heb "
+                       "je daar een betalend plan voor nodig; zonder sleutel blijft "
+                       "alles gewoon werken.")
+
+    v1, v2 = st.columns([2, 2])
+    _scope = v1.radio("Welke activa", ["In portefeuille", "Alles (ook suggesties)"],
+                      horizontal=True, key="divcal_scope")
+    _period = v2.radio("Periode", ["Komende", "Voorbije", "Alles"],
+                       horizontal=True, key="divcal_period")
+
+    _tickers = sorted(_open) if _scope == "In portefeuille" else None
+    _today = date.today().isoformat()
+    if _period == "Komende":
+        rows = common_calendar_rows(_tickers, since=_today)
+    elif _period == "Voorbije":
+        rows = common_calendar_rows(_tickers, until=_today)
+    else:
+        rows = common_calendar_rows(_tickers)
+
+    if not rows:
+        st.info("Nog geen kalendergegevens voor deze selectie. Klik op "
+                "'🔄 Kalender ophalen' of voeg hieronder zelf een lijn toe.")
+    else:
+        if _period == "Voorbije":
+            rows = list(reversed(rows))
+        SRC = {"yahoo": "Yahoo", "yahoo+fmp": "Yahoo + FMP", "fmp": "FMP",
+               "manual": "✍️ Zelf ingevoerd"}
+        show_df(pd.DataFrame([{
+            "ID":        r["id"],
+            "Activum":   asset_label(r["ticker"], names),
+            "Datum":     r["datum"] + (" (ex)" if r["datum_is_ex"] else ""),
+            "Ex-datum":  r["ex_date"],
+            "Per aandeel": r.get("amount"),
+            "Munt":      r.get("currency") or "",
+            "Aantal":    r["aantal"] or None,
+            "Bruto (geschat)": r["bruto_geschat"],
+            "Geboekt":   "✅" if r["geboekt"] else ("⏳" if r["datum"] > _today else "—"),
+            "Bron":      SRC.get(r.get("source") or "", r.get("source") or ""),
+        } for r in rows]), width="stretch", hide_index=True, column_config={
+            "ID":          st.column_config.NumberColumn(format="%d", width="small"),
+            "Datum":       st.column_config.TextColumn(
+                help="De BETAALDATUM: wanneer het geld op je rekening komt. Staat er "
+                     "'(ex)' bij, dan is de betaaldatum niet gekend en toont de "
+                     "kalender bij benadering de ex-datum."),
+            "Ex-datum":    st.column_config.TextColumn(
+                help="Vanaf deze dag noteert het aandeel zonder recht op deze "
+                     "uitkering. Wie op of ná deze dag koopt, krijgt ze niet."),
+            "Per aandeel": st.column_config.NumberColumn(
+                format="%.10g",
+                help="BRUTO per aandeel, vóór eender welke voorheffing. Een "
+                     "aangekondigd bedrag kan nog wijzigen."),
+            "Aantal":      st.column_config.NumberColumn(
+                format="%.10g",
+                help="Wat je op de ex-datum aanhield (FIFO, over al je rekeningen)."),
+            "Bruto (geschat)": st.column_config.NumberColumn(
+                format="%.10g",
+                help="Aantal x bedrag per aandeel, in de munt van het aandeel. Een "
+                     "raming: je broker rekent af op zijn eigen datums en koersen."),
+            "Geboekt":     st.column_config.TextColumn(
+                help="✅ = er staat al een dividend van dit activum rond die datum. "
+                     "⏳ = nog te ontvangen. — = voorbij én nog niet geboekt."),
+        })
+
+        # ── Boeken: één lijn omzetten in een dividend ────────────────────────
+        st.markdown("##### 📥 Een uitkering boeken")
+        st.caption(
+            "Zet een kalenderlijn om in een dividend. Er wordt niets rechtstreeks "
+            "weggeschreven: het gewone dividendformulier wordt ingevuld met het "
+            "activum, de rekening, de **betaaldatum** en het geschatte brutobedrag "
+            "(aantal x bedrag per aandeel), waarna jij het nakijkt en opslaat. Zo "
+            "blijft de fiscale keten — bronbelasting, roerende voorheffing, "
+            "wisselkoers — onder jouw controle, want wat je broker effectief "
+            "afrekende, weet alleen je afrekening.")
+        _boekbaar = [r for r in rows if r["aantal"] and r.get("amount")]
+        if not _boekbaar:
+            st.caption("Geen lijn met zowel een positie op de ex-datum als een bedrag "
+                       "per aandeel. Vul zo nodig het bedrag zelf aan hieronder.")
+        else:
+            _opts = {}
+            for r in _boekbaar:
+                _opts[r["id"]] = (f"{r['datum']} · {asset_label(r['ticker'], names)} · "
+                                  f"{r['aantal']:g} x {r['amount']:g} "
+                                  f"{r.get('currency') or ''} = "
+                                  f"{r['bruto_geschat']:,.2f} bruto"
+                                  + ("  ✅ al geboekt" if r["geboekt"] else ""))
+            b1, b2 = st.columns([3, 2])
+            _bpick = b1.selectbox("Welke uitkering?", list(_opts.keys()),
+                                  format_func=lambda i: _opts.get(i, str(i)),
+                                  key="divcal_book_pick")
+            _brow = next((r for r in _boekbaar if r["id"] == _bpick), None)
+            _accs = list((_brow or {}).get("per_rekening") or {}) or db.get_accounts()
+            _bacct = b2.selectbox("Op welke rekening?", _accs, key="divcal_book_acct",
+                                  help="De rekening waarop deze uitkering is gestort. "
+                                       "Had je het aandeel op meerdere rekeningen, boek "
+                                       "dan een lijn per rekening — elk met haar eigen "
+                                       "aantal.")
+            if _brow:
+                _qty = (_brow["per_rekening"] or {}).get(_bacct, _brow["aantal"])
+                _bruto = round(_qty * _brow["amount"], 4)
+                st.caption(f"➡️ {_qty:g} stuk(s) x {_brow['amount']:g} "
+                           f"{_brow.get('currency') or ''} = **{_brow.get('currency') or ''} "
+                           f"{_bruto:,.2f} bruto** op {_brow['datum']}"
+                           + ("  ·  ⚠️ de betaaldatum is niet gekend; de ex-datum wordt "
+                              "als datum voorgesteld — pas ze aan naar de datum van je "
+                              "afrekening." if _brow["datum_is_ex"] else ""))
+                if _brow["geboekt"]:
+                    st.warning("⚠️ Er staat al een dividend van dit activum rond deze "
+                               "datum. Boek je opnieuw, dan telt het dividend dubbel — "
+                               "kijk eerst het 📋 Overzicht na.")
+                # Een uitkering die nog moet komen, valt niet te boeken: het geld staat
+                # nog niet op je rekening, en een dividend met een datum in de toekomst
+                # zou je cashsaldo en je fiscale keten vooruitlopen op de werkelijkheid.
+                # (Het datumveld van het formulier gaat om diezelfde reden niet verder
+                # dan vandaag — zonder deze controle werd de betaaldatum daar
+                # stilzwijgend naar vandaag teruggezet.)
+                _toekomst = _brow["datum"] > date.today().isoformat()
+                if _toekomst:
+                    st.info(f"⏳ Deze uitkering is pas betaalbaar op **{_brow['datum']}**. "
+                            "Boeken kan zodra ze op je rekening staat — een dividend "
+                            "met een datum in de toekomst zou je cashsaldo en je "
+                            "aangifte vooruitlopen op de feiten.")
+                if st.button("📥 Boek dit dividend", type="primary",
+                             key="divcal_book_go", disabled=_toekomst):
+                    _ctry = ((db.get_asset(_brow["ticker"]) or {}).get("country")
+                             or "BE").upper()
+                    # Buitenlands aandeel: het brutobedrag is ① (vóór bronbelasting).
+                    # Belgisch: er is geen bronbelasting, dus begint de keten bij ③.
+                    _pre = {"rv_pct": 30.0}
+                    if _ctry != "BE":
+                        _pre["A"] = _bruto
+                    else:
+                        _pre["C"] = _bruto
+                    st.session_state["div_prefill"] = _pre
+                    st.session_state["div_book_prefill"] = {
+                        "ticker": _brow["ticker"],
+                        "account": _bacct,
+                        "datum": _brow["datum"],
+                        "_note": (f"Uit de kalender: {asset_label(_brow['ticker'], names)} "
+                                  f"· {_qty:g} x {_brow['amount']:g} "
+                                  f"{_brow.get('currency') or ''} = "
+                                  f"{_bruto:,.2f} bruto op {_brow['datum']}."),
+                    }
+                    st.session_state["div_amt_nonce"] = \
+                        st.session_state.get("div_amt_nonce", 0) + 1
+                    st.session_state["div_goto_section"] = "📝 Dividend toevoegen"
+                    st.rerun()
+
+    # ── Zelf een lijn toevoegen of verwijderen ───────────────────────────────
+    with st.expander("✍️ Zelf een uitkering toevoegen of corrigeren"):
+        st.caption(
+            "Wat je hier zelf invoert, wordt door een automatische ophaling **nooit "
+            "overschreven**: een aankondiging die je uit het persbericht van de "
+            "vennootschap overneemt, is betrouwbaarder dan wat een gratis "
+            "gegevensbron ervan maakt. Bestaat er al een lijn met dezelfde ex-datum, "
+            "dan wordt die bijgewerkt.")
+        _tk_opts = [a["ticker"] for a in assets]
+        if not _tk_opts:
+            st.caption("Voeg eerst activa toe via 🏢 Activa.")
+        else:
+            mc1, mc2, mc3 = st.columns(3)
+            _mtk = mc1.selectbox("Activum *", _tk_opts, key="divcal_m_tkr",
+                                 format_func=lambda t: asset_label(t, names))
+            _mex = mc2.date_input("Ex-datum *", value=date.today(),
+                                  min_value=date(2000, 1, 1), max_value=date(2100, 12, 31),
+                                  key="divcal_m_ex")
+            _mpay = mc3.date_input("Betaaldatum", value=date.today(),
+                                   min_value=date(2000, 1, 1), max_value=date(2100, 12, 31),
+                                   key="divcal_m_pay")
+            mc4, mc5, mc6 = st.columns(3)
+            _mamt = mc4.number_input("Bruto per aandeel *", min_value=0.0, step=0.01,
+                                     format="%.10g", value=None, key="divcal_m_amt")
+            _mcur = mc5.selectbox("Munt", ["EUR", "USD", "GBP", "CHF"], key="divcal_m_cur")
+            _mnote = mc6.text_input("Notitie", key="divcal_m_note",
+                                    placeholder="bv. acompte / saldo")
+            if st.button("✅ Lijn bewaren", key="divcal_m_save"):
+                if not _mamt or _mamt <= 0:
+                    st.error("Vul een brutobedrag per aandeel in.")
+                else:
+                    db.save_dividend_calendar(_mtk, [{
+                        "ex_date": str(_mex), "pay_date": str(_mpay),
+                        "amount": float(_mamt), "currency": _mcur,
+                        "note": _mnote or None}], source="manual")
+                    st.success(f"✅ Lijn bewaard voor {asset_label(_mtk, names)}.")
+                    st.rerun()
+
+        _all = db.get_dividend_calendar()
+        if _all:
+            _dopts = {r["id"]: (f"#{r['id']} · {asset_label(r['ticker'], names)} · ex "
+                                f"{r['ex_date']}"
+                                + (f" · betaald {r['pay_date']}" if r.get("pay_date") else "")
+                                + (f" · {r['amount']:g} {r.get('currency') or ''}"
+                                   if r.get("amount") else ""))
+                      for r in _all}
+            _sel = st.multiselect("Lijnen verwijderen", list(_dopts.keys()),
+                                  format_func=lambda i: _dopts.get(i, str(i)),
+                                  key="divcal_del_pick")
+            if _sel and st.checkbox(f"Ja, verwijder {len(_sel)} lijn(en)",
+                                    key="divcal_del_conf"):
+                if st.button("🗑️ Verwijderen", key="divcal_del_go"):
+                    for i in _sel:
+                        db.delete_dividend_calendar_entry(i)
+                    st.success(f"✅ {len(_sel)} lijn(en) verwijderd.")
+                    st.rerun()
+
+
 def page_dividends():
     st.title("💰 Dividenden")
 
     assets = db.get_assets()
 
-    _div_section = st.radio(
-        "Weergave", ["📝 Dividend toevoegen", "📋 Overzicht"],
-        key="div_section", horizontal=True, label_visibility="collapsed")
+    # Sprong vanuit de kalender ("boek dit dividend"). Een widget-key mag pas gezet
+    # worden VÓÓR de widget bestaat — vandaar via een vlag en een rerun, en niet
+    # rechtstreeks vanuit de knop zelf.
+    _goto = st.session_state.pop("div_goto_section", None)
+    if _goto:
+        st.session_state["div_section"] = _goto
+
+    _div_section = _section_radio(
+        "div_section", ["📝 Dividend toevoegen", "📋 Overzicht", "📅 Kalender"])
 
     if _div_section == "📝 Dividend toevoegen":
         tickers = [a["ticker"] for a in assets]
@@ -42,6 +317,26 @@ def page_dividends():
         else:
             if st.session_state.get("div_added_msg"):
                 st.success(st.session_state.pop("div_added_msg"))
+
+            # ── Invulling vanuit de kalender ("boek dit dividend") ───────────
+            # Zet de stabiele velden (activum, datum, rekening) klaar VOOR de widgets
+            # bestaan; de bedragen lopen via 'div_prefill' en de nonce, net als bij
+            # de knop 'Vul lege velden in'.
+            _bp = st.session_state.pop("div_book_prefill", None)
+            if _bp:
+                _accs = db.get_accounts()
+                if _bp.get("ticker") in [a["ticker"] for a in assets]:
+                    st.session_state["div_stable_tkr"] = _bp["ticker"]
+                if _bp.get("account") in _accs:
+                    st.session_state["div_stable_acct"] = _bp["account"]
+                try:
+                    st.session_state["div_stable_date"] = date.fromisoformat(
+                        str(_bp["datum"])[:10])
+                except (KeyError, TypeError, ValueError):
+                    pass
+                st.session_state["div_stable_kind"] = "dividend"
+                st.session_state["div_book_note"] = _bp.get("_note", "")
+
             dn = st.session_state.get("div_amt_nonce", 0)
             dk = lambda s: f"div_{s}_{dn}"
             # Stabiele keys (géén nonce): activum/datum/rekening/soort/munt/cash-keuze
@@ -50,6 +345,78 @@ def page_dividends():
             # gebruiken de nonce-key, zodat ze via 'pre' opnieuw ingevuld kunnen worden.
             sk = lambda s: f"div_stable_{s}"
             CURS = ["EUR", "USD", "GBP", "CHF"]
+
+            if st.session_state.get("div_book_note"):
+                st.info("📅 " + st.session_state.pop("div_book_note")
+                        + "  \nKijk de bedragen na en pas aan wat je broker effectief "
+                          "afrekende; er is nog niets opgeslagen.")
+
+            # ── Overnemen van een eerder dividend ────────────────────────────
+            # Een dividend van hetzelfde aandeel verschilt meestal alleen in datum en
+            # bedrag van de vorige keer. Alles opnieuw intikken — rekening, munt,
+            # soort, cash-boeking, RV-tarief — is overbodig werk en elke keer opnieuw
+            # een kans om je te vergissen. Net als bij de transacties staat dit
+            # bewust IN het formulier: een knop die van sectie wisselt, botst met de
+            # manier waarop Streamlit widgetwaarden vasthoudt.
+            _recent_divs = [d for d in db.get_dividends()[:200]
+                            if (d.get("kind") or "dividend") == "dividend"]
+            if _recent_divs:
+                with st.expander("📄 Overnemen van een eerder dividend"):
+                    st.caption(
+                        "Vult het formulier hieronder in met de gegevens van het gekozen "
+                        "dividend: activum, rekening, munt, RV-tarief, de keten ①-④ en de "
+                        "cash-boeking. De datum wordt vandaag en notities worden niet "
+                        "overgenomen. Bedragen mag je uiteraard aanpassen — er wordt niets "
+                        "opgeslagen tot je onderaan op toevoegen klikt.")
+                    _dopts = {}
+                    for d in _recent_divs:
+                        _dopts[d["id"]] = (
+                            f"#{d['id']} · {d['date'][:10]} · "
+                            f"{asset_label(d['ticker'], div_names)} · "
+                            f"netto {eur(dividend_net_eur(d))} · "
+                            f"{d.get('account') or db.DEFAULT_ACCOUNT}")
+                    oc1, oc2 = st.columns([3, 1])
+                    _opick = oc1.selectbox("Welk dividend?", list(_dopts.keys()),
+                                           format_func=lambda i: _dopts.get(i, str(i)),
+                                           key="div_dup_pick")
+                    with oc2:
+                        st.write("")
+                        _keep_amt = st.checkbox("Bedragen ook", value=True,
+                                                key="div_dup_amt",
+                                                help="Uit: enkel activum, rekening, munt en "
+                                                     "instellingen worden overgenomen; de "
+                                                     "bedragen blijven leeg.")
+                    if st.button("📄 Overnemen", key="div_dup_go"):
+                        _src = next((d for d in _recent_divs if d["id"] == _opick), None)
+                        if _src:
+                            _pre = {"rv_pct": 30.0}
+                            _rv = _src.get("belgian_rv_amt")
+                            _c = _src.get("gross_after_wht")
+                            if _rv and _c:
+                                # Het effectief toegepaste RV-tarief overnemen (bv.
+                                # VVPR-bis 15%) in plaats van blind 30% te zetten.
+                                _pre["rv_pct"] = round(_rv / _c * 100, 4)
+                            if _keep_amt:
+                                _pre.update({"A": _src.get("gross_before_wht"),
+                                             "B": _src.get("foreign_wht_amt"),
+                                             "C": _src.get("gross_after_wht"),
+                                             "D": _src.get("net_received")})
+                            _cb = {"gross_before": "① Bruto vóór bronbelasting",
+                                   "gross_after": "③ Bruto na bronbelasting",
+                                   "net": "④ Netto"}.get(_src.get("cash_basis") or "net")
+                            if _cb:
+                                _pre["cash_basis"] = _cb
+                            st.session_state["div_prefill"] = _pre
+                            st.session_state["div_book_prefill"] = {
+                                "ticker": _src.get("ticker"),
+                                "account": _src.get("account") or db.DEFAULT_ACCOUNT,
+                                "datum": str(date.today()),
+                                "_note": (f"Overgenomen van dividend #{_src['id']} "
+                                          f"({_src['date'][:10]} · "
+                                          f"{asset_label(_src.get('ticker'), div_names)})."),
+                            }
+                            st.session_state["div_amt_nonce"] = dn + 1
+                            st.rerun()
 
             _KIND_LBL = {"dividend": "💰 Dividend", "interest": "🏦 Interest",
                          "securities_lending": "🔁 Securities lending"}
@@ -157,292 +524,218 @@ def page_dividends():
                     "lock_until": (str(d_stock_lock) if d_stock_lock else None),
                 }
 
-            mode = st.radio("Invoerwijze", ["Eenvoudig", "Gedetailleerd (bronbelasting + RV)"],
-                            horizontal=True, key="div_mode")
+            a_country = (amap.get(d_ticker, {}).get("country") or "BE").upper()
+            wht_pct_default = tax_mod.get_wht_rates(tax_mod.year_of(str(d_date))).get(a_country, 0.0)
+            is_foreign = a_country != "BE"
+            cname = tax_mod.COUNTRY_NAMES.get(a_country, a_country)
+            st.caption(f"Vul in wat je weet — lege velden worden automatisch berekend en ingevuld. "
+                       f"Land van dit activum: **{cname}**"
+                       + (f" (bronbelasting {wht_pct_default:g}%)." if is_foreign else " (geen buitenlandse bronbelasting)."))
 
-            if mode == "Eenvoudig":
-                sc1, sc2 = st.columns(2)
-                with sc1:
+            # Prefill (gezet door de aanvul-knop) — nonce zorgt voor verse widgets
+            pre = st.session_state.pop("div_prefill", {})
+            rv_pct = st.number_input(
+                "🇧🇪 Roerende voorheffing (%)", min_value=0.0, max_value=100.0,
+                value=float(pre.get("rv_pct", 30.0)), step=0.5, key=dk("rvpct"),
+                help="Belgische roerende voorheffing op dividenden — standaard 30%. Pas aan bij "
+                     "een afwijkend tarief (bv. VVPR-bis 15%). Gebruikt om ④ uit ③ te berekenen "
+                     "(of omgekeerd) wanneer een van beide leeg is.")
+
+            # Munt-widgets keyen op het activum: bij een ander activum verschijnen
+            # verse muntvelden met de juiste standaardmunt.
+            def cur_box_t(col, keyname):
+                return col.selectbox("Munt", cur_opts, index=cur_opts.index(asset_cur),
+                                     key=sk(f"{keyname}_{d_ticker}"), label_visibility="collapsed")
+
+            r1a, r1b = st.columns([3, 1])
+            A = r1a.number_input("① Bruto dividend (vóór buitenlandse bronbelasting)",
+                                 min_value=0.0, step=0.01, format="%.10g",
+                                 value=pre.get("A"), key=dk("A"),
+                                 help="Het brutobedrag vóór eender welke inhouding. Enkel invullen "
+                                      "bij een BUITENLANDS activum (bv. VS, Nederland, Frankrijk); "
+                                      "voor Belgische aandelen laat je dit leeg en start je bij ③.")
+            A_cur = cur_box_t(r1b, "Acur")
+            r2a, r2b = st.columns([3, 1])
+            B = r2a.number_input("② Buitenlandse bronbelasting",
+                                 min_value=0.0, step=0.01, format="%.10g",
+                                 value=pre.get("B"), key=dk("B"),
+                                 help="Wordt automatisch berekend uit ① × het heffingstarief van het "
+                                      f"land van het activum ({cname}: {wht_pct_default:g}% — zie ⚙️ "
+                                      "Instellingen). Klopt het ingehouden bedrag niet (bv. ander "
+                                      "verdragstarief), pas het hier aan.")
+            B_cur = cur_box_t(r2b, "Bcur")
+            r3a, r3b = st.columns([3, 1])
+            C = r3a.number_input("③ Bruto na bronbelasting / vóór Belgische RV",
+                                 min_value=0.0, step=0.01, format="%.10g",
+                                 value=pre.get("C"), key=dk("C"),
+                                 help="Het bedrag waarop de Belgische roerende voorheffing wordt "
+                                      "berekend. Voor BELGISCHE aandelen is dit het brutodividend: "
+                                      "vul het hier in en laat ① en ② leeg.")
+            C_cur = cur_box_t(r3b, "Ccur")
+            r4a, r4b = st.columns([3, 1])
+            D = r4a.number_input("④ Netto dividend (na alle voorheffingen)",
+                                 min_value=0.0, step=0.01, format="%.10g",
+                                 value=pre.get("D"), key=dk("D"),
+                                 help="Wat er uiteindelijk overblijft na ALLE belastingen: eventuele "
+                                      "buitenlandse bronbelasting én de Belgische roerende voorheffing. "
+                                      "Dit is doorgaans wat je broker daadwerkelijk uitkeert.")
+            D_cur = cur_box_t(r4b, "Dcur")
+            notes = st.text_area("Notities (optioneel)", height=60, key=dk("d_notes"))
+
+            # Eén eigen koers voor de hele lijn. De velden ①-④ kunnen elk een eigen
+            # munt hebben, maar in de praktijk gaat het om één vreemde munt die je
+            # broker tegen één koers omrekent; die koers geldt dan voor elk veld dat
+            # niet al in euro staat.
+            _fx_curs = sorted({c for c, v in ((A_cur, A), (B_cur, B), (C_cur, C), (D_cur, D))
+                               if v is not None and c != "EUR"})
+            d_fx_manual, d_fx_override = 0, None
+            if _fx_curs:
+                if len(_fx_curs) > 1:
+                    st.warning("⚠️ Je gebruikt meer dan één vreemde munt in deze keten "
+                               f"({', '.join(_fx_curs)}). Eén eigen koers kan er maar voor "
+                               "één gelden — voer zulke gevallen beter als aparte lijnen in, "
+                               "of laat de marktkoersen hun werk doen.")
+                else:
+                    d_fx_manual, d_fx_override = _div_fx_widget(
+                        _fx_curs[0], d_date, key_prefix=dk("d"), context="deze keten")
+
+            # Keten aanvullen met de tarieven (land + RV%)
+            # Stockdividend: is de keten leeg, veranker ze dan op stukken × waarde
+            # (bij een buitenlands activum als ① bruto, anders als ③).
+            if d_stock and d_shares and d_shareval and all(v is None for v in (A, B, C, D)):
+                _anchor = round(float(d_shares) * float(d_shareval), 2)
+                if is_foreign:
+                    A = _anchor
+                else:
+                    C = _anchor
+                st.caption(f"📦 Keten verankerd op de aandelenuitkering: "
+                           f"{'①' if is_foreign else '③'} = {d_shares:g} × {d_shareval:g} "
+                           f"= {asset_cur} {_anchor:,.2f}.")
+            res = tax_mod.resolve_dividend_chain(
+                A, B, C, D,
+                rv_rate=(rv_pct / 100.0),
+                wht_rate=(wht_pct_default / 100.0) if (is_foreign and d_kind == "dividend") else 0.0)
+            rA, rB, rC, rD, rRV = res["a"], res["b"], res["c"], res["d"], res["rv"]
+            def _f(v, cur): return "—" if v is None else f"{cur} {v:,.2f}"
+            st.markdown(
+                f"**Afgeleide keten:** ① {_f(rA, A_cur)}  →  ② bronbelasting {_f(rB, B_cur)}  →  "
+                f"③ {_f(rC, C_cur)}  →  🇧🇪 RV {_f(rRV, C_cur)}  →  ④ netto {_f(rD, D_cur)}")
+
+            # Omgekeerde controle (④ → ③ → ② → ①) met tolerantie voor afronding
+            filled = [v for v in (A, B, C, D) if v is not None]
+            if len(filled) >= 2:
+                issues = tax_mod.verify_dividend_chain(rA, rB, rC, rD, tol=0.02)
+                if issues:
+                    for i in issues:
+                        st.warning("⚠️ Controle (④→③→②→①): " + i)
+                else:
+                    st.caption("✅ Omgekeerde controle (④→③→②→①) klopt binnen de afrondingstolerantie (± €0,02).")
+
+            bc1, bc2 = st.columns([1, 2])
+            if bc1.button("🪄 Vul lege velden in", key=dk("fill"),
+                          help="Zet de automatisch berekende bedragen in de lege invoervelden, "
+                               "zodat je ze kunt nakijken en zo nodig aanpassen vóór het opslaan."):
+                st.session_state["div_prefill"] = {
+                    "A": rA, "B": rB, "C": rC, "D": rD, "rv_pct": rv_pct,
+                    "cash_basis": st.session_state.get(sk("cashbasis"), "④ Netto"),
+                }
+                st.session_state["div_amt_nonce"] = dn + 1
+                st.rerun()
+
+            if d_stock:
+                cash_choice = "📦 Geen (uitkering in aandelen)"
+                bc2.caption("💶 **Cash-boeking: geen** — dit dividend wordt in aandelen "
+                            "uitgekeerd; er beweegt niets in het cash-grootboek. De "
+                            "tegenwaarde wordt als aanwastransactie geboekt.")
+            else:
+                cash_choice = bc2.radio(
+                    "Cash-boeking op basis van", ["④ Netto", "③ Bruto na bronbelasting", "① Bruto vóór bronbelasting"],
+                    horizontal=True, key=sk("cashbasis"),
+                    index=["④ Netto", "③ Bruto na bronbelasting", "① Bruto vóór bronbelasting"].index(pre["cash_basis"]) if pre.get("cash_basis") in ("④ Netto", "③ Bruto na bronbelasting", "① Bruto vóór bronbelasting") else 0,
+                    help="Welk bedrag als dividend in het cash-grootboek (💶 Cash) geboekt wordt. "
+                         "Standaard het netto (④) — wat je broker effectief stort. Kies ③ of ① als je "
+                         "broker bruto uitkeert en de belasting later apart afhoudt. Er kan er maar één "
+                         "gekozen worden.")
+
+            if st.button("✅ Dividend toevoegen", type="primary", key=dk("d_submit")):
+                # EUR per veld (elk in zijn eigen munt op de dividenddatum). Een eigen
+                # brokerkoers geldt enkel voor de munt waarvoor je ze ingaf.
+                def to_eur(v, cur):
+                    if v is None: return None
+                    _ov = d_fx_override if (d_fx_manual and cur in _fx_curs) else None
+                    return compute_eur(v, cur, d_date, _ov)[1]
+                a_eur = to_eur(rA, A_cur); b_eur = to_eur(rB, B_cur)
+                c_eur = to_eur(rC, C_cur); d_eur = to_eur(rD, D_cur)
+                gross_eur = a_eur if a_eur is not None else (c_eur if c_eur is not None else d_eur)
+                net_eur   = d_eur if d_eur is not None else (c_eur if c_eur is not None else
+                            (a_eur - b_eur if (a_eur is not None and b_eur is not None) else None))
+                if d_stock and (not d_shares or not d_shareval):
+                    st.error("Vul het aantal toegekende stukken én de waarde per stuk in.")
+                elif gross_eur is None or net_eur is None:
+                    st.error("Geef minstens een bruto- én een nettowaarde in (of voldoende velden om ze te berekenen).")
+                else:
+                    wh_eur = max(0.0, gross_eur - net_eur)
+                    # Cash-boeking op basis van het gekozen veld
                     if d_stock:
-                        gross = ((d_shares or 0.0) * (d_shareval or 0.0)) or None
-                        st.number_input("Bruto dividend (= stukken × waarde)",
-                                        value=float(gross) if gross else 0.0,
-                                        disabled=True, format="%.10g", key=dk("s_gross_ro"))
-                        currency = asset_cur
-                        st.caption(f"Munt: **{asset_cur}** (volgt het activum bij een "
-                                   "uitkering in aandelen).")
+                        cash_basis, cash_eur_v = "none", 0.0
+                    elif cash_choice.startswith("①"):
+                        cash_basis, cash_eur_v = "gross_before", (a_eur if a_eur is not None else net_eur)
+                    elif cash_choice.startswith("③"):
+                        cash_basis, cash_eur_v = "gross_after", (c_eur if c_eur is not None else net_eur)
                     else:
-                        gross = st.number_input("Bruto dividend *", min_value=0.0, step=0.01,
-                                                format="%.10g", value=None, key=dk("s_gross"))
-                        currency = st.selectbox("Munt", cur_opts, index=cur_opts.index(asset_cur),
-                                                key=sk(f"s_cur_{d_ticker}"))
-                with sc2:
-                    wh_amt = st.number_input("Ingehouden voorheffing (bedrag)", min_value=0.0,
-                                             step=0.01, format="%.10g", value=None, key=dk("s_wh"))
-                notes = st.text_area("Notities (optioneel)", height=60, key=dk("s_notes"))
-                g = gross or 0.0
-                w = wh_amt or 0.0
-                s_fx_manual, s_fx_override = _div_fx_widget(
-                    currency, d_date, key_prefix=dk("s"), context="het dividend")
-                _fxs, _g_eur = compute_eur(g, currency, d_date, s_fx_override)
-                st.info(f"**Netto:** {currency} {g - w:,.2f}"
-                        + ("" if currency == "EUR" or _fxs is None else
-                           f"  ≈  €{(g - w) * _fxs:,.2f}  (koers {_fxs:.6g})"))
-                if st.button("✅ Dividend toevoegen", type="primary", key=dk("s_submit")):
-                    if d_stock and (not d_shares or not d_shareval):
-                        st.error("Vul het aantal toegekende stukken én de waarde per stuk in.")
-                    elif not gross or gross <= 0:
-                        st.error("Vul een bruto dividend in.")
-                    else:
-                        fx_rate, gross_eur = compute_eur(g, currency, d_date, s_fx_override)
-                        _, wh_eur = compute_eur(w, currency, d_date, s_fx_override)
-                        if fx_rate is None:
-                            st.error("Geen wisselkoers beschikbaar voor "
-                                     f"{currency} op {d_date}. Vink '💱 Eigen wisselkoers "
-                                     "gebruiken' aan en vul de koers van je broker in — "
-                                     "zonder koers zou het EUR-bedrag fout zijn.")
-                        else:
-                            _details = {"kind": d_kind, "net_eur": gross_eur - wh_eur}
-                            _div_kwargs = dict(
-                                ticker=d_ticker, date=str(d_date), gross_amount=g,
-                                withholding_tax=w, currency=currency, notes=notes or None,
-                                fx_rate=fx_rate, gross_eur=gross_eur, withholding_eur=wh_eur,
-                                belgian_rv_withheld=1 if w > 0 else 0, account=d_account,
-                                fx_manual=s_fx_manual, details=_details)
-                            if d_stock:
-                                _details.update({"cash_basis": "none", "cash_eur": 0.0,
-                                                 "paid_in_shares": 1,
-                                                 "shares_received": float(d_shares)})
-                                _txn_kwargs = _stock_txn_kwargs(s_fx_override)
-                                if _txn_kwargs is None:
-                                    st.stop()
-                                db.add_stock_dividend(_txn_kwargs, _div_kwargs)
-                            else:
-                                db.add_dividend(**_div_kwargs)
-                            clear_cache()
-                            st.session_state["div_amt_nonce"] = dn + 1
-                            _lbl = d_ticker or "algemeen (niet gekoppeld)"
-                            if d_stock:
-                                st.session_state["div_added_msg"] = (
-                                    f"✅ Stockdividend voor {_lbl} op {d_account} toegevoegd: "
-                                    f"{d_shares:g} stuk(s) à {currency} {d_shareval:g} "
-                                    f"(bruto {currency} {g:,.2f}) — geen cash-boeking, wel een "
-                                    "gekoppelde aanwastransactie (zonder cash en zonder TOB).")
-                            else:
-                                st.session_state["div_added_msg"] = (
-                                    f"✅ Dividend {currency} {g - w:.2f} netto voor {_lbl} op {d_account} toegevoegd!")
-                            st.rerun()
-
-            else:  # Gedetailleerd
-                a_country = (amap.get(d_ticker, {}).get("country") or "BE").upper()
-                wht_pct_default = tax_mod.get_wht_rates(tax_mod.year_of(str(d_date))).get(a_country, 0.0)
-                is_foreign = a_country != "BE"
-                cname = tax_mod.COUNTRY_NAMES.get(a_country, a_country)
-                st.caption(f"Vul in wat je weet — lege velden worden automatisch berekend en ingevuld. "
-                           f"Land van dit activum: **{cname}**"
-                           + (f" (bronbelasting {wht_pct_default:g}%)." if is_foreign else " (geen buitenlandse bronbelasting)."))
-
-                # Prefill (gezet door de aanvul-knop) — nonce zorgt voor verse widgets
-                pre = st.session_state.pop("div_prefill", {})
-                rv_pct = st.number_input(
-                    "🇧🇪 Roerende voorheffing (%)", min_value=0.0, max_value=100.0,
-                    value=float(pre.get("rv_pct", 30.0)), step=0.5, key=dk("rvpct"),
-                    help="Belgische roerende voorheffing op dividenden — standaard 30%. Pas aan bij "
-                         "een afwijkend tarief (bv. VVPR-bis 15%). Gebruikt om ④ uit ③ te berekenen "
-                         "(of omgekeerd) wanneer een van beide leeg is.")
-
-                # Munt-widgets keyen op het activum: bij een ander activum verschijnen
-                # verse muntvelden met de juiste standaardmunt.
-                def cur_box_t(col, keyname):
-                    return col.selectbox("Munt", cur_opts, index=cur_opts.index(asset_cur),
-                                         key=sk(f"{keyname}_{d_ticker}"), label_visibility="collapsed")
-
-                r1a, r1b = st.columns([3, 1])
-                A = r1a.number_input("① Bruto dividend (vóór buitenlandse bronbelasting)",
-                                     min_value=0.0, step=0.01, format="%.10g",
-                                     value=pre.get("A"), key=dk("A"),
-                                     help="Het brutobedrag vóór eender welke inhouding. Enkel invullen "
-                                          "bij een BUITENLANDS activum (bv. VS, Nederland, Frankrijk); "
-                                          "voor Belgische aandelen laat je dit leeg en start je bij ③.")
-                A_cur = cur_box_t(r1b, "Acur")
-                r2a, r2b = st.columns([3, 1])
-                B = r2a.number_input("② Buitenlandse bronbelasting",
-                                     min_value=0.0, step=0.01, format="%.10g",
-                                     value=pre.get("B"), key=dk("B"),
-                                     help="Wordt automatisch berekend uit ① × het heffingstarief van het "
-                                          f"land van het activum ({cname}: {wht_pct_default:g}% — zie ⚙️ "
-                                          "Instellingen). Klopt het ingehouden bedrag niet (bv. ander "
-                                          "verdragstarief), pas het hier aan.")
-                B_cur = cur_box_t(r2b, "Bcur")
-                r3a, r3b = st.columns([3, 1])
-                C = r3a.number_input("③ Bruto na bronbelasting / vóór Belgische RV",
-                                     min_value=0.0, step=0.01, format="%.10g",
-                                     value=pre.get("C"), key=dk("C"),
-                                     help="Het bedrag waarop de Belgische roerende voorheffing wordt "
-                                          "berekend. Voor BELGISCHE aandelen is dit het brutodividend: "
-                                          "vul het hier in en laat ① en ② leeg.")
-                C_cur = cur_box_t(r3b, "Ccur")
-                r4a, r4b = st.columns([3, 1])
-                D = r4a.number_input("④ Netto dividend (na alle voorheffingen)",
-                                     min_value=0.0, step=0.01, format="%.10g",
-                                     value=pre.get("D"), key=dk("D"),
-                                     help="Wat er uiteindelijk overblijft na ALLE belastingen: eventuele "
-                                          "buitenlandse bronbelasting én de Belgische roerende voorheffing. "
-                                          "Dit is doorgaans wat je broker daadwerkelijk uitkeert.")
-                D_cur = cur_box_t(r4b, "Dcur")
-                notes = st.text_area("Notities (optioneel)", height=60, key=dk("d_notes"))
-
-                # Eén eigen koers voor de hele lijn. De velden ①-④ kunnen elk een eigen
-                # munt hebben, maar in de praktijk gaat het om één vreemde munt die je
-                # broker tegen één koers omrekent; die koers geldt dan voor elk veld dat
-                # niet al in euro staat.
-                _fx_curs = sorted({c for c, v in ((A_cur, A), (B_cur, B), (C_cur, C), (D_cur, D))
-                                   if v is not None and c != "EUR"})
-                d_fx_manual, d_fx_override = 0, None
-                if _fx_curs:
-                    if len(_fx_curs) > 1:
-                        st.warning("⚠️ Je gebruikt meer dan één vreemde munt in deze keten "
-                                   f"({', '.join(_fx_curs)}). Eén eigen koers kan er maar voor "
-                                   "één gelden — voer zulke gevallen beter als aparte lijnen in, "
-                                   "of laat de marktkoersen hun werk doen.")
-                    else:
-                        d_fx_manual, d_fx_override = _div_fx_widget(
-                            _fx_curs[0], d_date, key_prefix=dk("d"), context="deze keten")
-
-                # Keten aanvullen met de tarieven (land + RV%)
-                # Stockdividend: is de keten leeg, veranker ze dan op stukken × waarde
-                # (bij een buitenlands activum als ① bruto, anders als ③).
-                if d_stock and d_shares and d_shareval and all(v is None for v in (A, B, C, D)):
-                    _anchor = round(float(d_shares) * float(d_shareval), 2)
-                    if is_foreign:
-                        A = _anchor
-                    else:
-                        C = _anchor
-                    st.caption(f"📦 Keten verankerd op de aandelenuitkering: "
-                               f"{'①' if is_foreign else '③'} = {d_shares:g} × {d_shareval:g} "
-                               f"= {asset_cur} {_anchor:,.2f}.")
-                res = tax_mod.resolve_dividend_chain(
-                    A, B, C, D,
-                    rv_rate=(rv_pct / 100.0),
-                    wht_rate=(wht_pct_default / 100.0) if (is_foreign and d_kind == "dividend") else 0.0)
-                rA, rB, rC, rD, rRV = res["a"], res["b"], res["c"], res["d"], res["rv"]
-                def _f(v, cur): return "—" if v is None else f"{cur} {v:,.2f}"
-                st.markdown(
-                    f"**Afgeleide keten:** ① {_f(rA, A_cur)}  →  ② bronbelasting {_f(rB, B_cur)}  →  "
-                    f"③ {_f(rC, C_cur)}  →  🇧🇪 RV {_f(rRV, C_cur)}  →  ④ netto {_f(rD, D_cur)}")
-
-                # Omgekeerde controle (④ → ③ → ② → ①) met tolerantie voor afronding
-                filled = [v for v in (A, B, C, D) if v is not None]
-                if len(filled) >= 2:
-                    issues = tax_mod.verify_dividend_chain(rA, rB, rC, rD, tol=0.02)
-                    if issues:
-                        for i in issues:
-                            st.warning("⚠️ Controle (④→③→②→①): " + i)
-                    else:
-                        st.caption("✅ Omgekeerde controle (④→③→②→①) klopt binnen de afrondingstolerantie (± €0,02).")
-
-                bc1, bc2 = st.columns([1, 2])
-                if bc1.button("🪄 Vul lege velden in", key=dk("fill"),
-                              help="Zet de automatisch berekende bedragen in de lege invoervelden, "
-                                   "zodat je ze kunt nakijken en zo nodig aanpassen vóór het opslaan."):
-                    st.session_state["div_prefill"] = {
-                        "A": rA, "B": rB, "C": rC, "D": rD, "rv_pct": rv_pct,
-                        "cash_basis": st.session_state.get(sk("cashbasis"), "④ Netto"),
+                        cash_basis, cash_eur_v = "net", net_eur
+                    # Native rollup (voor weergave/compat): primair veld = ① of ③ of ④
+                    prim_v, prim_cur = ((rA, A_cur) if rA is not None else
+                                        (rC, C_cur) if rC is not None else (rD, D_cur))
+                    _ov = d_fx_override if (d_fx_manual and prim_cur in _fx_curs) else None
+                    fx_prim = compute_eur(prim_v, prim_cur, d_date, _ov)[0] or 1.0
+                    wh_native = round(wh_eur / fx_prim, 2)
+                    details = {
+                        "gross_before_wht": rA, "gross_before_wht_cur": A_cur if rA is not None else None,
+                        "foreign_wht_amt":  rB, "foreign_wht_cur":      B_cur if rB is not None else None,
+                        "gross_after_wht":  rC, "gross_after_wht_cur":  C_cur if rC is not None else None,
+                        "belgian_rv_amt":   rRV,
+                        "net_received":     rD, "net_received_cur":     D_cur if rD is not None else None,
+                        "net_eur":          net_eur,
+                        "cash_basis":       cash_basis,
+                        "cash_eur":         cash_eur_v,
+                        "kind":             d_kind,
                     }
+                    _div_kwargs = dict(
+                        ticker=d_ticker, date=str(d_date), gross_amount=prim_v,
+                        withholding_tax=wh_native, currency=prim_cur, notes=notes or None,
+                        fx_rate=fx_prim, gross_eur=gross_eur, withholding_eur=wh_eur,
+                        foreign_wht_withheld=1 if (rB and rB > 0) else 0,
+                        belgian_rv_withheld=1 if (rRV and rRV > 0) else 0,
+                        account=d_account, details=details,
+                        fx_manual=int(bool(_ov)))
+                    if d_stock:
+                        details["paid_in_shares"] = 1
+                        details["shares_received"] = float(d_shares)
+                        _stk_fx_ov = d_fx_override if (d_fx_manual and asset_cur in _fx_curs) else None
+                        _txn_kwargs = _stock_txn_kwargs(_stk_fx_ov)
+                        if _txn_kwargs is None:
+                            st.stop()
+                        db.add_stock_dividend(_txn_kwargs, _div_kwargs)
+                    else:
+                        db.add_dividend(**_div_kwargs)
+                    clear_cache()
                     st.session_state["div_amt_nonce"] = dn + 1
+                    _lbl = d_ticker or "algemeen (niet gekoppeld)"
+                    if d_stock:
+                        st.session_state["div_added_msg"] = (
+                            f"✅ Stockdividend voor {_lbl} op {d_account} toegevoegd: "
+                            f"{d_shares:g} stuk(s) à {asset_cur} {d_shareval:g} "
+                            f"(netto ≈ {eur(net_eur)}) — geen cash-boeking, wel een gekoppelde "
+                            "aanwastransactie (zonder cash en zonder TOB).")
+                    else:
+                        st.session_state["div_added_msg"] = (
+                            f"✅ Dividend voor {_lbl} op {d_account} toegevoegd (netto ≈ {eur(net_eur)}; "
+                            f"cash-boeking: {cash_choice}).")
                     st.rerun()
 
-                if d_stock:
-                    cash_choice = "📦 Geen (uitkering in aandelen)"
-                    bc2.caption("💶 **Cash-boeking: geen** — dit dividend wordt in aandelen "
-                                "uitgekeerd; er beweegt niets in het cash-grootboek. De "
-                                "tegenwaarde wordt als aanwastransactie geboekt.")
-                else:
-                    cash_choice = bc2.radio(
-                        "Cash-boeking op basis van", ["④ Netto", "③ Bruto na bronbelasting", "① Bruto vóór bronbelasting"],
-                        horizontal=True, key=sk("cashbasis"),
-                        index=["④ Netto", "③ Bruto na bronbelasting", "① Bruto vóór bronbelasting"].index(pre["cash_basis"]) if pre.get("cash_basis") in ("④ Netto", "③ Bruto na bronbelasting", "① Bruto vóór bronbelasting") else 0,
-                        help="Welk bedrag als dividend in het cash-grootboek (💶 Cash) geboekt wordt. "
-                             "Standaard het netto (④) — wat je broker effectief stort. Kies ③ of ① als je "
-                             "broker bruto uitkeert en de belasting later apart afhoudt. Er kan er maar één "
-                             "gekozen worden.")
-
-                if st.button("✅ Dividend toevoegen", type="primary", key=dk("d_submit")):
-                    # EUR per veld (elk in zijn eigen munt op de dividenddatum). Een eigen
-                    # brokerkoers geldt enkel voor de munt waarvoor je ze ingaf.
-                    def to_eur(v, cur):
-                        if v is None: return None
-                        _ov = d_fx_override if (d_fx_manual and cur in _fx_curs) else None
-                        return compute_eur(v, cur, d_date, _ov)[1]
-                    a_eur = to_eur(rA, A_cur); b_eur = to_eur(rB, B_cur)
-                    c_eur = to_eur(rC, C_cur); d_eur = to_eur(rD, D_cur)
-                    gross_eur = a_eur if a_eur is not None else (c_eur if c_eur is not None else d_eur)
-                    net_eur   = d_eur if d_eur is not None else (c_eur if c_eur is not None else
-                                (a_eur - b_eur if (a_eur is not None and b_eur is not None) else None))
-                    if d_stock and (not d_shares or not d_shareval):
-                        st.error("Vul het aantal toegekende stukken én de waarde per stuk in.")
-                    elif gross_eur is None or net_eur is None:
-                        st.error("Geef minstens een bruto- én een nettowaarde in (of voldoende velden om ze te berekenen).")
-                    else:
-                        wh_eur = max(0.0, gross_eur - net_eur)
-                        # Cash-boeking op basis van het gekozen veld
-                        if d_stock:
-                            cash_basis, cash_eur_v = "none", 0.0
-                        elif cash_choice.startswith("①"):
-                            cash_basis, cash_eur_v = "gross_before", (a_eur if a_eur is not None else net_eur)
-                        elif cash_choice.startswith("③"):
-                            cash_basis, cash_eur_v = "gross_after", (c_eur if c_eur is not None else net_eur)
-                        else:
-                            cash_basis, cash_eur_v = "net", net_eur
-                        # Native rollup (voor weergave/compat): primair veld = ① of ③ of ④
-                        prim_v, prim_cur = ((rA, A_cur) if rA is not None else
-                                            (rC, C_cur) if rC is not None else (rD, D_cur))
-                        _ov = d_fx_override if (d_fx_manual and prim_cur in _fx_curs) else None
-                        fx_prim = compute_eur(prim_v, prim_cur, d_date, _ov)[0] or 1.0
-                        wh_native = round(wh_eur / fx_prim, 2)
-                        details = {
-                            "gross_before_wht": rA, "gross_before_wht_cur": A_cur if rA is not None else None,
-                            "foreign_wht_amt":  rB, "foreign_wht_cur":      B_cur if rB is not None else None,
-                            "gross_after_wht":  rC, "gross_after_wht_cur":  C_cur if rC is not None else None,
-                            "belgian_rv_amt":   rRV,
-                            "net_received":     rD, "net_received_cur":     D_cur if rD is not None else None,
-                            "net_eur":          net_eur,
-                            "cash_basis":       cash_basis,
-                            "cash_eur":         cash_eur_v,
-                            "kind":             d_kind,
-                        }
-                        _div_kwargs = dict(
-                            ticker=d_ticker, date=str(d_date), gross_amount=prim_v,
-                            withholding_tax=wh_native, currency=prim_cur, notes=notes or None,
-                            fx_rate=fx_prim, gross_eur=gross_eur, withholding_eur=wh_eur,
-                            foreign_wht_withheld=1 if (rB and rB > 0) else 0,
-                            belgian_rv_withheld=1 if (rRV and rRV > 0) else 0,
-                            account=d_account, details=details,
-                            fx_manual=int(bool(_ov)))
-                        if d_stock:
-                            details["paid_in_shares"] = 1
-                            details["shares_received"] = float(d_shares)
-                            _stk_fx_ov = d_fx_override if (d_fx_manual and asset_cur in _fx_curs) else None
-                            _txn_kwargs = _stock_txn_kwargs(_stk_fx_ov)
-                            if _txn_kwargs is None:
-                                st.stop()
-                            db.add_stock_dividend(_txn_kwargs, _div_kwargs)
-                        else:
-                            db.add_dividend(**_div_kwargs)
-                        clear_cache()
-                        st.session_state["div_amt_nonce"] = dn + 1
-                        _lbl = d_ticker or "algemeen (niet gekoppeld)"
-                        if d_stock:
-                            st.session_state["div_added_msg"] = (
-                                f"✅ Stockdividend voor {_lbl} op {d_account} toegevoegd: "
-                                f"{d_shares:g} stuk(s) à {asset_cur} {d_shareval:g} "
-                                f"(netto ≈ {eur(net_eur)}) — geen cash-boeking, wel een gekoppelde "
-                                "aanwastransactie (zonder cash en zonder TOB).")
-                        else:
-                            st.session_state["div_added_msg"] = (
-                                f"✅ Dividend voor {_lbl} op {d_account} toegevoegd (netto ≈ {eur(net_eur)}; "
-                                f"cash-boeking: {cash_choice}).")
-                        st.rerun()
+    elif _div_section == "📅 Kalender":
+        _calendar_section(assets)
 
     else:  # 📋 Overzicht
         st.session_state.pop("edit_div", None)  # oude bewerkstaat opruimen

@@ -2,6 +2,133 @@
 
 Alle noemenswaardige wijzigingen aan de Portfolio Tracker add-on.
 
+## 1.8.15
+### 📅 Dividendkalender, uitschieters uit de koersdoelen en het 200-daags gemiddelde
+
+Negen punten in één versie. De rode draad: cijfers die je al zag, worden
+betrouwbaarder, en wat je tot nu toe zelf moest opzoeken staat nu in de app.
+
+**📅 Nieuw: dividendkalender** (💰 Dividenden → 📅 Kalender)
+
+Per activum de uitkeringen met hun **betaaldatum**, het brutobedrag per aandeel en
+de ex-datum. Elke uitkering staat apart, dus een interimdividend (acompte) en het
+saldo zijn twee lijnen met elk hun eigen datums en bedrag. Bij elke lijn staat wat
+je op de ex-datum aanhield, per rekening, en het geschatte brutobedrag.
+
+De datum die telt is de **betaaldatum**: dat is de dag waarop het geld op je
+rekening komt en dus de datum waarop een dividend geboekt hoort te worden. De
+ex-datum staat er los naast — dat is de dag VANAF wanneer een aankoop geen recht
+meer geeft op die uitkering (koop je op die dag zelf, dan krijg je ze al niet meer).
+
+Twee bronnen: Yahoo altijd, en optioneel Financial Modeling Prep. Yahoo kent van
+VOORBIJE uitkeringen enkel de ex-datum, niet de betaaldatum; met een FMP-sleutel
+(⚙️ Instellingen → 📊 Gegevensbronnen) worden die aangevuld. Let op: op het gratis
+plan van FMP zitten enkel Amerikaanse noteringen — voor Euronext heb je een betalend
+plan nodig. Zonder sleutel werkt alles gewoon door en vul je ontbrekende
+betaaldatums zelf aan. Wat je zelf invoert, wordt door een ophaling nooit
+overschreven.
+
+De planner ververst de kalender dagelijks om 23:40, voor je open posities én voor de
+aandelen die de AI de laatste 30 dagen voorstelde.
+
+**📥 Een uitkering boeken met één klik**
+
+De knop "Boek dit dividend" vult het gewone dividendformulier in met het activum, de
+rekening, de betaaldatum en het geschatte bruto (aantal × bedrag per aandeel). Bij
+een buitenlands aandeel komt dat bedrag als ① bruto vóór bronbelasting, bij een
+Belgisch als ③ — zo klopt de fiscale keten meteen. Er wordt bewust NIETS
+rechtstreeks weggeschreven: een aangekondigd bedrag kan nog wijzigen en je broker
+rekent af op zijn eigen datums en koersen, dus jij kijkt na en slaat op. Staat er al
+een dividend rond die datum, dan waarschuwt de app voor een dubbele boeking. Een
+uitkering die nog moet komen, kan je niet boeken — dat zou je cashsaldo en je
+aangifte vooruit laten lopen op de feiten.
+
+**📅 Waarschuwing voor aankomende ex-dividenddatums** (dashboard)
+
+Voor je eigen posities én voor de aandelen die de AI voorstelt: welke ex-datums
+vallen binnen veertien dagen. Bij een suggestie is dat een timingsgegeven — koop je
+ná de ex-datum, dan mis je die uitkering. Er staat uitdrukkelijk bij dat de koers op
+de ex-datum doorgaans met ongeveer het dividendbedrag zakt; er ontstaat dus geen
+gratis winst door er net voor te kopen.
+
+**💰 Nieuw op 🩺 Status: voorbije dividenddatums**
+
+Een aparte tab met de uitkeringen waarvan de betaaldatum voorbij is terwijl er nog
+niets geboekt staat — enkel voor activa waarvoor je op de ex-datum effectief stukken
+had. Een werklijst dus, geen opsomming. Er wordt gezocht binnen drie weken rond de
+datum, want de valutadatum van je broker wijkt vaak af.
+
+**🎯 Uitschieters tellen niet meer mee in de koersdoelen**
+
+De AI geeft af en toe een koersdoel dat nergens op slaat: een komma verkeerd, een
+ander aandeel bedoeld, of gewoon een uitschieter. Eén zo'n waarde trok het
+gemiddelde over negen bepalingen volledig scheef — en dat gemiddelde stond
+vervolgens als "het koersdoel" in je tabellen. Er wordt nu rond de MEDIAAN gefilterd
+(mediaan + MAD, met een harde grens op 50% afwijking), op één plek in de code zodat
+geen enkele tabel eruit kan lopen. Bij minder dan drie bepalingen wordt er niets
+geweerd: met twee cijfers valt niet uit te maken welk van beide de uitschieter is.
+Is een reeks gewoon sterk gespreid zonder aanwijsbare uitschieter, dan telt alles
+mee.
+
+**🎯 Nieuwe kolommen "AI 30d" en "Pot. 30d"** (💼 Portefeuille en 📊 Dashboard)
+
+Het gemiddelde AI-koersdoel van de laatste 30 dagen, uitschieters eruit, naast het
+koersdoel dat GELDT. Dat laatste kan een handmatig doel zijn; deze kolom toont wat
+de AI de afgelopen maand dacht, los daarvan. Beide naast elkaar laten meteen zien of
+je eigen doel nog in de buurt van het AI-beeld ligt.
+
+**🎯 Gemiddeld koersdoel per periode** (🤖 AI Advisor → marktopportuniteiten)
+
+Bij de opvolging van de voorgestelde aandelen staat nu het gemiddelde koersdoel over
+de GEKOZEN periode (7 dagen / 1 maand / 3 maanden), plus het potentieel tegenover de
+koers van nu. Het laatste koersdoel alleen zei weinig bij een aandeel dat vijf keer
+werd voorgesteld.
+
+**📉 Nieuw: 200-daags voortschrijdend gemiddelde** (📈 Evolutie)
+
+Voor de aandelen die je NU aanhoudt: het gemiddelde van de laatste 200 slotkoersen,
+de verhouding van de koers tot dat gemiddelde, en een grafiek per positie. Het is een
+trendmaatstaf, geen koopsignaal: ver boven het gemiddelde betekent ook een minder
+gunstig instapmoment, en ver eronder maakt een aandeel niet vanzelf koopwaardig.
+Berekend zonder dividendcorrectie — een gecorrigeerde reeks ligt in het verleden
+lager en zou het gemiddelde te laag zetten. Staat het gemiddelde op minder dan 200
+slotkoersen, dan zegt de tabel dat erbij.
+
+Dezelfde cijfers gaan als `ma200` en `koers_vs_ma200_pct` mee naar de AI-adviseur bij
+het dagelijkse portefeuilleadvies, met de opdracht de trend expliciet mee te wegen.
+Bij volledige privacymodus gaat enkel het percentage mee, niet het koersniveau.
+
+**🧾 AI-kosten handmatig ingeven** (🤖 AI Advisor)
+
+De bedragen die de app toonde, zijn een RAMING uit tokengebruik en richtprijzen. Je
+werkelijke OpenAI-factuur kan je nu zelf ingeven. Die staat bewust NAAST de raming en
+wordt er niet bij opgeteld: het zijn twee metingen van dezelfde kost, geen twee
+kosten. Handmatige bedragen tellen ook niet mee in de kost-per-oproep die de app
+elders raamt — anders zou een factuurregel het gemeten tokengemiddelde vervuilen en
+elke raming in de app slechter maken.
+
+**📄 Een dividend overnemen van een eerder dividend**
+
+Zoals bij de transacties: activum, rekening, munt, de keten ①-④, de cash-boeking en
+het effectief toegepaste RV-tarief (bv. VVPR-bis 15% in plaats van blind 30%) worden
+overgenomen. De datum wordt vandaag; bedragen overnemen is optioneel.
+
+**🗑️ De eenvoudige invoerwijze voor dividenden is weg**
+
+Alleen de gedetailleerde invoer blijft. De eenvoudige variant sloeg de keten over en
+leverde lijnen op waar de bronbelasting, de RV en de €833-vrijstelling achteraf niet
+meer uit af te leiden waren.
+
+### ⚠️ "Sinds je vorige bezoek" hing af van je filterselectie
+
+Het bedrag in het bezoekblok werd berekend op de rekeningen die je toevallig
+geselecteerd had. Met één rekening actief verscheen de aangroei van alleen die
+rekening als "je portefeuille ging X vooruit". Erger: dat gefilterde bedrag werd ook
+als referentie weggeschreven, zodat je bij een volgend bezoek met een ándere filter
+een verschil zag dat nergens op sloeg. Het blok rekent nu altijd op je VOLLEDIGE
+portefeuille — dat is een eigenschap van je portefeuille, niet van je schermkeuze.
+Staat er een filter aan, dan zegt de melding dat er uitdrukkelijk bij.
+
 ## 1.8.14
 ### ⚠️ Posities zonder koers verdwenen stilzwijgend uit je totalen
 

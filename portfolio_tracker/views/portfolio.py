@@ -94,6 +94,13 @@ def page_portfolio():
             price_targets[tk] = eff["value"]
         target_meta[tk] = eff
 
+    # Het GEMIDDELDE AI-koersdoel over de laatste 30 dagen, uitschieters eruit. Dit
+    # staat naast (niet in plaats van) het koersdoel hierboven: dat laatste toont wat
+    # GELDT — waarbij een handmatig doel voorrang heeft — terwijl deze kolom toont wat
+    # de AI de afgelopen maand gemiddeld dacht. Beide naast elkaar laten meteen zien
+    # of je eigen doel nog in de buurt van het AI-beeld ligt.
+    ai_avg_30 = db.get_ai_target_averages(list(pv.keys()), days=30)
+
     nmap = asset_name_map()
     sec_map = db.get_asset_sectors()
 
@@ -202,11 +209,17 @@ def page_portfolio():
                 row["Vrij"] = round(_qty - _lqty, 6)
                 row["🔒 Geblokkeerd"] = round(_lqty, 6) if _lqty else None
                 row["🔓 Vrij vanaf"] = _lk_by.get(ticker, {}).get("next_unlock") if _lqty else None
+            _a30 = ai_avg_30.get(ticker.upper())
+            _up30 = None
+            if _a30 and pos["current_price"]:
+                _up30 = (_a30["value"] - pos["current_price"]) / pos["current_price"] * 100
             row.update({
                 "Gem.kostpr.(€)":  pos["avg_cost"],
                 "Koers (native)":  pos["current_price"] if pos["current_price"] else None,
                 "Koersdoel":    tgt,
                 "Potentieel":   upside,
+                "🎯 AI 30d":     (_a30["value"] if _a30 else None),
+                "Pot. 30d":     _up30,
                 "Huidige waarde": pos["current_value"],
                 "W/V (%)":      pos["unrealized_gain_loss_pct"],
                 "Dividend":     div,
@@ -229,6 +242,17 @@ def page_portfolio():
                      "zijn). Koersdoelen van 0 tellen als 'niet bepaald' en worden niet "
                      "meegerekend. De volledige tijdlijn staat op de pagina Evolutie."),
             "Potentieel":       st.column_config.NumberColumn(format="%+.10g%%"),
+            "🎯 AI 30d":        st.column_config.NumberColumn(
+                format="%.10g",
+                help="Het GEMIDDELDE koersdoel dat de AI de afgelopen 30 dagen voor dit "
+                     "aandeel gaf (native munt), met de uitschieters eruit. Een bepaling "
+                     "die ver van de mediaan van de reeks ligt, telt niet mee: de AI geeft "
+                     "af en toe een waarde die nergens op slaat, en één zo'n cijfer zou het "
+                     "gemiddelde volledig scheeftrekken. Bij minder dan drie bepalingen "
+                     "wordt er niets geweerd. Leeg = geen AI-koersdoelen in die periode."),
+            "Pot. 30d":         st.column_config.NumberColumn(
+                format="%+.10g%%",
+                help="Het 30-daagse AI-gemiddelde ten opzichte van de huidige koers."),
             "Huidige waarde":   st.column_config.NumberColumn(format="€ %.10g"),
             "W/V (%)":          st.column_config.NumberColumn(format="%+.10g%%"),
             "Dividend":         st.column_config.NumberColumn(format="€ %.10g"),
@@ -249,6 +273,12 @@ def page_portfolio():
                      "vrijkomt.")
         show_df(pd.DataFrame(rows), width="stretch", hide_index=True, height=420,
                 column_config=_pos_cfg)
+        _n30 = sum(len(v.get("dropped") or []) for v in ai_avg_30.values())
+        st.caption("🎯 **Koersdoel** = wat er GELDT (een handmatig doel wint altijd).  ·  "
+                   "**AI 30d** = het gemiddelde van de AI-bepalingen van de laatste 30 dagen, "
+                   "los van je eigen doel."
+                   + (f"  Daarbij zijn **{_n30}** uitschieter(s) buiten beschouwing gelaten."
+                      if _n30 else ""))
 
         total_val  = overview["total_portfolio_value"]
         total_cost = overview["total_cost_basis"]

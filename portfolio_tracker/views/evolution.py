@@ -42,6 +42,130 @@ def _evolution_df(sig: str):
     return tax_mod.reconstruct_portfolio_evolution(txns, price_map, fx_map, ticker_currency)
 
 
+def _ma200_section():
+    """Punt 5: het 200-daags voortschrijdend gemiddelde van de posities in
+    portefeuille, en hoe ver de koers erboven of eronder staat.
+
+    Bewust enkel voor de OPEN POSITIES: voor een verkochte positie is de trend geen
+    beslissingsinformatie meer, en elke extra ticker kost een koersreeks van
+    anderhalf jaar. Dezelfde cijfers gaan als 'ma200' en 'koers_vs_ma200_pct' mee
+    naar de AI-adviseur, zodat wat je hier ziet en wat de AI weegt niet uit elkaar
+    kunnen lopen.
+    """
+    st.divider()
+    st.subheader("📉 200-daags voortschrijdend gemiddelde")
+    st.caption(
+        "Het gemiddelde van de laatste 200 slotkoersen, de meest gebruikte "
+        "trendmaatstaf op de beurs. Noteert een aandeel **boven** zijn 200-daags "
+        "gemiddelde, dan is de langetermijntrend opwaarts; **eronder** neerwaarts. "
+        "Het is een trendmaatstaf, geen koop- of verkoopsignaal: ver boven het "
+        "gemiddelde betekent ook een minder gunstig instapmoment, en ver eronder "
+        "maakt een aandeel niet vanzelf koopwaardig. Deze cijfers gaan ook mee naar "
+        "de AI-adviseur bij het dagelijkse portefeuilleadvies.")
+
+    tickers, _closed = tax_mod.open_position_tickers()
+    if not tickers:
+        st.info("Geen open posities. Het gemiddelde wordt enkel berekend voor de "
+                "aandelen die je nu aanhoudt.")
+        return
+
+    names = asset_name_map()
+    sig = ":".join(sorted(tickers))
+    with st.spinner(f"Koershistoriek ophalen voor {len(tickers)} positie(s)..."):
+        ma = _ma200_map(sig)
+
+    if not ma:
+        st.warning("Geen bruikbare koershistoriek gevonden voor je posities — zonder "
+                   "historiek valt er geen gemiddelde te berekenen.")
+        return
+
+    rows = []
+    for tk in sorted(ma, key=lambda t: ma[t]["ratio_pct"], reverse=True):
+        m = ma[tk]
+        rows.append({
+            "":          "🟢" if m["ratio_pct"] >= 0 else "🔴",
+            "Activum":   f"{names.get(tk, tk)} ({tk})",
+            "Koers":     m["price"],
+            "MA200":     m["ma"],
+            "Verhouding": m["ratio"],
+            "Δ t.o.v. MA200": m["ratio_pct"],
+            "Trend":     "Boven het gemiddelde" if m["ratio_pct"] >= 0 else "Onder het gemiddelde",
+            "Slotkoersen": m["n"],
+            "Laatste koers op": m.get("laatste_datum") or "",
+        })
+    show_df(pd.DataFrame(rows), width="stretch", hide_index=True, column_config={
+        "Koers":      st.column_config.NumberColumn(
+            format="%.10g", help="Laatste slotkoers uit de historiek (native munt)."),
+        "MA200":      st.column_config.NumberColumn(
+            format="%.10g",
+            help="Gemiddelde van de laatste 200 slotkoersen, zonder dividendcorrectie: "
+                 "een gecorrigeerde reeks ligt in het verleden lager en zou het "
+                 "gemiddelde te laag zetten."),
+        "Verhouding": st.column_config.NumberColumn(
+            format="%.4f",
+            help="Koers gedeeld door het gemiddelde. 1,00 = precies op het gemiddelde."),
+        "Δ t.o.v. MA200": st.column_config.NumberColumn(format="%+.10g%%"),
+        "Slotkoersen": st.column_config.NumberColumn(
+            format="%d",
+            help="Op hoeveel slotkoersen het gemiddelde berust. Minder dan 200 betekent "
+                 "dat er niet genoeg historiek is (bv. een recente notering); het "
+                 "signaal is dan zwakker."),
+    })
+    _kort = [t for t, m in ma.items() if not m["volledig"]]
+    _mist = [t for t in tickers if t.upper() not in ma]
+    _boven = sum(1 for m in ma.values() if m["ratio_pct"] >= 0)
+    st.caption(f"**{_boven}** van de **{len(ma)}** posities noteert boven haar 200-daags "
+               "gemiddelde."
+               + ("  ·  ⚠️ Minder dan 200 slotkoersen voor: "
+                  + ", ".join(names.get(t, t) for t in _kort) + "." if _kort else "")
+               + ("  ·  Geen historiek voor: "
+                  + ", ".join(names.get(t, t) for t in _mist)
+                  + " (bv. een gekoppeld fonds zonder notering)." if _mist else ""))
+
+    # ── Grafiek per positie: koers tegenover het gemiddelde ─────────────────
+    _sel = st.selectbox("Grafiek voor", sorted(ma),
+                        format_func=lambda t: f"{names.get(t, t)} ({t})",
+                        key="ma200_ticker")
+    _start = (datetime.now() - pd.Timedelta(days=520)).strftime("%Y-%m-%d")
+    try:
+        series = md.get_price_series(_sel, _start, auto_adjust=False)
+    except Exception as exc:
+        logger.warning(f"_ma200_section({_sel}): reeks niet opgehaald ({exc})")
+        series = None
+    if series is None or not len(series):
+        st.caption("Geen koersreeks beschikbaar voor dit activum.")
+        return
+    _s = pd.Series(list(series.values), index=list(series.index)).astype(float)
+    _ma_line = _s.rolling(window=200, min_periods=20).mean()
+    fig = go.Figure()
+    fig.add_trace(go.Scatter(x=list(_s.index), y=list(_s.values), mode="lines",
+                             name="Koers", line=dict(color="#74b9ff", width=1.8)))
+    fig.add_trace(go.Scatter(x=list(_ma_line.index), y=list(_ma_line.values),
+                             mode="lines", name="200-daags gemiddelde",
+                             line=dict(color="#fdcb6e", width=2)))
+    fig.update_layout(height=340, margin=dict(t=40, b=30, l=20, r=20),
+                      plot_bgcolor="rgba(0,0,0,0)", paper_bgcolor="rgba(0,0,0,0)",
+                      legend=dict(orientation="h", yanchor="bottom", y=1.0,
+                                  xanchor="right", x=1.0),
+                      hovermode="x unified",
+                      title=f"{names.get(_sel, _sel)} — koers en 200-daags gemiddelde")
+    st.plotly_chart(fig, width="stretch")
+    st.caption("De eerste maanden van de lijn steunen op minder dan 200 slotkoersen "
+               "(vanaf 20) — daar is het gemiddelde nog nerveus. Koersen staan in de "
+               "native munt van het aandeel.")
+
+
+@st.cache_data(ttl=1800, show_spinner=False)
+def _ma200_map(sig: str):
+    """Het 200-daags gemiddelde per open positie (cache 30 min).
+
+    'sig' is de gesorteerde tickerlijst: verandert je portefeuille, dan vervalt de
+    cache vanzelf. Zonder deze cache zou elke rerun van de pagina opnieuw een
+    koersreeks van anderhalf jaar per positie ophalen.
+    """
+    return md.moving_average_map([t for t in sig.split(":") if t], 200)
+
+
 def _koersdoel_historiek_section():
     """Punt 8: evolutie van de koersdoelen per activum (handmatig én AI), met de
     mogelijkheid om het koersdoel opnieuw te bepalen. Toont per activum een tijdlijn
@@ -171,6 +295,7 @@ def page_evolution():
 
     if df is None or df.empty:
         st.warning("Kon geen historische reeks opbouwen — koersdata (yfinance) niet beschikbaar voor deze tickers.")
+        _ma200_section()
         _koersdoel_historiek_section()
         return
 
@@ -269,4 +394,5 @@ def page_evolution():
         fig_cmp.update_yaxes(ticksuffix="%")
         st.plotly_chart(fig_cmp, width='stretch')
 
+    _ma200_section()
     _koersdoel_historiek_section()

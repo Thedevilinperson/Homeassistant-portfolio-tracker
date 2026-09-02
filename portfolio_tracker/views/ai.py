@@ -4,6 +4,7 @@ views/ai.py — pagina 'AI Advisor en marktopportuniteiten'.
 from __future__ import annotations
 
 import logging
+from datetime import date
 
 import pandas as pd
 import streamlit as st
@@ -142,7 +143,9 @@ def render_market_opportunities():
     st.markdown("#### 📈 Opvolging van de adviezen")
     st.caption("Elk voorgesteld aandeel wordt bijgehouden. Per periode zie je het **gemiddelde "
                "advies** (het gemiddelde van alle ratings die dat aandeel in die periode kreeg), "
-               "hoe vaak het werd voorgesteld en het rendement sinds het eerste advies.")
+               "hoe vaak het werd voorgesteld, het rendement sinds het eerste advies en het "
+               "**gemiddelde koersdoel over de gekozen periode**. Wissel je van periode, dan "
+               "volgen zowel het gemiddelde advies als het gemiddelde koersdoel mee.")
 
     plabels = {lbl: days for _, lbl, days in ai_advisor.MARKET_PERIODS}
     sel = _section_radio("market_period", list(plabels.keys()))
@@ -183,7 +186,10 @@ def render_market_opportunities():
             "Koers nu":          r["huidige_koers"],
             "Rendement":         r["rendement_pct"],
             "Koersdoel 12m":     r["koersdoel"],
+            f"🎯 Gem. koersdoel ({sel.lower()})": r.get("koersdoel_gem"),
+            "Potentieel":        r.get("potentieel_pct"),
         })
+    _n_drop = sum(r.get("koersdoel_geweerd") or 0 for r in synth)
     show_df(pd.DataFrame(srows), width="stretch", hide_index=True, column_config={
         "Adviezen":      st.column_config.NumberColumn(format="%d"),
         "Score":         st.column_config.NumberColumn(
@@ -193,12 +199,27 @@ def render_market_opportunities():
         "Startkoers":    st.column_config.NumberColumn(format="%.10g"),
         "Koers nu":      st.column_config.NumberColumn(format="%.10g"),
         "Rendement":     st.column_config.NumberColumn(format="%+.10g%%"),
-        "Koersdoel 12m": st.column_config.NumberColumn(format="%.10g"),
+        "Koersdoel 12m": st.column_config.NumberColumn(
+                             format="%.10g",
+                             help="Het koersdoel van het LAATSTE advies in deze periode."),
+        f"🎯 Gem. koersdoel ({sel.lower()})": st.column_config.NumberColumn(
+                             format="%.10g",
+                             help="Gemiddelde van ALLE koersdoelen die dit aandeel in de gekozen "
+                                  "periode kreeg, in de native munt. Uitschieters tellen niet mee: "
+                                  "een bepaling die ver van de mediaan van de reeks ligt, wordt "
+                                  "geweerd zodat één wilde waarde het gemiddelde niet meesleurt. "
+                                  "Bij minder dan drie bepalingen wordt er niets geweerd — met twee "
+                                  "cijfers valt niet uit te maken welk van beide de uitschieter is."),
+        "Potentieel":    st.column_config.NumberColumn(
+                             format="%+.10g%%",
+                             help="Het gemiddelde koersdoel van deze periode t.o.v. de koers van nu."),
     })
     st.caption("Koersen in de native munt van elk aandeel. Het rendement is een zuiver "
                "koersrendement (geen dividenden, geen wisselkoerseffect) en is dus geen "
                "gerealiseerd resultaat — het meet enkel hoe het advies het sindsdien doet. "
-               "Dit is geen gepersonaliseerd financieel advies.")
+               + (f"  ·  🎯 **{_n_drop}** koersdoel(en) zijn als uitschieter buiten het "
+                  "gemiddelde gelaten." if _n_drop else "")
+               + "  Dit is geen gepersonaliseerd financieel advies.")
 
 
 def page_ai_advisor():
@@ -211,20 +232,114 @@ def page_ai_advisor():
 
     # ── AI-kosten ─────────────────────────────────────────────────────────────
     usage = db.get_ai_usage_summary()
-    if usage["total_calls"]:
+    manual = db.get_ai_manual_cost_summary()
+    if usage["total_calls"] or manual["total_n"]:
         try:
             tot_eur = md.convert_to_eur(usage["total_cost_usd"], "USD")
-            mon_eur = md.convert_to_eur(usage["month_cost_usd"], "USD")
         except Exception:
-            tot_eur = mon_eur = None
-        k1, k2, k3 = st.columns(3)
-        k1.metric("💵 AI-kosten totaal",
+            tot_eur = None
+        k1, k2, k3, k4 = st.columns(4)
+        k1.metric("💵 Geraamd totaal",
                   f"${usage['total_cost_usd']:.4f}",
                   help="Geschat op basis van tokengebruik en richtprijzen. De exacte factuur staat op je OpenAI-dashboard.")
-        k2.metric("📅 Deze maand", f"${usage['month_cost_usd']:.4f}",
+        k2.metric("📅 Geraamd deze maand", f"${usage['month_cost_usd']:.4f}",
                   delta=f"{usage['month_calls']} oproep(en)", delta_color="off")
         k3.metric("🔢 Totaal oproepen", str(usage["total_calls"]),
                   delta=(f"≈ {eur(tot_eur)}" if tot_eur is not None else None), delta_color="off")
+        if manual["total_n"]:
+            _diff = manual["total_usd"] - usage["total_cost_usd"]
+            k4.metric("🧾 Werkelijk (ingegeven)", f"${manual['total_usd']:.4f}",
+                      delta=f"{_diff:+.4f} t.o.v. raming", delta_color="off",
+                      help="De som van de bedragen die je zelf hebt ingegeven — je "
+                           "werkelijke OpenAI-facturen. Deze staat bewust NAAST de raming "
+                           "en wordt er niet bij opgeteld: het zijn twee metingen van "
+                           "dezelfde kost, geen twee kosten.")
+        else:
+            k4.metric("🧾 Werkelijk (ingegeven)", "—",
+                      help="Nog geen facturen ingegeven. Dat kan hieronder bij "
+                           "'AI-kosten handmatig ingeven'.")
+        if manual["missing_fx"]:
+            st.caption(f"⚠️ {manual['missing_fx']} handmatige lijn(en) zonder omgerekend "
+                       "USD-bedrag tellen niet mee in het totaal — die zijn in euro "
+                       "ingegeven op een moment dat er geen wisselkoers beschikbaar was. "
+                       "Verwijder en hervoer ze om ze mee te tellen.")
+
+        # ── Handmatige invoer van de werkelijke facturen ─────────────────────
+        with st.expander("🧾 AI-kosten handmatig ingeven"):
+            st.caption("De bedragen hierboven zijn een **raming** uit tokengebruik en "
+                       "richtprijzen. Wat OpenAI je effectief aanrekent, staat op je "
+                       "factuur — die kan je hier ingeven. Handmatige bedragen worden "
+                       "apart bijgehouden en apart getoond: ze corrigeren de raming niet, "
+                       "maar tonen hoe ver ze ernaast zat. Ze tellen ook NIET mee in de "
+                       "kost-per-oproep die de app elders raamt; die blijft op het gemeten "
+                       "tokengebruik gebaseerd.")
+            _mn = st.session_state.get("ai_cost_nonce", 0)
+            mc1, mc2, mc3, mc4 = st.columns([1, 1, 2, 1])
+            _mdate = mc1.date_input("Datum *", value=date.today(),
+                                    min_value=date(2020, 1, 1), max_value=date.today(),
+                                    key=f"aic_date_{_mn}",
+                                    help="De datum van de factuur of van de periode waarop "
+                                         "ze slaat. Bepaalt in welke maand het bedrag valt.")
+            _mamt = mc2.number_input("Bedrag *", min_value=0.0, step=0.01, format="%.10g",
+                                     value=None, key=f"aic_amt_{_mn}")
+            _mdesc = mc3.text_input("Omschrijving", key=f"aic_desc_{_mn}",
+                                    placeholder="bv. OpenAI-factuur augustus 2026")
+            _mcur = mc4.selectbox("Munt", ["USD", "EUR"], key=f"aic_cur_{_mn}")
+            if st.button("✅ Kost toevoegen", type="primary", key=f"aic_add_{_mn}"):
+                if not _mamt or _mamt <= 0:
+                    st.error("Vul een bedrag groter dan 0 in.")
+                else:
+                    _usd = float(_mamt)
+                    if _mcur == "EUR":
+                        # Bedrag in euro omrekenen naar USD, want de totalen hierboven
+                        # staan in dollar. Lukt dat niet, dan blijft het USD-bedrag
+                        # LEEG — nooit stilzwijgend euro's als dollars optellen.
+                        _rate = None
+                        try:
+                            _rate = md.get_exchange_rate("EUR", "USD")
+                        except Exception:
+                            _rate = None
+                        _usd = float(_mamt) * _rate if _rate else None
+                        if _usd is None:
+                            st.warning("Geen wisselkoers EUR→USD beschikbaar: het bedrag "
+                                       "wordt bewaard, maar telt niet mee in het "
+                                       "USD-totaal zolang de koers ontbreekt.")
+                    db.add_ai_manual_cost(str(_mdate), float(_mamt), _mcur,
+                                          _mdesc or None, _usd)
+                    st.session_state["ai_cost_nonce"] = _mn + 1
+                    st.success(f"✅ {_mcur} {_mamt:,.2f} toegevoegd.")
+                    st.rerun()
+
+            _mrows = db.get_ai_manual_costs()
+            if _mrows:
+                show_df(pd.DataFrame([{
+                    "ID": r["id"], "Datum": r["date"],
+                    "Omschrijving": r.get("description") or "",
+                    "Bedrag": r["amount"], "Munt": r["currency"],
+                    "In USD": r.get("amount_usd"),
+                } for r in _mrows]), width="stretch", hide_index=True, column_config={
+                    "ID":     st.column_config.NumberColumn(format="%d", width="small"),
+                    "Bedrag": st.column_config.NumberColumn(format="%.10g"),
+                    "In USD": st.column_config.NumberColumn(
+                        format="$ %.4f",
+                        help="Leeg = geen wisselkoers bij het ingeven; telt niet mee in het totaal."),
+                })
+                _dopts = {r["id"]: f"#{r['id']} · {r['date']} · {r['currency']} "
+                                   f"{r['amount']:,.2f}"
+                                   + (f" · {r['description']}" if r.get("description") else "")
+                          for r in _mrows}
+                _del = st.multiselect("Verwijderen", list(_dopts.keys()),
+                                      format_func=lambda i: _dopts.get(i, str(i)),
+                                      key="aic_del_pick")
+                if _del and st.checkbox(f"Ja, verwijder {len(_del)} lijn(en)", key="aic_del_conf"):
+                    if st.button("🗑️ Verwijderen", key="aic_del_go"):
+                        for i in _del:
+                            db.delete_ai_manual_cost(i)
+                        st.success(f"✅ {len(_del)} lijn(en) verwijderd.")
+                        st.rerun()
+            else:
+                st.caption("Nog geen handmatige kosten ingegeven.")
+
         with st.expander("📊 Uitsplitsing AI-kosten"):
             if usage["by_model"]:
                 st.caption("Per model")

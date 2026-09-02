@@ -32,7 +32,54 @@ def page_settings():
 
     _ssec = _section_radio("settings_section",
         ["🔑 API-sleutel", "🏦 Rekeningen", "🏭 Sectoren", "🧾 Meerwaardebelasting",
-         "🏛️ TOB & bronbelasting", "🗃️ Data"])
+         "🏛️ TOB & bronbelasting", "📊 Gegevensbronnen", "🗃️ Data"])
+
+    if _ssec == "📊 Gegevensbronnen":
+        st.subheader("Gegevensbronnen voor dividenddata")
+        st.caption(
+            "De dividendkalender (💰 Dividenden → 📅 Kalender) draait standaard op "
+            "Yahoo Finance. Die geeft de volledige historiek van ex-datums en "
+            "bedragen — inclusief een interimdividend en het saldo als aparte "
+            "lijnen — plus de eerstvolgende aankondiging met haar betaaldatum. Wat "
+            "Yahoo NIET geeft, is de betaaldatum van **voorbije** uitkeringen.")
+        st.markdown("**Financial Modeling Prep (optioneel)**")
+        st.caption(
+            "Met een sleutel van Financial Modeling Prep vult de app die ontbrekende "
+            "betaaldatums aan, samen met de frequentie van de uitkering. De bedragen "
+            "van Yahoo blijven leidend; FMP vult enkel aan wat ontbreekt.  \n"
+            "⚠️ Op het **gratis** plan van FMP zitten enkel Amerikaanse noteringen. "
+            "Voor Euronext Brussel, Parijs of Amsterdam heb je een betalend plan "
+            "nodig. Zonder sleutel blijft alles gewoon werken op Yahoo alleen — je "
+            "mist dan enkel de betaaldatums van voorbije uitkeringen, die je in de "
+            "kalender ook zelf kunt invullen.")
+        _fmp_cur = db.get_setting("fmp_api_key", "") or ""
+        if _fmp_cur:
+            st.success(f"Sleutel ingesteld (eindigt op …{_fmp_cur[-4:]}).")
+        fc1, fc2 = st.columns([3, 1])
+        _fmp_new = fc1.text_input(
+            "Nieuwe FMP-sleutel" if _fmp_cur else "FMP-sleutel", value="",
+            type="password", key="fmp_key_input",
+            help="Beschikbaar via site.financialmodelingprep.com. Laat leeg om de "
+                 "bestaande sleutel te behouden."
+                 if _fmp_cur else
+                 "Beschikbaar via site.financialmodelingprep.com. Wordt opgeslagen in "
+                 "je eigen database.")
+        with fc2:
+            st.write("")
+            st.write("")
+            if _fmp_cur and st.button("🗑️ Wissen", key="fmp_key_clear"):
+                db.set_setting("fmp_api_key", "")
+                st.success("✅ FMP-sleutel verwijderd — de kalender werkt verder op Yahoo.")
+                st.rerun()
+        if st.button("💾 Opslaan", key="save_fmp"):
+            _k = (_fmp_new or "").strip()
+            if _k:
+                db.set_setting("fmp_api_key", _k)
+                st.success("✅ FMP-sleutel bewaard. Haal de kalender opnieuw op via "
+                           "💰 Dividenden → 📅 Kalender om de betaaldatums aan te vullen.")
+                st.rerun()
+            else:
+                st.info("Geen sleutel ingevuld — er is niets gewijzigd.")
 
     if _ssec == "🔑 API-sleutel":
         st.subheader("OpenAI API & AI-instellingen")

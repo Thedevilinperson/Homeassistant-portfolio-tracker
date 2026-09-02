@@ -1057,3 +1057,95 @@ def backfill_eur(force: bool = False) -> int:
                            net_eur=net_eur, cash_eur=cash_eur)
         n += 1
     return n
+
+
+# ── Dividendkalender: gedeelde afleidingen ───────────────────────────────────
+# Zowel de kalender op de dividendenpagina, de waarschuwing op het dashboard als het
+# overzicht van voorbije datums op de statuspagina rekenen hiermee. Eén plek, zodat
+# de drie nooit uit elkaar kunnen lopen over de vraag welke uitkering je toekwam.
+
+def held_qty_by_account(ticker: str, on_date: str) -> dict:
+    """{rekening: aantal stukken} dat je op 'on_date' aanhield, per rekening.
+
+    Gebruikt dezelfde FIFO-berekening als de rest van de app. De peildatum is de
+    EX-DATUM: dat is de dag vanaf wanneer een aandeel zonder recht op het dividend
+    noteert, dus wat je aan het einde van de dag ervóór bezat, bepaalt wat je krijgt.
+    Er wordt bewust per rekening geteld: een dividend wordt op één rekening uitgekeerd
+    en de fiscale keten hangt aan die rekening.
+    """
+    t = (ticker or "").strip().upper()
+    if not t or not on_date:
+        return {}
+    txns = [x for x in db.get_transactions(ticker=t)
+            if x["date"][:10] < str(on_date)[:10]]
+    out = {}
+    for acct in {(x.get("account") or db.DEFAULT_ACCOUNT) for x in txns}:
+        sub = [x for x in txns if (x.get("account") or db.DEFAULT_ACCOUNT) == acct]
+        try:
+            pos, _ = tax_mod.build_fifo_positions(sub)
+        except Exception as exc:
+            logger.warning(f"held_qty_by_account({t},{on_date}): {exc}")
+            continue
+        q = pos.get(t, {}).get("total_quantity", 0.0)
+        if q > 1e-9:
+            out[acct] = round(q, 8)
+    return out
+
+
+def calendar_date(entry: dict) -> str:
+    """De datum waarop een kalenderlijn thuishoort: de BETAALDATUM.
+
+    Dat is de dag waarop het geld op je rekening komt en dus de datum waarop het
+    dividend geboekt hoort te worden. Is de betaaldatum niet bekend (Yahoo geeft die
+    voor voorbije uitkeringen niet), dan valt de kalender terug op de ex-datum — met
+    vermelding, want dat is een benadering en geen aankondiging.
+    """
+    return (entry.get("pay_date") or entry.get("ex_date") or "")[:10]
+
+
+def calendar_rows(tickers=None, since=None, until=None,
+                  only_held: bool = False) -> list[dict]:
+    """Kalenderlijnen verrijkt met je eigen positie en de boekingsstatus.
+
+    Per lijn komt erbij: het aantal stukken dat je op de ex-datum aanhield (per
+    rekening), het geschatte brutobedrag, of er al een dividend rond die datum
+    geboekt is, en op welke datum de lijn hoort (betaaldatum, anders ex-datum).
+    """
+    rows = []
+    for e in db.get_dividend_calendar(tickers, since=since, until=until):
+        held = held_qty_by_account(e["ticker"], e["ex_date"])
+        qty = sum(held.values())
+        if only_held and qty <= 0:
+            continue
+        amt = e.get("amount")
+        rows.append({
+            **e,
+            "datum": calendar_date(e),
+            "datum_is_ex": not bool(e.get("pay_date")),
+            "aantal": qty,
+            "per_rekening": held,
+            "bruto_geschat": (round(qty * amt, 4) if (qty and amt) else None),
+            "geboekt": db.dividend_booked_near(e["ticker"], calendar_date(e)),
+        })
+    rows.sort(key=lambda r: (r["datum"], r["ticker"]))
+    return rows
+
+
+def overdue_dividend_rows(days_back: int = 400, grace_days: int = 3) -> list[dict]:
+    """Uitkeringen waarvan de datum voorbij is terwijl er nog niets geboekt staat.
+
+    'grace_days' geeft de betaling wat lucht: een dividend dat gisteren betaalbaar
+    werd, staat vandaag nog niet altijd op je rekening, en zo'n lijn meteen als
+    ontbrekend aanmerken zou de lijst onbruikbaar maken. Enkel lijnen waarvoor je op
+    de ex-datum effectief stukken had, komen in aanmerking — voor de rest was er ook
+    niets te ontvangen.
+    """
+    from datetime import timedelta
+    today = datetime.now().date()
+    lo = (today - timedelta(days=int(days_back))).isoformat()
+    hi = (today - timedelta(days=int(grace_days))).isoformat()
+    out = []
+    for r in calendar_rows(since=lo, only_held=True):
+        if r["datum"] and r["datum"] <= hi and not r["geboekt"]:
+            out.append(r)
+    return out

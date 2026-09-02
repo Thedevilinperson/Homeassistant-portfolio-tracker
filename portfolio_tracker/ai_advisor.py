@@ -305,9 +305,23 @@ def _build_portfolio_context(year: int | None = None) -> dict:
         div_net[d["ticker"]] = div_net.get(d["ticker"], 0) + (
             d["gross_amount"] - d["withholding_tax"])
 
+    # 200-daags voortschrijdend gemiddelde per positie. Dit is de meest gebruikte
+    # trendmaatstaf op de beurs: staat de koers erboven, dan is de langetermijntrend
+    # opwaarts, eronder neerwaarts. Zonder dit gegeven beoordeelt de AI elke positie
+    # enkel op haar eigen aankoopprijs en kent ze de trend van het aandeel niet.
+    # Faalt de ophaling (geen historiek, netwerkprobleem), dan blijft het veld
+    # gewoon weg — een advies zonder trendinfo is beter dan een advies op een
+    # verzonnen trend.
+    ma200 = {}
+    try:
+        ma200 = md.moving_average_map(list(overview["position_values"].keys()), 200)
+    except Exception as exc:
+        logger.warning(f"_build_portfolio_context: 200-daags gemiddelde niet bepaald ({exc})")
+
     posities = []
     for ticker, pv in overview["position_values"].items():
         asset = asset_map.get(ticker, {})
+        _ma = ma200.get(ticker.upper())
         posities.append({
             "ticker":             ticker,
             "naam":               asset.get("name", ticker),
@@ -320,6 +334,10 @@ def _build_portfolio_context(year: int | None = None) -> dict:
             "huidige_waarde_eur": round(pv["current_value"], 2) if pv["current_value"] else None,
             "ongerealiseerd_pct": round(pv["unrealized_gain_loss_pct"], 2) if pv["unrealized_gain_loss_pct"] is not None else None,
             "netto_dividend_ytd": round(div_net.get(ticker, 0), 2),
+            # Trend: het 200-daags gemiddelde en hoe ver de koers erboven/eronder staat.
+            "ma200":             (_ma["ma"] if _ma else None),
+            "koers_vs_ma200_pct": (_ma["ratio_pct"] if _ma else None),
+            "ma200_volledig":    (_ma["volledig"] if _ma else None),
         })
 
     # Per rekening: profiel + samenvatting
@@ -668,6 +686,10 @@ def _anonymize_context(ctx: dict, level: str):
             p["ticker"] = alias
             p["naam"] = f"Positie {i}"
             p.pop("huidige_koers", None)
+            # Het 200-daags gemiddelde is een KOERSNIVEAU: samen met de sector zou
+            # het een positie alsnog identificeerbaar maken. De verhouding in procent
+            # blijft wel staan — die verraadt niets en draagt het trendoordeel.
+            p.pop("ma200", None)
     for a in ctx.get("per_rekening", []):
         for k in ("kostenbasis_eur", "huidige_waarde_eur"):
             a.pop(k, None)
@@ -924,6 +946,15 @@ Geef één dagelijks advies over de posities die de belegger NU aanhoudt: (sterk
 behouden / (sterk) verkopen. Stel hier GEEN nieuwe aandelen voor die niet in de
 portefeuille zitten — die koopopportuniteiten komen in een apart luik (luik 2) aan bod.
 Focus dus volledig op bijkopen, behouden, afbouwen of verkopen van wat er al is.
+
+TREND (200-daags gemiddelde): elke positie draagt 'ma200' en 'koers_vs_ma200_pct' —
+de koers ten opzichte van haar 200-daags voortschrijdend gemiddelde. Weeg dat mee:
+ruim boven het gemiddelde wijst op een opwaartse trend maar ook op een minder gunstig
+instapmoment om bij te kopen; ver eronder wijst op een neerwaartse trend, waarbij
+'goedkoop' niet vanzelf 'koopwaardig' betekent. Is 'ma200_volledig' false, dan berust
+het gemiddelde op minder dan 200 slotkoersen en is het signaal zwakker; ontbreekt het
+veld, dan is er geen trendinformatie en mag je er ook geen veronderstellen. Vermeld
+de trend expliciet bij de posities waar hij je aanbeveling mee bepaalt.
 
 Antwoord UITSLUITEND met geldige JSON (geen markdown errond), in exact dit formaat:
 {{
@@ -1379,6 +1410,16 @@ def market_idea_synthesis(days: int) -> list[dict]:
         if start and now_price:
             ret_pct = (now_price - start) / start * 100
 
+        # Gemiddeld koersdoel OVER DE GEKOZEN PERIODE, zonder uitschieters. Het
+        # laatste koersdoel alleen zegt weinig: bij een aandeel dat vijf keer werd
+        # voorgesteld, is het beeld van de hele periode informatiever dan de bepaling
+        # die toevallig als laatste kwam. Dezelfde filter als elders in de app, zodat
+        # één wilde bepaling het gemiddelde niet meesleurt (zie db.robust_average).
+        _tg = db.robust_average([r.get("price_target") for r in rows_sorted])
+        _upside = None
+        if _tg["value"] and now_price:
+            _upside = (_tg["value"] - now_price) / now_price * 100
+
         out.append({
             "ticker":        tk,
             "naam":          last.get("name") or tk,
@@ -1394,6 +1435,10 @@ def market_idea_synthesis(days: int) -> list[dict]:
             "rendement_pct": ret_pct,
             "munt":          last.get("currency") or "EUR",
             "koersdoel":     last.get("price_target"),
+            "koersdoel_gem":     _tg["value"],
+            "koersdoel_n":       len(_tg["kept"]),
+            "koersdoel_geweerd": len(_tg["dropped"]),
+            "potentieel_pct":    _upside,
         })
     # Sterkste gemiddelde advies eerst, daarna het vaakst herhaald
     out.sort(key=lambda r: (-r["avg_score"], -r["n"], r["ticker"]))

@@ -414,6 +414,43 @@ def _migrate(conn):
     if not _column_exists(cur, "assets", "fcpe_params"):
         cur.execute("ALTER TABLE assets ADD COLUMN fcpe_params TEXT")
 
+    # Dividendkalender: ex-datum, betaaldatum en bedrag per aandeel, zoals de
+    # gegevensbron ze publiceert. Puur INFORMATIEF — dit zijn geen boekingen. Een
+    # aangekondigd dividend is een verwachting; wat je effectief ontvangt boek je
+    # zelf op de dividendenpagina. De twee worden bewust niet automatisch aan elkaar
+    # gekoppeld: een bron die een dag naast de betaaldatum zit, mag nooit een
+    # boeking in je fiscale keten aanmaken.
+    cur.execute("""CREATE TABLE IF NOT EXISTS dividend_calendar (
+        id         INTEGER PRIMARY KEY AUTOINCREMENT,
+        ticker     TEXT NOT NULL,
+        ex_date    TEXT,               -- YYYY-MM-DD (ex-dividenddatum)
+        pay_date   TEXT,               -- YYYY-MM-DD (betaaldatum), indien gekend
+        amount     REAL,               -- bruto per aandeel, native munt
+        currency   TEXT DEFAULT 'EUR',
+        source     TEXT DEFAULT 'yahoo',   -- yahoo | historiek | manual
+        note       TEXT,
+        updated_at TEXT DEFAULT (datetime('now')),
+        UNIQUE(ticker, ex_date)
+    )""")
+    cur.execute("CREATE INDEX IF NOT EXISTS idx_divcal_ticker "
+                "ON dividend_calendar(ticker, ex_date)")
+
+    # Handmatig ingegeven AI-kosten: de werkelijke factuur van OpenAI. De geraamde
+    # kost uit ai_usage blijft er BEWUST naast staan in een aparte tabel. Zou een
+    # factuurregel als 'oproep' in ai_usage belanden, dan zou ze het gemeten
+    # gemiddelde tokengebruik vervuilen (zie get_ai_usage_avg) en daarmee elke
+    # raming per oproep — een correctie die de rest van de app minder juist maakt.
+    cur.execute("""CREATE TABLE IF NOT EXISTS ai_manual_costs (
+        id          INTEGER PRIMARY KEY AUTOINCREMENT,
+        date        TEXT NOT NULL,          -- YYYY-MM-DD
+        description TEXT,
+        amount      REAL NOT NULL,          -- bedrag in de ingegeven munt
+        currency    TEXT DEFAULT 'USD',
+        amount_usd  REAL,                   -- tegenwaarde in USD (voor de totalen)
+        created_at  TEXT DEFAULT (datetime('now'))
+    )""")
+    cur.execute("CREATE INDEX IF NOT EXISTS idx_ai_manual_date ON ai_manual_costs(date)")
+
     # Prullenbak: elke verwijderde rij wordt hier eerst als JSON bewaard.
     cur.execute("""CREATE TABLE IF NOT EXISTS deleted_records (
         id          INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -1241,6 +1278,103 @@ def get_price_target_history(ticker: str) -> list[dict]:
     return [dict(r) for r in rows]
 
 
+def robust_average(values, k: float = 3.0, rel_tol: float = 0.10,
+                   hard_rel: float = 0.50, min_n: int = 3) -> dict:
+    """Gemiddelde ZONDER uitschieters — de enige plek waar dat gerekend wordt.
+
+    Een AI geeft af en toe een koersdoel dat nergens op slaat: een komma verkeerd,
+    een ander aandeel bedoeld, of gewoon een uitschieter. Eén zo'n waarde trekt een
+    gewoon gemiddelde over negen bepalingen volledig scheef, en dat gemiddelde staat
+    vervolgens als 'het koersdoel' in je tabellen. Daarom wordt er rond de MEDIAAN
+    gefilterd: die is per definitie ongevoelig voor een enkele wilde waarde.
+
+    Werkwijze:
+      • minder dan 'min_n' waarden -> niets weggooien. Met twee cijfers kan je niet
+        uitmaken welk van de twee de uitschieter is; dan is zwijgen beter dan gokken.
+      • anders: mediaan m en de MAD (mediaan van de absolute afwijkingen). De grens
+        is max(k x 1.4826 x MAD, rel_tol x m) — dus altijd minstens rel_tol rond de
+        mediaan, zodat bij een zeer eensgezinde reeks een normale afwijking van 10%
+        niet als uitschieter geldt — en nooit meer dan hard_rel x m, zodat een
+        waarde die meer dan de helft van de mediaan afwijkt sowieso wegvalt.
+      • blijft er niets (of minder dan de helft) over, dan is de reeks gewoon sterk
+        gespreid en is er geen enkele uitschieter aan te wijzen: alles telt mee.
+
+    Geeft {'value', 'n', 'kept', 'dropped', 'median'} met 'dropped' als lijst van de
+    geweerde waarden, zodat de UI kan tonen wat er buiten beschouwing bleef.
+    """
+    vals = []
+    for v in values or []:
+        try:
+            f = float(v)
+        except (TypeError, ValueError):
+            continue
+        if f > 0:
+            vals.append(f)
+    if not vals:
+        return {"value": None, "n": 0, "kept": [], "dropped": [], "median": None}
+
+    def _median(xs):
+        s = sorted(xs)
+        n = len(s)
+        return s[n // 2] if n % 2 else (s[n // 2 - 1] + s[n // 2]) / 2
+
+    med = _median(vals)
+    if len(vals) < min_n:
+        return {"value": round(sum(vals) / len(vals), 6), "n": len(vals),
+                "kept": vals, "dropped": [], "median": med}
+
+    mad = _median([abs(v - med) for v in vals])
+    limit = max(k * 1.4826 * mad, rel_tol * med)
+    limit = min(limit, hard_rel * med)
+    kept = [v for v in vals if abs(v - med) <= limit]
+    if len(kept) * 2 < len(vals):     # geen duidelijke uitschieters, enkel spreiding
+        kept = list(vals)
+    dropped = [v for v in vals if v not in kept] if len(kept) != len(vals) else []
+    return {"value": round(sum(kept) / len(kept), 6), "n": len(vals),
+            "kept": kept, "dropped": dropped, "median": med}
+
+
+def get_ai_targets_since(ticker: str, days: int = 30) -> list[dict]:
+    """AI-koersdoelen van de afgelopen 'days' dagen (nieuwste eerst), zonder
+    nulwaarden — een 0 betekent 'niet bepaald' en telt niet mee."""
+    conn = get_connection()
+    rows = conn.execute(
+        "SELECT price_target,currency,model,created_at FROM ai_ratings "
+        "WHERE ticker=? AND price_target IS NOT NULL AND price_target > 0 "
+        "AND created_at >= datetime('now', ?) "
+        "ORDER BY created_at DESC, id DESC",
+        (ticker.upper(), f"-{int(days)} days")
+    ).fetchall()
+    conn.close()
+    return [dict(r) for r in rows]
+
+
+def get_ai_target_averages(tickers, days: int = 30) -> dict:
+    """Per ticker het GEMIDDELDE AI-koersdoel over de laatste 'days' dagen, met de
+    uitschieters eruit (zie robust_average).
+
+    Dit is bewust iets anders dan get_effective_price_target: dat toont het koersdoel
+    dat GELDT (waarbij een handmatig doel voorrang heeft). Deze functie toont wat de
+    AI de afgelopen periode gemiddeld dacht — ook als je zelf een doel hebt ingesteld.
+    Beide naast elkaar zeggen meer dan elk apart.
+
+    Geeft {TICKER: {'value', 'n', 'dropped', 'currency', 'days'}}.
+    """
+    out = {}
+    for tk in {str(t).upper() for t in (tickers or [])}:
+        rows = get_ai_targets_since(tk, days)
+        if not rows:
+            continue
+        res = robust_average([r["price_target"] for r in rows])
+        if res["value"] is None:
+            continue
+        out[tk] = {"value": res["value"], "n": res["n"],
+                   "dropped": res["dropped"],
+                   "currency": rows[0].get("currency") or "EUR",
+                   "days": int(days)}
+    return out
+
+
 def get_recent_ai_targets(ticker: str, limit: int = 9) -> list[dict]:
     """De laatste AI-koersdoelbepalingen voor een ticker (nieuwste eerst), zonder
     nulwaarden — een 0 betekent 'niet bepaald' en telt niet mee (punt 2)."""
@@ -1295,8 +1429,12 @@ def get_effective_price_target(ticker: str, limit: int = 9,
     vals = [float(r["price_target"]) for r in rows]
     if not vals:
         return {"value": None, "source": None, "count": 0, "currency": cur_default}
-    return {"value": round(sum(vals) / len(vals), 6), "source": "ai_avg",
-            "count": len(vals), "currency": (rows[0].get("currency") or cur_default)}
+    # Uitschieters wegen niet mee: één wilde bepaling zou het gemiddelde — en dus
+    # het koersdoel dat overal in de app staat — volledig scheeftrekken.
+    res = robust_average(vals)
+    return {"value": res["value"], "source": "ai_avg",
+            "count": len(res["kept"]), "dropped": len(res["dropped"]),
+            "currency": (rows[0].get("currency") or cur_default)}
 
 
 def get_last_price_changes(tickers: list[str]) -> dict:
@@ -1884,6 +2022,175 @@ def get_ai_usage_summary() -> dict:
         "by_model":        [dict(r) for r in by_model],
         "by_function":     [dict(r) for r in by_func],
     }
+
+
+# ── Handmatig ingegeven AI-kosten (de werkelijke factuur) ───────────────────
+# De kosten in ai_usage zijn een RAMING uit tokengebruik en richtprijzen. Wat OpenAI
+# je effectief aanrekent, weet enkel je factuur. Die kan je hier ingeven; ze wordt
+# apart bijgehouden en apart getoond, zodat je meteen ziet hoe ver de raming van de
+# werkelijkheid af zit — in plaats van beide op één hoop te gooien.
+
+def add_ai_manual_cost(date: str, amount: float, currency: str = "USD",
+                       description: str | None = None,
+                       amount_usd: float | None = None) -> int:
+    conn = get_connection()
+    cur = conn.execute(
+        "INSERT INTO ai_manual_costs (date,description,amount,currency,amount_usd) "
+        "VALUES (?,?,?,?,?)",
+        (str(date)[:10], (description or "").strip() or None, float(amount),
+         (currency or "USD").upper(),
+         float(amount_usd) if amount_usd is not None else None))
+    new_id = cur.lastrowid
+    conn.commit()
+    conn.close()
+    return new_id
+
+
+def get_ai_manual_costs(year_month: str | None = None) -> list[dict]:
+    """Handmatig ingegeven AI-kosten, nieuwste eerst. year_month = 'JJJJ-MM'."""
+    conn = get_connection()
+    q, p = "SELECT * FROM ai_manual_costs", []
+    if year_month:
+        q += " WHERE substr(date,1,7)=?"
+        p.append(year_month)
+    q += " ORDER BY date DESC, id DESC"
+    rows = conn.execute(q, p).fetchall()
+    conn.close()
+    return [dict(r) for r in rows]
+
+
+def delete_ai_manual_cost(cost_id: int):
+    conn = get_connection()
+    conn.execute("DELETE FROM ai_manual_costs WHERE id=?", (int(cost_id),))
+    conn.commit()
+    conn.close()
+
+
+def get_ai_manual_cost_summary() -> dict:
+    """Totaal en maandtotaal van de handmatig ingegeven AI-kosten (in USD).
+
+    Een lijn zonder omgerekend bedrag (bv. omdat er bij het ingeven geen wisselkoers
+    beschikbaar was) telt niet mee in het USD-totaal: liever een onvolledig totaal
+    dan een totaal dat stilzwijgend euro's als dollars optelt.
+    """
+    conn = get_connection()
+    tot = conn.execute(
+        "SELECT COALESCE(SUM(amount_usd),0) c, COUNT(*) n, "
+        "SUM(CASE WHEN amount_usd IS NULL THEN 1 ELSE 0 END) missing "
+        "FROM ai_manual_costs").fetchone()
+    mon = conn.execute(
+        "SELECT COALESCE(SUM(amount_usd),0) c, COUNT(*) n FROM ai_manual_costs "
+        "WHERE substr(date,1,7)=strftime('%Y-%m','now')").fetchone()
+    conn.close()
+    return {"total_usd": tot["c"], "total_n": tot["n"],
+            "missing_fx": tot["missing"] or 0,
+            "month_usd": mon["c"], "month_n": mon["n"]}
+
+
+# ── Dividendkalender (aangekondigde uitkeringen) ─────────────────────────────
+
+def save_dividend_calendar(ticker: str, entries, source: str | None = None) -> int:
+    """Bewaar/actualiseer kalenderlijnen voor één activum.
+
+    'entries' is een lijst van {'ex_date', 'pay_date', 'amount', 'currency', 'note'}
+    en optioneel 'source'. Geef je 'source' als argument mee, dan geldt die voor alle
+    lijnen; anders draagt elke lijn haar eigen bron (bv. 'yahoo' of 'yahoo+fmp').
+    De sleutel is (ticker, ex_date): dezelfde ex-datum die opnieuw binnenkomt werkt de
+    bestaande lijn bij in plaats van te verdubbelen. Handmatig ingevoerde lijnen
+    (source='manual') worden NOOIT door een automatische ophaling overschreven — wat
+    je zelf uit de aankondiging van de vennootschap overnam, is betrouwbaarder dan wat
+    een gratis gegevensbron ervan maakt.
+    """
+    t = (ticker or "").strip().upper()
+    if not t:
+        return 0
+    conn = get_connection()
+    n = 0
+    for e in entries or []:
+        ex = str(e.get("ex_date") or "")[:10]
+        if not ex:
+            continue
+        src = source or (e.get("source") or "yahoo")
+        existing = conn.execute(
+            "SELECT id, source FROM dividend_calendar WHERE ticker=? AND ex_date=?",
+            (t, ex)).fetchone()
+        if existing and (existing["source"] or "") == "manual" and src != "manual":
+            continue
+        vals = (str(e.get("pay_date") or "")[:10] or None,
+                float(e["amount"]) if e.get("amount") is not None else None,
+                (e.get("currency") or "EUR").upper(), src,
+                (e.get("note") or None))
+        if existing:
+            conn.execute(
+                "UPDATE dividend_calendar SET pay_date=?, amount=?, currency=?, "
+                "source=?, note=?, updated_at=datetime('now') WHERE id=?",
+                vals + (existing["id"],))
+        else:
+            conn.execute(
+                "INSERT INTO dividend_calendar (ticker,ex_date,pay_date,amount,"
+                "currency,source,note) VALUES (?,?,?,?,?,?,?)", (t, ex) + vals)
+        n += 1
+    conn.commit()
+    conn.close()
+    return n
+
+
+def get_dividend_calendar(tickers=None, since: str | None = None,
+                          until: str | None = None) -> list[dict]:
+    """Kalenderlijnen, oplopend op ex-datum. 'since'/'until' filteren op de ex-datum."""
+    conn = get_connection()
+    q, p, conds = "SELECT * FROM dividend_calendar", [], []
+    if tickers:
+        tl = [str(t).upper() for t in tickers]
+        conds.append(f"ticker IN ({','.join('?' * len(tl))})")
+        p.extend(tl)
+    if since:
+        conds.append("ex_date >= ?"); p.append(str(since)[:10])
+    if until:
+        conds.append("ex_date <= ?"); p.append(str(until)[:10])
+    if conds:
+        q += " WHERE " + " AND ".join(conds)
+    q += " ORDER BY ex_date ASC, ticker ASC"
+    rows = conn.execute(q, p).fetchall()
+    conn.close()
+    return [dict(r) for r in rows]
+
+
+def delete_dividend_calendar_entry(entry_id: int):
+    conn = get_connection()
+    conn.execute("DELETE FROM dividend_calendar WHERE id=?", (int(entry_id),))
+    conn.commit()
+    conn.close()
+
+
+def cleanup_dividend_calendar(keep_days: int = 800):
+    """Ruim kalenderlijnen op die ver in het verleden liggen."""
+    conn = get_connection()
+    conn.execute("DELETE FROM dividend_calendar WHERE ex_date < date('now', ?)",
+                 (f"-{int(keep_days)} days",))
+    conn.commit()
+    conn.close()
+
+
+def dividend_booked_near(ticker: str, on_date: str, window_days: int = 21) -> bool:
+    """Staat er al een dividendboeking voor dit activum rond deze datum?
+
+    Wordt gebruikt om te tonen welke voorbije dividenddatums nog niet ingeboekt zijn.
+    Bewust met een ruim venster: de betaaldatum van de bron en de valutadatum van je
+    broker lopen vaak enkele dagen uiteen, en een venster dat te strak staat zou
+    lijnen als 'ontbrekend' aanmerken die je wel degelijk hebt ingegeven.
+    """
+    t = (ticker or "").strip().upper()
+    if not t or not on_date:
+        return False
+    conn = get_connection()
+    row = conn.execute(
+        "SELECT COUNT(*) n FROM dividends WHERE ticker=? "
+        "AND date >= date(?, ?) AND date <= date(?, ?)",
+        (t, str(on_date)[:10], f"-{int(window_days)} days",
+         str(on_date)[:10], f"+{int(window_days)} days")).fetchone()
+    conn.close()
+    return bool(row and row["n"])
 
 
 # ── Domeinen / sectoren ──────────────────────────────────────────────────────

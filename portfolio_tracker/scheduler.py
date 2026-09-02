@@ -8,6 +8,7 @@ Jobs:
   • Werkdag 18:00         → LUIK 1: dagelijks portefeuilleadvies (ratings + tekst)
   • Dagelijks 22:30       → koersen van de voorgestelde aandelen opvolgen
   • Dagelijks 22:45       → statuscontrole (verouderde koersen, splits, tickerwijzigingen)
+  • Dagelijks 23:40       → dividendkalender (ex-datums, betaaldatums, bedragen)
   • 1e van de maand 07:30 → AI-modelprijzen verversen
   • 1e van de maand 08:00 → belastingoptimalisatieadvies
 """
@@ -173,6 +174,41 @@ def job_fcpe_readings():
                 db.resolve_status_event(t, "fcpe_reading_missing")
         except Exception as exc:
             logger.error(f"job_fcpe_readings({t}): {exc}")
+
+
+def job_dividend_calendar():
+    """Ververs dagelijks de dividendkalender van de open posities en de AI-suggesties.
+
+    Draait ná de statuscontrole en na de koersopvolging: de kalender heeft geen
+    intraday-precisie nodig — aankondigingen veranderen hoogstens dagen van tevoren,
+    niet per minuut. Er wordt NOOIT automatisch een dividend geboekt: de kalender is
+    informatie, de boeking blijft een bewuste handeling in de app.
+    """
+    from datetime import timedelta
+    try:
+        tickers, _closed = tax.open_position_tickers()
+    except Exception as exc:
+        logger.error(f"job_dividend_calendar: posities niet bepaald: {exc}")
+        return
+    try:
+        since = (datetime.now() - timedelta(days=30)).strftime("%Y-%m-%d")
+        tickers = sorted(set(tickers) | set(db.get_idea_tickers_since(since, limit=100)))
+    except Exception as exc:
+        logger.info(f"job_dividend_calendar: suggesties overgeslagen ({exc})")
+    if not tickers:
+        logger.info("Geen posities of suggesties — dividendkalender overgeslagen.")
+        return
+    logger.info(f"📅 Dividendkalender ophalen voor {len(tickers)} activum(s)...")
+    res = md.refresh_dividend_calendar(tickers)
+    logger.info(f"✅ Dividendkalender: {sum(res['updated'].values())} lijn(en) voor "
+                f"{len(res['updated'])} activum(s)"
+                + (f", geen gegevens voor {len(res['empty'])}" if res["empty"] else "")
+                + (f", {len(res['errors'])} fout(en)" if res["errors"] else ""))
+    try:
+        db.set_setting("divcal_last_refresh", datetime.now().strftime("%Y-%m-%d %H:%M:%S"))
+        db.cleanup_dividend_calendar(keep_days=800)
+    except Exception as exc:
+        logger.warning(f"job_dividend_calendar: opruimen mislukt ({exc})")
 
 
 def job_backup():
@@ -353,6 +389,15 @@ def main():
         job_fcpe_readings,
         trigger=CronTrigger(hour=23, minute=10, timezone=BRUSSELS),
         id="fcpe_readings",
+        replace_existing=True,
+        misfire_grace_time=7200,
+    )
+
+    # ── Dividendkalender: dagelijks 23:40, na de waarnemingen ──
+    scheduler.add_job(
+        job_dividend_calendar,
+        trigger=CronTrigger(hour=23, minute=40, timezone=BRUSSELS),
+        id="dividend_calendar",
         replace_existing=True,
         misfire_grace_time=7200,
     )

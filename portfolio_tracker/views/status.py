@@ -5,20 +5,97 @@ from __future__ import annotations
 
 import logging
 
+import pandas as pd
 import streamlit as st
 
 import database as db
 import market_data as md
 
+import views.common as common
 from views.common import (
-    _short_ts, asset_name_map, clear_cache
+    _section_radio, _short_ts, asset_label, asset_name_map, clear_cache, show_df
 )
 
 logger = logging.getLogger("app.status")
 
 
+def _overdue_dividends_section():
+    """Uitkeringen waarvan de datum voorbij is terwijl er nog geen dividend geboekt is.
+
+    Dit is bewust een WERKLIJST en geen opsomming van alles wat ooit uitgekeerd werd:
+    wat al geboekt staat, hoort hier niet meer thuis. Er wordt ook niets automatisch
+    ingeboekt — een kalenderbron die een dag naast de betaaldatum zit, mag nooit
+    zelfstandig in je fiscale keten schrijven.
+    """
+    st.caption(
+        "Uitkeringen waarvan de **betaaldatum** voorbij is terwijl er in de app nog "
+        "geen dividend voor geboekt staat. Enkel activa waarvoor je op de ex-datum "
+        "effectief stukken aanhield: voor de rest viel er ook niets te ontvangen. "
+        "Is de betaaldatum niet gekend, dan geldt de ex-datum als benadering.")
+
+    rows = common.overdue_dividend_rows()
+    _last = db.get_setting("divcal_last_refresh", "")
+    st.caption((f"Kalender laatst opgehaald: {_short_ts(_last)}."
+                if _last else
+                "⚠️ De dividendkalender is nog nooit opgehaald — deze lijst blijft leeg "
+                "tot dat gebeurd is.")
+               + " Ophalen doe je op 💰 Dividenden → 📅 Kalender; de planner doet het "
+                 "ook dagelijks om 23:40.")
+
+    if not rows:
+        st.success("✅ Geen openstaande dividenddatums: elke voorbije uitkering waarvoor "
+                   "je stukken had, is geboekt.")
+        return
+
+    names = asset_name_map()
+    _tot = {}
+    for r in rows:
+        _cur = r.get("currency") or ""
+        if r.get("bruto_geschat"):
+            _tot[_cur] = _tot.get(_cur, 0.0) + r["bruto_geschat"]
+    st.warning(f"**{len(rows)}** voorbije uitkering(en) zonder boeking"
+               + ("  ·  samen ruwweg " +
+                  ", ".join(f"{v:,.2f} {c}" for c, v in sorted(_tot.items()))
+                  + " bruto." if _tot else "."))
+
+    show_df(pd.DataFrame([{
+        "Activum":     asset_label(r["ticker"], names),
+        "Datum":       r["datum"] + (" (ex)" if r["datum_is_ex"] else ""),
+        "Ex-datum":    r["ex_date"],
+        "Per aandeel": r.get("amount"),
+        "Munt":        r.get("currency") or "",
+        "Aantal":      r["aantal"] or None,
+        "Bruto (geschat)": r["bruto_geschat"],
+        "Rekening(en)": ", ".join(sorted(r["per_rekening"])) or "—",
+    } for r in rows]), width="stretch", hide_index=True, column_config={
+        "Datum":       st.column_config.TextColumn(
+            help="De betaaldatum. '(ex)' = de betaaldatum is niet gekend en dit is de "
+                 "ex-datum bij benadering."),
+        "Per aandeel": st.column_config.NumberColumn(format="%.10g"),
+        "Aantal":      st.column_config.NumberColumn(format="%.10g"),
+        "Bruto (geschat)": st.column_config.NumberColumn(format="%.10g"),
+    })
+    st.caption(
+        "Een lijn kan hier ook staan omdat je het dividend op een **andere datum** "
+        "geboekt hebt dan de kalender vermeldt: er wordt gezocht binnen drie weken "
+        "rond de datum. Klopt de kalenderlijn niet, corrigeer of verwijder ze dan op "
+        "💰 Dividenden → 📅 Kalender. Boeken doe je in diezelfde kalender met "
+        "'📥 Boek dit dividend'.")
+    if st.button("➡️ Naar de dividendkalender", key="status_to_divcal"):
+        st.session_state["nav_goto"] = "💰 Dividenden"
+        st.session_state["div_goto_section"] = "📅 Kalender"
+        st.rerun()
+
+
 def page_status():
     st.title("🩺 Status & waarschuwingen")
+
+    _sec = _section_radio("status_section",
+                          ["🩺 Meldingen", "💰 Voorbije dividenddatums"])
+    if _sec == "💰 Voorbije dividenddatums":
+        _overdue_dividends_section()
+        return
+
     st.caption("De gezondheid van je koersdata op één plek: verouderde koersen, dagen zonder "
                "koersbeweging, tickerwijzigingen of meerdere producten onder één ISIN, "
                "niet-geregistreerde aandelensplits en naamsafwijkingen (mogelijke fusie of "
