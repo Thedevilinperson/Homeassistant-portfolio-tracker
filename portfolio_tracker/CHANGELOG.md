@@ -2,6 +2,44 @@
 
 Alle noemenswaardige wijzigingen aan de Portfolio Tracker add-on.
 
+## 1.8.16
+### 📈 Golden cross / death cross
+
+Een nieuwe tab op de statuspagina, **📈 Golden/Death Cross**, die het 50-daags
+gemiddelde (MA50) naast het bestaande 200-daags gemiddelde (MA200) zet en elk
+kruispunt tussen de twee bijhoudt.
+
+**Wat een golden/death cross is**
+
+Een **golden cross** is het moment waarop MA50 van onder naar boven door MA200
+breekt — algemeen gelezen als een bullish signaal. Het omgekeerde, een **death
+cross**, wordt als bearish gelezen. Het zijn achterlopende trendmaatstaven, geen
+koop- of verkoopsignalen op zich: ze bevestigen een trendwissel pas nadat die al
+bezig is, en geven in een zijwaartse markt makkelijk valse signalen.
+
+**Hoe de app het bijhoudt**
+
+- Een apart logboek (`ma_cross_events`), los van de gewone statusmeldingen: een
+  kruising is een vaststaand feit op een vaste datum, geen toestand die later weer
+  kan verdwijnen zoals een verouderde koers.
+- Detectie kijkt ongeveer 2,5 jaar terug over de koersreeks van elke open positie,
+  herkent elk punt waar MA50 en MA200 van teken wisselen, en registreert enkel wat
+  nog niet in het logboek stond — dezelfde kruising wordt bij een volgende controle
+  dus niet dubbel geteld.
+- Draait automatisch mee met de dagelijkse statuscontrole (22:45); kan ook manueel
+  met de knop op de nieuwe tab.
+- Gebruikt dezelfde koersreeks als de rest van de app (`auto_adjust=False`, en voor
+  een gekoppeld fonds automatisch de fondsformule), zodat een MA50/MA200 voor bv.
+  het ENGIE-FCPE-fonds consistent blijft met de koers die elders getoond wordt.
+
+**Wat je op de nieuwe tab ziet**
+
+- Een tabel met MA50, MA200, koers en actuele stand ("golden" of "death") per open
+  positie, met de datum van de laatst gekende kruising.
+- Een grafiek per gekozen activum: koers, MA50 en MA200, met markers op elk
+  gedetecteerd kruispunt.
+- Het volledige chronologische logboek van alle gedetecteerde kruisingen.
+
 ## 1.8.15
 ### 📅 Dividendkalender, uitschieters uit de koersdoelen en het 200-daags gemiddelde
 

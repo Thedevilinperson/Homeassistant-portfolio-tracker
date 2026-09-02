@@ -6,8 +6,10 @@ from __future__ import annotations
 import logging
 
 import pandas as pd
+import plotly.graph_objects as go
 import streamlit as st
 
+import belgian_tax as tax_mod
 import database as db
 import market_data as md
 
@@ -87,13 +89,195 @@ def _overdue_dividends_section():
         st.rerun()
 
 
+def _ma_cross_section():
+    """Golden cross / death cross: het punt waar het 50-daags gemiddelde (MA50) het
+    200-daags gemiddelde (MA200) van onder naar boven kruist (golden, doorgaans als
+    bullish gelezen) of van boven naar onder (death, doorgaans als bearish gelezen).
+
+    Bewust een apart logboek los van 'status_events' hierboven: een kruising is een
+    vaststaand feit op een vaste datum, geen toestand die later weer kan verdwijnen
+    zoals een verouderde koers. Detectie draait automatisch mee met de dagelijkse
+    statuscontrole (22:45) en kan hier ook manueel opnieuw."""
+    st.caption(
+        "Een **golden cross** is het moment waarop het 50-daags gemiddelde (MA50) van "
+        "onder naar boven door het 200-daags gemiddelde (MA200) breekt — algemeen "
+        "gelezen als een bullish signaal. Het omgekeerde heet een **death cross** en "
+        "wordt als bearish gelezen. Beide zijn **achterlopende** indicatoren: ze "
+        "bevestigen een trendwissel pas nadat die al bezig is, geven in een zijwaartse "
+        "markt makkelijk valse signalen, en werken historisch iets betrouwbaarder op "
+        "brede indices dan op individuele aandelen. Geen koop- of verkoopadvies — enkel "
+        "een trendmaatstaf, net als het 200-daags gemiddelde op 📈 Evolutie.")
+
+    last = db.get_setting("ma_cross_last_run", "")
+    c1, c2 = st.columns([1, 2])
+    with c1:
+        if st.button("🔄 Nu controleren op kruisingen", type="primary",
+                     width="stretch", key="ma_cross_run"):
+            with st.spinner("Koershistoriek ophalen en MA50/MA200 berekenen..."):
+                ma_summary = db.detect_ma_crosses()
+            st.session_state["ma_cross_last_summary"] = ma_summary
+            common.clear_cache()
+            st.rerun()
+    with c2:
+        if last:
+            st.caption(f"Laatste controle: {_short_ts(last)} · draait ook automatisch "
+                       "mee met de dagelijkse statuscontrole (22:45).")
+        else:
+            st.caption("Nog geen controle uitgevoerd — klik op 'Nu controleren op "
+                       "kruisingen' of wacht op de dagelijkse run (22:45).")
+
+    ma_summ = st.session_state.get("ma_cross_last_summary")
+    if ma_summ:
+        st.info(f"Laatste run: {ma_summ.get('checked', 0)} positie(s) met voldoende "
+                f"historiek (≥200 slotkoersen) gecontroleerd · "
+                f"{ma_summ.get('new', 0)} nieuwe kruising(en)"
+                + (f" · {ma_summ['errors']} netwerkfout(en)" if ma_summ.get('errors') else ""))
+
+    try:
+        tickers, _closed = tax_mod.open_position_tickers()
+    except Exception:
+        tickers = [a["ticker"] for a in db.get_assets()]
+    names = asset_name_map()
+
+    st.divider()
+    st.markdown("**Actuele stand per open positie**")
+    if not tickers:
+        st.caption("Geen open posities.")
+    else:
+        with st.spinner(f"MA50/MA200 ophalen voor {len(tickers)} positie(s)..."):
+            ma50_map = md.moving_average_map(tickers, 50)
+            ma200_map = md.moving_average_map(tickers, 200)
+
+        rows = []
+        for t in sorted(tickers):
+            m50, m200 = ma50_map.get(t), ma200_map.get(t)
+            if not m50 or not m200:
+                continue
+            golden = m50["ma"] > m200["ma"]
+            last_ev = db.get_ma_cross_events(t, limit=1)
+            laatste = (("🟡 Golden" if last_ev[0]["event_type"] == "golden_cross"
+                       else "⚫ Death") + f" op {last_ev[0]['cross_date']}") \
+                      if last_ev else "— (nog geen kruising gedetecteerd)"
+            rows.append({
+                "Activum":  asset_label(t, names),
+                "Koers":    m50["price"],
+                "MA50":     m50["ma"],
+                "MA200":    m200["ma"],
+                "Status":   "🟢 Golden (MA50 > MA200)" if golden else "🔴 Death (MA50 < MA200)",
+                "Laatste kruising": laatste,
+            })
+        if rows:
+            show_df(pd.DataFrame(rows), width="stretch", hide_index=True, column_config={
+                "Koers": st.column_config.NumberColumn(format="%.10g"),
+                "MA50":  st.column_config.NumberColumn(
+                    format="%.10g", help="Gemiddelde van de laatste 50 slotkoersen, "
+                                        "zonder dividendcorrectie."),
+                "MA200": st.column_config.NumberColumn(
+                    format="%.10g", help="Gemiddelde van de laatste 200 slotkoersen, "
+                                        "zonder dividendcorrectie."),
+            })
+            _g = sum(1 for r in rows if r["Status"].startswith("🟢"))
+            st.caption(f"**{_g}** van de **{len(rows)}** posities staat momenteel in "
+                       "'golden'-stand (MA50 boven MA200).")
+
+            _sel = st.selectbox("Grafiek voor", sorted(r["Activum"] for r in rows),
+                                key="ma_cross_chart_ticker")
+            _sel_ticker = next((t for t in sorted(tickers)
+                               if asset_label(t, names) == _sel), None)
+            if _sel_ticker:
+                _render_ma_cross_chart(_sel_ticker, names)
+        else:
+            st.caption("Nog geen enkele open positie heeft voldoende koershistoriek "
+                       "(200 slotkoersen) voor dit overzicht.")
+
+    st.divider()
+    st.markdown("**Logboek gedetecteerde kruisingen**")
+    all_events = db.get_ma_cross_events(limit=200)
+    if not all_events:
+        st.info("Nog geen golden of death cross gedetecteerd. Het logboek vult zich "
+                "bij de eerstvolgende controle met kruisingen binnen de laatste "
+                "ongeveer 2,5 jaar, en daarna met elke nieuwe kruising die zich voordoet.")
+        return
+
+    ev_rows = [{
+        "": "🟡" if e["event_type"] == "golden_cross" else "⚫",
+        "Activum": asset_label(e["ticker"], names),
+        "Type": "Golden cross" if e["event_type"] == "golden_cross" else "Death cross",
+        "Datum": e["cross_date"],
+        "MA50 toen": e.get("ma50"),
+        "MA200 toen": e.get("ma200"),
+        "Koers toen": e.get("price"),
+        "Gedetecteerd op": _short_ts(e["detected_at"]),
+    } for e in all_events]
+    show_df(pd.DataFrame(ev_rows), width="stretch", hide_index=True, column_config={
+        "MA50 toen":  st.column_config.NumberColumn(format="%.10g"),
+        "MA200 toen": st.column_config.NumberColumn(format="%.10g"),
+        "Koers toen": st.column_config.NumberColumn(format="%.10g"),
+    })
+
+
+def _render_ma_cross_chart(ticker: str, names: dict):
+    """Koerslijn met MA50/MA200, plus markers op elk gedetecteerd kruispunt."""
+    start = (pd.Timestamp.now() - pd.Timedelta(days=900)).strftime("%Y-%m-%d")
+    try:
+        series = md.get_price_series(ticker, start, auto_adjust=False)
+    except Exception as exc:
+        logger.warning(f"_render_ma_cross_chart({ticker}): reeks niet opgehaald ({exc})")
+        series = None
+    if series is None or not len(series):
+        st.caption("Geen koersreeks beschikbaar voor dit activum.")
+        return
+
+    s = pd.Series(list(series.values), index=list(series.index)).astype(float)
+    ma50 = s.rolling(window=50, min_periods=50).mean()
+    ma200 = s.rolling(window=200, min_periods=200).mean()
+
+    events = db.get_ma_cross_events(ticker, limit=50)
+    golden_pts = [(e["cross_date"], e["price"]) for e in events
+                  if e["event_type"] == "golden_cross" and e.get("price") is not None]
+    death_pts = [(e["cross_date"], e["price"]) for e in events
+                 if e["event_type"] == "death_cross" and e.get("price") is not None]
+
+    fig = go.Figure()
+    fig.add_trace(go.Scatter(x=list(s.index), y=list(s.values), mode="lines",
+                             name="Koers", line=dict(color="#74b9ff", width=1.4)))
+    fig.add_trace(go.Scatter(x=list(ma50.index), y=list(ma50.values), mode="lines",
+                             name="MA50", line=dict(color="#00cec9", width=1.8)))
+    fig.add_trace(go.Scatter(x=list(ma200.index), y=list(ma200.values), mode="lines",
+                             name="MA200", line=dict(color="#fdcb6e", width=2)))
+    if golden_pts:
+        fig.add_trace(go.Scatter(x=[p[0] for p in golden_pts], y=[p[1] for p in golden_pts],
+                                 mode="markers", name="Golden cross",
+                                 marker=dict(symbol="triangle-up", size=13, color="#f1c40f",
+                                            line=dict(width=1, color="#7f6a00"))))
+    if death_pts:
+        fig.add_trace(go.Scatter(x=[p[0] for p in death_pts], y=[p[1] for p in death_pts],
+                                 mode="markers", name="Death cross",
+                                 marker=dict(symbol="triangle-down", size=13, color="#2d3436",
+                                            line=dict(width=1, color="#000000"))))
+    fig.update_layout(height=360, margin=dict(t=40, b=30, l=20, r=20),
+                      plot_bgcolor="rgba(0,0,0,0)", paper_bgcolor="rgba(0,0,0,0)",
+                      legend=dict(orientation="h", yanchor="bottom", y=1.0,
+                                  xanchor="right", x=1.0),
+                      hovermode="x unified",
+                      title=f"{names.get(ticker, ticker)} — koers, MA50 en MA200")
+    st.plotly_chart(fig, width="stretch")
+    st.caption("Koersen in de native munt van het activum. Het venster toont ongeveer "
+               "2,5 jaar; markers verschijnen enkel voor kruisingen binnen dat venster "
+               "die ook effectief in het logboek staan.")
+
+
 def page_status():
     st.title("🩺 Status & waarschuwingen")
 
     _sec = _section_radio("status_section",
-                          ["🩺 Meldingen", "💰 Voorbije dividenddatums"])
+                          ["🩺 Meldingen", "📈 Golden/Death Cross",
+                           "💰 Voorbije dividenddatums"])
     if _sec == "💰 Voorbije dividenddatums":
         _overdue_dividends_section()
+        return
+    if _sec == "📈 Golden/Death Cross":
+        _ma_cross_section()
         return
 
     st.caption("De gezondheid van je koersdata op één plek: verouderde koersen, dagen zonder "
@@ -124,6 +308,8 @@ def page_status():
                 f"{summ.get('new', 0)} nieuw · {summ.get('resolved', 0)} opgelost · "
                 f"{summ.get('open', 0)} open"
                 + (f" · {summ['errors']} netwerkfout(en)" if summ.get('errors') else "")
+                + (f" · {summ['ma_cross_new']} nieuwe MA-kruising(en) (zie tab "
+                   "'📈 Golden/Death Cross')" if summ.get('ma_cross_new') else "")
                 + ("" if summ.get("online") else " · (offline: enkel koersdata-checks)"))
 
     with st.expander("🔑 Euronext-wachtwoord (ontsleuteling)"):

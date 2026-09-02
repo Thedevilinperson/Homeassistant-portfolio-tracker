@@ -172,6 +172,21 @@ def init_db():
         );
         CREATE INDEX IF NOT EXISTS idx_status_open ON status_events(ticker, kind, resolved_at);
 
+        CREATE TABLE IF NOT EXISTS ma_cross_events (
+            id          INTEGER PRIMARY KEY AUTOINCREMENT,
+            ticker      TEXT    NOT NULL,
+            isin        TEXT,
+            event_type  TEXT    NOT NULL,   -- golden_cross | death_cross
+            cross_date  TEXT    NOT NULL,   -- datum (YYYY-MM-DD) van de slotkoers waarop
+                                             -- MA50 en MA200 elkaar kruisten
+            ma50        REAL,
+            ma200       REAL,
+            price       REAL,
+            detected_at TEXT    DEFAULT (datetime('now')),
+            UNIQUE(ticker, event_type, cross_date)
+        );
+        CREATE INDEX IF NOT EXISTS idx_ma_cross_ticker ON ma_cross_events(ticker, cross_date);
+
         CREATE TABLE IF NOT EXISTS market_ideas (
             id              INTEGER PRIMARY KEY AUTOINCREMENT,
             batch_id        TEXT    NOT NULL,
@@ -1883,6 +1898,18 @@ def run_status_checks(online: bool = True, tickers: list[str] | None = None) -> 
             except Exception as e:
                 logger.info(f"euronext_rebuild_key in statuscontrole: {e}")
 
+        # Golden cross / death cross (MA50 × MA200): een apart logboek, geen
+        # open/opgeloste melding zoals hierboven — een kruising is een gebeurtenis
+        # op een vaste datum, geen toestand die weer kan verdwijnen. Draait hier mee
+        # omdat ze net als de checks hierboven een koershistoriek nodig heeft.
+        try:
+            ma_summary = detect_ma_crosses(tickers)
+            summary["ma_cross_checked"] = ma_summary.get("checked", 0)
+            summary["ma_cross_new"] = ma_summary.get("new", 0)
+            summary["errors"] += ma_summary.get("errors", 0)
+        except Exception as e:
+            logger.warning(f"run_status_checks: MA-cross detectie faalde: {e}")
+
     for t in tickers:
         a = assets.get(t, {"ticker": t})
         isin = a.get("isin")
@@ -1957,6 +1984,130 @@ def run_status_checks(online: bool = True, tickers: list[str] | None = None) -> 
     summary["open"] = len(get_status_events())
     try:
         set_setting("status_last_run", datetime.now().strftime("%Y-%m-%d %H:%M:00"))
+    except Exception:
+        pass
+    return summary
+
+
+# ── Golden cross / death cross (MA50 × MA200) ────────────────────────────────
+
+def record_ma_cross_event(ticker: str, event_type: str, cross_date: str,
+                          ma50: float | None, ma200: float | None,
+                          price: float | None, isin: str | None = None) -> bool:
+    """Registreer één golden of death cross in het logboek. Anders dan een
+    statusgebeurtenis is dit geen open/opgeloste toestand maar een vaststaand feit op
+    een vaste datum — het blijft dus gewoon staan. De UNIQUE-constraint op
+    (ticker, event_type, cross_date) zorgt ervoor dat eenzelfde kruising bij een
+    volgende controle niet dubbel wordt weggeschreven. Geeft True terug bij een
+    ECHT nieuwe rij (voor de teller 'nieuw')."""
+    conn = get_connection()
+    cur = conn.execute(
+        "INSERT OR IGNORE INTO ma_cross_events "
+        "(ticker, isin, event_type, cross_date, ma50, ma200, price) "
+        "VALUES (?,?,?,?,?,?,?)",
+        (ticker.upper(), isin, event_type, cross_date, ma50, ma200, price)
+    )
+    conn.commit()
+    n = cur.rowcount
+    conn.close()
+    return bool(n)
+
+
+def get_ma_cross_events(ticker: str | None = None, limit: int = 500) -> list[dict]:
+    """Logboek van gedetecteerde golden/death crosses, nieuwste kruising eerst."""
+    conn = get_connection()
+    if ticker:
+        rows = conn.execute(
+            "SELECT * FROM ma_cross_events WHERE ticker=? "
+            "ORDER BY cross_date DESC, detected_at DESC LIMIT ?",
+            (ticker.upper(), limit)
+        ).fetchall()
+    else:
+        rows = conn.execute(
+            "SELECT * FROM ma_cross_events ORDER BY cross_date DESC, detected_at DESC LIMIT ?",
+            (limit,)
+        ).fetchall()
+    conn.close()
+    return [dict(r) for r in rows]
+
+
+def detect_ma_crosses(tickers: list[str] | None = None,
+                      lookback_days: int = 900) -> dict:
+    """Bereken MA50 en MA200 over de volledige koersreeks van elke ticker en registreer
+    elk punt waar de ene lijn de andere kruist: golden cross (MA50 gaat van onder naar
+    boven MA200) of death cross (omgekeerd).
+
+    Waarom 900 kalenderdagen: MA200 heeft zelf al ~280 kalenderdagen (200 slotkoersen)
+    nodig vóór het eerste bruikbare punt; met 900 dagen blijft er nog ruim anderhalf
+    jaar aan berekende MA50/MA200-lijn over om kruisingen in te herkennen. Elke run
+    herrekent dat hele venster, maar reeds gekende kruisingen slaan dankzij de
+    UNIQUE-constraint niet opnieuw aan — enkel wat nog niet in het logboek stond,
+    telt mee als 'nieuw'.
+
+    Gebruikt dezelfde koersreeks als de rest van de app (auto_adjust=False, en voor
+    gekoppelde fondsen automatisch de fondsformule via market_data.get_price_series):
+    zo blijft een MA50/MA200 voor bv. het ENGIE-FCPE-fonds consistent met de koers die
+    elders in de app getoond wordt.
+
+    Standaard enkel de open posities, net als het bestaande MA200-overzicht op
+    📈 Evolutie: voor een gesloten positie is een trendsignaal geen beslissings-
+    informatie meer, en elke extra ticker kost een koersreeks van bijna drie jaar."""
+    import market_data as _md
+    if tickers is None:
+        try:
+            import belgian_tax as _bt
+            tickers, _ = _bt.open_position_tickers()
+        except Exception:
+            tickers = [a["ticker"] for a in get_assets()]
+    tickers = sorted({(t or "").upper() for t in (tickers or []) if t})
+    assets = {a["ticker"].upper(): a for a in get_assets()}
+    summary = {"checked": 0, "new": 0, "errors": 0}
+    start = (datetime.now() - timedelta(days=int(lookback_days))).strftime("%Y-%m-%d")
+
+    for t in tickers:
+        isin = (assets.get(t) or {}).get("isin")
+        try:
+            series = _md.get_price_series(t, start, auto_adjust=False)
+        except Exception as exc:
+            logger.info(f"detect_ma_crosses({t}): reeks niet opgehaald ({exc})")
+            summary["errors"] += 1
+            continue
+        if series is None or len(series) < 201:
+            continue  # te weinig historiek voor een betrouwbare MA200
+        try:
+            s = series.astype(float)
+            ma50 = s.rolling(window=50, min_periods=50).mean()
+            ma200 = s.rolling(window=200, min_periods=200).mean()
+            diff = (ma50 - ma200).dropna()
+        except Exception as exc:
+            logger.info(f"detect_ma_crosses({t}): berekening faalde ({exc})")
+            continue
+        if len(diff) < 2:
+            continue
+        summary["checked"] += 1
+
+        prev_sign = None
+        for ts, v in diff.items():
+            if v == 0:
+                continue  # exact gelijk komt in de praktijk niet voor; puur defensief
+            sign = 1 if v > 0 else -1
+            if prev_sign is not None and sign != prev_sign:
+                d = ts.date().isoformat() if hasattr(ts, "date") else str(ts)[:10]
+                event_type = "golden_cross" if sign > 0 else "death_cross"
+                try:
+                    is_new = record_ma_cross_event(
+                        t, event_type, d,
+                        round(float(ma50.loc[ts]), 6), round(float(ma200.loc[ts]), 6),
+                        round(float(s.loc[ts]), 6), isin)
+                except Exception as exc:
+                    logger.warning(f"detect_ma_crosses({t}): opslaan kruising op {d} "
+                                   f"faalde ({exc})")
+                    is_new = False
+                if is_new:
+                    summary["new"] += 1
+            prev_sign = sign
+    try:
+        set_setting("ma_cross_last_run", datetime.now().strftime("%Y-%m-%d %H:%M:00"))
     except Exception:
         pass
     return summary
