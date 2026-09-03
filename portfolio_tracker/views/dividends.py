@@ -61,9 +61,11 @@ def _calendar_section(assets):
                 _idea = db.get_idea_tickers_since(_since, limit=100)
             except Exception as exc:
                 logger.info(f"kalender: suggesties niet opgehaald ({exc})")
-            _targets = sorted(set(_open) | set(_idea))
+            _targets = sorted(t for t in (set(_open) | set(_idea))
+                              if not db.is_no_dividend(t))
             if not _targets:
-                st.warning("Geen open posities of AI-suggesties om op te halen.")
+                st.warning("Geen open posities of AI-suggesties om op te halen "
+                           "(of alles staat op 'Geen dividend').")
             else:
                 with st.spinner(f"Dividendgegevens ophalen voor {len(_targets)} activum(s)..."):
                     res = md.refresh_dividend_calendar(_targets)
@@ -99,13 +101,19 @@ def _calendar_section(assets):
                        horizontal=True, key="divcal_period")
 
     _tickers = sorted(_open) if _scope == "In portefeuille" else None
+    # 'In portefeuille' toont enkel lijnen waarvoor je op de ex-datum ook effectief
+    # stukken aanhield — dus geen activa zonder open positie en geen uitkeringen
+    # van vóór je eerste aankoop. 'Alles (ook suggesties)' laat dat filter bewust
+    # weg: die scope bestaat net om uitkeringen te tonen van activa die je (nog)
+    # niet aanhoudt.
+    _only_held = (_scope == "In portefeuille")
     _today = date.today().isoformat()
     if _period == "Komende":
-        rows = common_calendar_rows(_tickers, since=_today)
+        rows = common_calendar_rows(_tickers, since=_today, only_held=_only_held)
     elif _period == "Voorbije":
-        rows = common_calendar_rows(_tickers, until=_today)
+        rows = common_calendar_rows(_tickers, until=_today, only_held=_only_held)
     else:
-        rows = common_calendar_rows(_tickers)
+        rows = common_calendar_rows(_tickers, only_held=_only_held)
 
     if not rows:
         st.info("Nog geen kalendergegevens voor deze selectie. Klik op "
@@ -118,6 +126,7 @@ def _calendar_section(assets):
         show_df(pd.DataFrame([{
             "ID":        r["id"],
             "Activum":   asset_label(r["ticker"], names),
+            "Rekening":  r.get("account") or "—",
             "Datum":     r["datum"] + (" (ex)" if r["datum_is_ex"] else ""),
             "Ex-datum":  r["ex_date"],
             "Per aandeel": r.get("amount"),
@@ -128,6 +137,10 @@ def _calendar_section(assets):
             "Bron":      SRC.get(r.get("source") or "", r.get("source") or ""),
         } for r in rows]), width="stretch", hide_index=True, column_config={
             "ID":          st.column_config.NumberColumn(format="%d", width="small"),
+            "Rekening":    st.column_config.TextColumn(
+                help="Had je dit activum op meerdere rekeningen, dan staat elke "
+                     "rekening op haar eigen lijn met haar eigen aantal — een "
+                     "uitkering wordt altijd op één rekening gestort."),
             "Datum":       st.column_config.TextColumn(
                 help="De BETAALDATUM: wanneer het geld op je rekening komt. Staat er "
                      "'(ex)' bij, dan is de betaaldatum niet gekend en toont de "
@@ -141,15 +154,48 @@ def _calendar_section(assets):
                      "aangekondigd bedrag kan nog wijzigen."),
             "Aantal":      st.column_config.NumberColumn(
                 format="%.10g",
-                help="Wat je op de ex-datum aanhield (FIFO, over al je rekeningen)."),
+                help="Wat je op de ex-datum aanhield op DEZE rekening (FIFO)."),
             "Bruto (geschat)": st.column_config.NumberColumn(
                 format="%.10g",
                 help="Aantal x bedrag per aandeel, in de munt van het aandeel. Een "
                      "raming: je broker rekent af op zijn eigen datums en koersen."),
             "Geboekt":     st.column_config.TextColumn(
-                help="✅ = er staat al een dividend van dit activum rond die datum. "
-                     "⏳ = nog te ontvangen. — = voorbij én nog niet geboekt."),
+                help="✅ = er staat al een dividend van dit activum rond die datum, "
+                     "of je hebt de lijn zelf als geboekt aangevinkt. ⏳ = nog te "
+                     "ontvangen. — = voorbij én nog niet geboekt."),
         })
+
+        with st.expander("✅ Manueel markeren als geboekt / niet geboekt"):
+            st.caption(
+                "Detecteert de app een boeking niet automatisch — bv. omdat je ze "
+                "meer dan drie weken naast deze datum ingaf, of op een andere manier "
+                "ontving — dan zet je dat hier zelf recht. Dit vinkje komt BOVENOP de "
+                "automatische detectie: één van beide 'waar' volstaat om een lijn als "
+                "geboekt te tonen. Het geldt voor de volledige uitkering (alle "
+                "rekeningen samen), net als de automatische detectie hierboven.")
+            _mopts = {r["row_key"]: (
+                f"{r['datum']} · {asset_label(r['ticker'], names)}"
+                + (f" · {r['account']}" if r.get("account") else "")
+                + ("  ✅ al geboekt" if r["geboekt"] else "")) for r in rows}
+            if not _mopts:
+                st.caption("Geen lijnen in deze selectie.")
+            else:
+                _msel = st.multiselect("Lijn(en)", list(_mopts.keys()),
+                                       format_func=lambda k: _mopts.get(k, k),
+                                       key="divcal_manual_ms")
+                mb1, mb2 = st.columns(2)
+                if mb1.button("✅ Markeer als geboekt", key="divcal_manual_set",
+                             disabled=not _msel):
+                    for k in _msel:
+                        db.set_calendar_manual_booked(int(k.split("::")[0]), True)
+                    st.success(f"✅ {len(_msel)} lijn(en) gemarkeerd als geboekt.")
+                    st.rerun()
+                if mb2.button("↩️ Zet terug als niet geboekt", key="divcal_manual_unset",
+                             disabled=not _msel):
+                    for k in _msel:
+                        db.set_calendar_manual_booked(int(k.split("::")[0]), False)
+                    st.success(f"✅ {len(_msel)} lijn(en) teruggezet.")
+                    st.rerun()
 
         # ── Boeken: één lijn omzetten in een dividend ────────────────────────
         st.markdown("##### 📥 Een uitkering boeken")
@@ -168,16 +214,20 @@ def _calendar_section(assets):
         else:
             _opts = {}
             for r in _boekbaar:
-                _opts[r["id"]] = (f"{r['datum']} · {asset_label(r['ticker'], names)} · "
-                                  f"{r['aantal']:g} x {r['amount']:g} "
-                                  f"{r.get('currency') or ''} = "
-                                  f"{r['bruto_geschat']:,.2f} bruto"
-                                  + ("  ✅ al geboekt" if r["geboekt"] else ""))
+                _opts[r["row_key"]] = (
+                    f"{r['datum']} · {asset_label(r['ticker'], names)}"
+                    + (f" · {r['account']}" if r.get("account") else "") + " · "
+                    f"{r['aantal']:g} x {r['amount']:g} "
+                    f"{r.get('currency') or ''} = "
+                    f"{r['bruto_geschat']:,.2f} bruto"
+                    + ("  ✅ al geboekt" if r["geboekt"] else ""))
             b1, b2 = st.columns([3, 2])
             _bpick = b1.selectbox("Welke uitkering?", list(_opts.keys()),
                                   format_func=lambda i: _opts.get(i, str(i)),
                                   key="divcal_book_pick")
-            _brow = next((r for r in _boekbaar if r["id"] == _bpick), None)
+            _brow = next((r for r in _boekbaar if r["row_key"] == _bpick), None)
+            # Elke lijn is nu al één specifieke rekening — de keuzelijst hieronder
+            # bevat dus normaal maar één optie, tenzij je account-informatie ontbreekt.
             _accs = list((_brow or {}).get("per_rekening") or {}) or db.get_accounts()
             _bacct = b2.selectbox("Op welke rekening?", _accs, key="divcal_book_acct",
                                   help="De rekening waarop deze uitkering is gestort. "
@@ -250,6 +300,11 @@ def _calendar_section(assets):
             mc1, mc2, mc3 = st.columns(3)
             _mtk = mc1.selectbox("Activum *", _tk_opts, key="divcal_m_tkr",
                                  format_func=lambda t: asset_label(t, names))
+            if db.is_no_dividend(_mtk):
+                st.info(f"ℹ️ {asset_label(_mtk, names)} staat op 🏢 Activa gemarkeerd "
+                        "met **Geen dividend** — een lijn die je hier toch toevoegt, "
+                        "verschijnt daarom nergens in de kalender. Zet dat vinkje eerst "
+                        "uit als dit activum toch een uitkering doet.")
             _mex = mc2.date_input("Ex-datum *", value=date.today(),
                                   min_value=date(2000, 1, 1), max_value=date(2100, 12, 31),
                                   key="divcal_m_ex")

@@ -515,6 +515,7 @@ def page_assets():
                 "Handmatige koers": round(mp, 4) if mp is not None else None,
                 "Enkel handm.": bool(a.get("manual_only")),
                 "Div=aandeel": bool(a.get("dividend_as_stock")),
+                "Geen dividend": bool(a.get("no_dividend")),
                 "Mislukt": int(a.get("price_fail_count") or 0),
                 "Laatste koers": round(mp, 4) if mp is not None else (round(lp["price"], 4) if lp else None),
             })
@@ -592,6 +593,13 @@ def page_assets():
                          "(dat telt sowieso altijd mee, dit vinkje is dan overbodig). Twijfel "
                          "je? Laat uit en vraag het na bij je boekhouder of de FOD Financiën — "
                          "onterecht aanvinken levert een te hoge (foutieve) teruggave op."),
+                "Geen dividend": cc.CheckboxColumn(
+                    help="Dit activum keert NOOIT een dividend uit — bv. de FCPE "
+                         "Multiple-fondsen, waar het rendement volledig in de PHMP-"
+                         "koersformule zit in plaats van in een uitkering. Sluit het "
+                         "activum overal uit van de 📅 Dividendkalender (💰 Dividenden): "
+                         "geen automatische ophaling, geen kalenderlijnen, geen "
+                         "'nog te boeken'-waarschuwingen op de statuspagina."),
                 "Laatste koers": cc.NumberColumn(disabled=True, format="%.10g"),
             })
         st.caption("✏️ Bewerk rechtstreeks in de tabel en klik op 'Wijzigingen opslaan'. TOB-tarief, "
@@ -603,7 +611,9 @@ def page_assets():
                    "foutmeldingen in de log. Keert een fonds (Type ETF) in de praktijk gewone, "
                    "aan Belgische roerende voorheffing onderworpen dividenden uit — bv. sommige "
                    "FCPE-werkgeversfondsen — vink dan **Div=aandeel** aan zodat die dividenden "
-                   "meetellen voor de 833-vrijstelling en de FBB op de 🧾 Aangiftepagina.")
+                   "meetellen voor de 833-vrijstelling en de FBB op de 🧾 Aangiftepagina. Keert "
+                   "een fonds nooit een dividend uit — bv. de FCPE Multiple-fondsen — vink dan "
+                   "**Geen dividend** aan zodat het niet meer opduikt in de 📅 Dividendkalender.")
 
         _open_t, _closed_t = tax_mod.open_position_tickers()
         if _closed_t:
@@ -682,7 +692,7 @@ def page_assets():
                     if all(_cell_eq(r[k], orig[k]) for k in
                            ("Naam", "Type", "ETF-type", "BE", "Munt", "Land", "Beurs", "ISIN",
                             "Koersdoel", "Fotomoment", "Handmatige koers", "Enkel handm.",
-                            "Div=aandeel", "Sector")):
+                            "Div=aandeel", "Geen dividend", "Sector")):
                         continue
                     atype = TYPE_KEY.get(str(r["Type"]), a["asset_type"])
                     asub  = SUB_KEY.get(str(r["ETF-type"]), a.get("etf_subtype") or "distributing") or "distributing"
@@ -716,6 +726,7 @@ def page_assets():
                         db.set_manual_price(a["ticker"], float(mpv), ncur)
                     db.set_manual_only(a["ticker"], bool(r["Enkel handm."]))
                     db.set_dividend_as_stock(a["ticker"], bool(r["Div=aandeel"]))
+                    db.set_no_dividend(a["ticker"], bool(r["Geen dividend"]))
                     n_upd += 1
             except Exception as exc:
                 problems.append(f"Onverwachte fout: {exc}")

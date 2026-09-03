@@ -32,7 +32,7 @@ def page_settings():
 
     _ssec = _section_radio("settings_section",
         ["🔑 API-sleutel", "🏦 Rekeningen", "🏭 Sectoren", "🧾 Meerwaardebelasting",
-         "🏛️ TOB & bronbelasting", "📊 Gegevensbronnen", "🗃️ Data"])
+         "💰 Dividenden", "🏛️ TOB & bronbelasting", "📊 Gegevensbronnen", "🗃️ Data"])
 
     if _ssec == "📊 Gegevensbronnen":
         st.subheader("Gegevensbronnen voor dividenddata")
@@ -526,17 +526,19 @@ def page_settings():
             clear_cache()
             st.success("✅ Belastinginstellingen opgeslagen!")
 
-        st.divider()
+    if _ssec == "💰 Dividenden":
         st.subheader("💰 Dividendvrijstelling (personenbelasting)")
         st.caption("De eerste schijf 'gewone' aandelendividenden per belastingplichtige is vrijgesteld "
                    "van roerende voorheffing; je recupereert die RV via de aangifte (codes 1437/2437). "
                    "Geldt niet voor dividenden van fondsen/ETF's. Het bedrag is sinds 2025 niet "
-                   "geïndexeerd (t/m aanslagjaar 2030).")
+                   "geïndexeerd (t/m aanslagjaar 2030). Het huwelijksstelsel (aantal belastingplichtigen) "
+                   "stel je in bij 🧾 Meerwaardebelasting.")
         div_exemp = st.number_input("Vrijgestelde dividenden per persoon (€)",
                                     min_value=0.0, value=float(db.get_setting("dividend_exemption_per_person", "833")),
                                     step=1.0,
                                     help="Inkomstenjaar 2025/2026: €833 p.p. (max €249,90 recupereerbare RV p.p.). "
-                                         "Het aantal personen volgt uit het huwelijksstelsel hierboven.")
+                                         "Het aantal personen volgt uit het huwelijksstelsel bij "
+                                         "🧾 Meerwaardebelasting.")
         fbb_on = st.checkbox("FBB voor Franse aandelen toepassen",
                              value=db.get_setting("fbb_enabled", "0") == "1",
                              help="Forfaitair gedeelte buitenlandse belasting (verdrag BE-FR): 15% van het "

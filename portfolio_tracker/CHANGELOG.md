@@ -2,6 +2,73 @@
 
 Alle noemenswaardige wijzigingen aan de Portfolio Tracker add-on.
 
+## 1.8.18
+### 📅 Dividendkalender: rekeningen, uitsluitingen en handmatig markeren
+
+Vijf verbeteringen aan de dividendkalender (💰 Dividenden → 📅 Kalender), plus een
+verificatie van de terug te vorderen roerende voorheffing.
+
+**Rekeningsplitsing**
+
+Hield je een activum op meerdere rekeningen op de ex-datum, dan gaf de kalender
+tot nu toe **één lijn** met het opgetelde aantal. Vanaf nu krijgt elke rekening
+haar **eigen lijn** met haar eigen aantal (en dus haar eigen fiscale keten — een
+uitkering wordt altijd op één rekening gestort). De boekknop ("📥 Boek dit
+dividend") kiest daardoor meteen de juiste rekening; de aparte rekeningkeuze
+hieronder blijft alleen nog nuttig als er iets moet gecorrigeerd worden.
+
+**Geen lijnen meer zonder positie**
+
+De scope **'In portefeuille'** toont voortaan enkel nog lijnen waarvoor je op de
+ex-datum ook effectief stukken aanhield. Dat sluit twee gevallen uit die vroeger
+wél verschenen: activa zonder open positie, en uitkeringen van vóór je eerste
+aankoop van dat activum. De scope **'Alles (ook suggesties)'** laat dat filter
+bewust ongemoeid — die bestaat net om uitkeringen te tonen van activa die je
+(nog) niet aanhoudt.
+
+**'Geen dividend'-vinkje (🏢 Activa → 📋 Overzicht)**
+
+Nieuwe kolom naast 'Div=aandeel': **Geen dividend**, voor fondsen die nooit een
+uitkering doen — zoals de FCPE Multiple-fondsen, waar het rendement volledig in
+de PHMP-koersformule zit. Aangevinkt activum verdwijnt overal uit de
+dividendkalender: geen automatische ophaling, geen kalenderlijnen, geen
+'nog te boeken'-waarschuwing op de statuspagina.
+
+**Handmatig markeren als geboekt**
+
+Detecteert de app een boeking niet automatisch (bv. een afwijkende datum buiten
+het venster van drie weken), dan zet je een kalenderlijn nu zelf op 'geboekt' via
+een nieuwe knop onder de tabel. Dat vinkje komt bovenop de automatische
+detectie — één van beide 'waar' volstaat.
+
+**Instellingen opgesplitst**
+
+De dividendvrijstelling en FBB-instellingen (voorheen onderaan bij
+🧾 Meerwaardebelasting) staan nu op hun eigen tab: **💰 Dividenden**.
+
+**Verificatie: terug te vorderen roerende voorheffing**
+
+Nagekeken naar aanleiding van een melding dat het bedrag niet leek te wijzigen
+tussen twee jaren met duidelijk verschillende onderliggende data. De berekening
+plafonneert terecht op 30% x €1.666 = €499,80: zodra het kwalificerend
+brutodividend én de effectief ingehouden Belgische RV in een jaar boven dat
+plafond uitkomen, geeft de vrijstelling nooit meer terug dan dat vaste bedrag —
+ongeacht hoe hoog de onderliggende bedragen daarboven nog oplopen. Geen wijziging
+nodig; de bestaande logica in `belgian_tax.dividend_tax_benefit()` klopt.
+
+**Technisch**
+
+- Nieuwe kolom `assets.no_dividend` (migratie, default 0).
+- Nieuwe kolom `dividend_calendar.manual_booked` (migratie, default 0), met
+  `db.set_calendar_manual_booked()`.
+- `db.set_no_dividend()` / `db.is_no_dividend()`.
+- `views.common.calendar_rows()` herschreven: splitst per rekening, sluit
+  `no_dividend`-activa uit, en het `only_held`-filter dekt nu ook 'uitkering
+  vóór eerste aankoop'. Nieuwe `row_key` (`entry_id::rekening`) per lijn, want
+  hetzelfde kalender-`id` kan nu op meerdere lijnen (rekeningen) voorkomen.
+  Bestaande aanroepers (`overdue_dividend_rows`, status- en dividendpagina)
+  blijven werken zonder aanpassing van hun eigen logica.
+
 ## 1.8.17
 ### 🔀 Fonds transfereren (fondsfusie / klasse-omzetting)
 

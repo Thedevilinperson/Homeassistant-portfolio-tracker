@@ -1107,27 +1107,56 @@ def calendar_rows(tickers=None, since=None, until=None,
                   only_held: bool = False) -> list[dict]:
     """Kalenderlijnen verrijkt met je eigen positie en de boekingsstatus.
 
-    Per lijn komt erbij: het aantal stukken dat je op de ex-datum aanhield (per
-    rekening), het geschatte brutobedrag, of er al een dividend rond die datum
-    geboekt is, en op welke datum de lijn hoort (betaaldatum, anders ex-datum).
+    Werd een activum op meerdere rekeningen aangehouden op de ex-datum, dan geeft
+    dat hier NIET één lijn met een opgeteld aantal, maar één lijn PER rekening —
+    elk met haar eigen aantal (en dus haar eigen fiscale keten, want een dividend
+    wordt altijd op één rekening uitgekeerd). 'only_held' (True voor de scope
+    'In portefeuille') laat bovendien lijnen weg waarvoor je op de ex-datum nergens
+    stukken had — dus ook activa zonder open positie, en uitkeringen van vóór je
+    eerste aankoop. Bij 'only_held=False' (scope 'Alles', incl. suggesties) komt
+    zo'n lijn er wél nog bij, zonder rekening/aantal — dat is precies wat die scope
+    moet tonen. Activa met het vinkje 'Geen dividend' (bv. FCPE Multiple-fondsen
+    die nooit uitkeren) worden hier altijd volledig uitgesloten.
+
+    Per lijn komt erbij: het aantal stukken dat je op de ex-datum aanhield op DIE
+    rekening, het geschatte brutobedrag, of er al een dividend rond die datum
+    geboekt is (automatisch gedetecteerd of handmatig aangevinkt), en op welke
+    datum de lijn hoort (betaaldatum, anders ex-datum).
     """
     rows = []
     for e in db.get_dividend_calendar(tickers, since=since, until=until):
-        held = held_qty_by_account(e["ticker"], e["ex_date"])
-        qty = sum(held.values())
-        if only_held and qty <= 0:
+        if db.is_no_dividend(e["ticker"]):
             continue
+        held = {a: q for a, q in
+                held_qty_by_account(e["ticker"], e["ex_date"]).items() if q > 1e-9}
         amt = e.get("amount")
-        rows.append({
+        base = {
             **e,
             "datum": calendar_date(e),
             "datum_is_ex": not bool(e.get("pay_date")),
-            "aantal": qty,
-            "per_rekening": held,
-            "bruto_geschat": (round(qty * amt, 4) if (qty and amt) else None),
-            "geboekt": db.dividend_booked_near(e["ticker"], calendar_date(e)),
-        })
-    rows.sort(key=lambda r: (r["datum"], r["ticker"]))
+            "geboekt": (db.dividend_booked_near(e["ticker"], calendar_date(e))
+                        or bool(e.get("manual_booked"))),
+        }
+        if held:
+            for acct, qty in sorted(held.items()):
+                rows.append({
+                    **base,
+                    "account": acct,
+                    "aantal": qty,
+                    "per_rekening": {acct: qty},
+                    "bruto_geschat": (round(qty * amt, 4) if amt else None),
+                    "row_key": f"{e['id']}::{acct}",
+                })
+        elif not only_held:
+            rows.append({
+                **base,
+                "account": None,
+                "aantal": 0.0,
+                "per_rekening": {},
+                "bruto_geschat": None,
+                "row_key": f"{e['id']}::_",
+            })
+    rows.sort(key=lambda r: (r["datum"], r["ticker"], r.get("account") or ""))
     return rows
 
 

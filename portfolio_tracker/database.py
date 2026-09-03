@@ -461,6 +461,15 @@ def _migrate(conn):
     )""")
     cur.execute("CREATE INDEX IF NOT EXISTS idx_divcal_ticker "
                 "ON dividend_calendar(ticker, ex_date)")
+    # Handmatige 'geboekt'-markering: naast de automatische detectie (een dividend
+    # rond dezelfde datum in de 'dividends'-tabel) kan je een lijn hier zelf als
+    # geboekt aanvinken — bv. omdat je ze via een ANDERE weg al verwerkt hebt, of
+    # omdat de automatische detectie de boeking niet herkent (bv. een datum die
+    # meer dan drie weken afwijkt). Overschrijft de automatische detectie niet:
+    # één van beide 'waar' maakt de lijn geboekt (zie views/common.calendar_rows).
+    if not _column_exists(cur, "dividend_calendar", "manual_booked"):
+        cur.execute("ALTER TABLE dividend_calendar ADD COLUMN manual_booked "
+                    "INTEGER DEFAULT 0")
 
     # Handmatig ingegeven AI-kosten: de werkelijke factuur van OpenAI. De geraamde
     # kost uit ai_usage blijft er BEWUST naast staan in een aparte tabel. Zou een
@@ -506,6 +515,14 @@ def _migrate(conn):
     # zijn fonds fiscaal als een gewoon aandeel behandeld wordt.
     if not _column_exists(cur, "assets", "dividend_as_stock"):
         cur.execute("ALTER TABLE assets ADD COLUMN dividend_as_stock INTEGER DEFAULT 0")
+
+    # Sommige fondsen keren NOOIT een dividend uit (bv. de FCPE Multiple-fondsen:
+    # het rendement zit volledig in de PHMP-koersformule, niet in een uitkering).
+    # Dit vinkje sluit zo'n activum overal uit van de dividendkalender — geen
+    # ophaling, geen kalenderlijnen, geen 'nog te boeken'-waarschuwingen — zodat
+    # het geen ruis genereert voor een uitkering die nooit komt.
+    if not _column_exists(cur, "assets", "no_dividend"):
+        cur.execute("ALTER TABLE assets ADD COLUMN no_dividend INTEGER DEFAULT 0")
 
     # Afgeleide koers — voor effecten zonder eigen (publieke) notering waarvan de
     # waarde een formule op een ONDERLIGGEND activum is, zoals FCPE-werkgeversfondsen
@@ -863,6 +880,24 @@ def is_dividend_as_stock(ticker) -> bool:
                        (ticker.upper(),)).fetchone()
     conn.close()
     return bool(row and row["dividend_as_stock"])
+
+
+def set_no_dividend(ticker, enabled: bool):
+    """Zet/wis 'geen dividend' voor een activum (bv. FCPE Multiple-fondsen die
+    nooit uitkeren). Sluit het activum uit van de dividendkalender."""
+    conn = get_connection()
+    conn.execute("UPDATE assets SET no_dividend=? WHERE ticker=?",
+                 (1 if enabled else 0, ticker.upper()))
+    conn.commit()
+    conn.close()
+
+
+def is_no_dividend(ticker) -> bool:
+    conn = get_connection()
+    row = conn.execute("SELECT no_dividend FROM assets WHERE ticker=?",
+                       (ticker.upper(),)).fetchone()
+    conn.close()
+    return bool(row and row["no_dividend"])
 
 
 def get_accounts() -> list[str]:
@@ -2331,6 +2366,17 @@ def get_dividend_calendar(tickers=None, since: str | None = None,
 def delete_dividend_calendar_entry(entry_id: int):
     conn = get_connection()
     conn.execute("DELETE FROM dividend_calendar WHERE id=?", (int(entry_id),))
+    conn.commit()
+    conn.close()
+
+
+def set_calendar_manual_booked(entry_id: int, enabled: bool):
+    """Handmatige 'geboekt'-markering voor één kalenderlijn (zie migratie hierboven
+    voor de achtergrond). Geldt voor de volledige uitkering — dus voor alle
+    rekeningen samen — net als de automatische detectie in 'dividend_booked_near'."""
+    conn = get_connection()
+    conn.execute("UPDATE dividend_calendar SET manual_booked=? WHERE id=?",
+                 (1 if enabled else 0, int(entry_id)))
     conn.commit()
     conn.close()
 
