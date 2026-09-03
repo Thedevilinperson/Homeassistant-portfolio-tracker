@@ -444,7 +444,13 @@ def _fifo_core(transactions: list[dict], snapshots: dict | None = None):
 
         if txn["transaction_type"] == "buy":
             pos["lots"].append({
-                "date":               txn["date"],
+                # Normaal gewoon txn["date"]. Voor een fondstransfer (is_transfer)
+                # is 'date' de TRANSFERDATUM (nodig voor de juiste FIFO-volgorde
+                # t.o.v. andere transacties op dit activum en voor een correcte
+                # portefeuille-evolutie); 'origin_date' bewaart dan de ECHTE
+                # oorspronkelijke aankoopdatum van het lot, en die telt hier —
+                # o.a. voor de fotomoment-grens van het regime (REGIME_START_YEAR).
+                "date":               txn.get("origin_date") or txn["date"],
                 "quantity":           qty,
                 "remaining_quantity": qty,
                 "price_per_unit":     price_eur,   # EUR
@@ -457,7 +463,8 @@ def _fifo_core(transactions: list[dict], snapshots: dict | None = None):
             pos["total_quantity"] += qty
             pos["total_cost"]     += eur_total
 
-        else:  # sell
+        else:  # sell (of transfer_out — zie is_transfer)
+            is_transfer  = bool(txn.get("is_transfer"))
             sell_qty     = qty
             sell_total   = eur_total          # EUR opbrengst (kosten apart)
             sell_year    = _year(txn["date"])
@@ -476,7 +483,9 @@ def _fifo_core(transactions: list[dict], snapshots: dict | None = None):
                 portion_proceeds = consumed * price_eur
                 cost_basis += portion_cost
 
-                if snap_unit is not None and _year(lot["date"]) < REGIME_START_YEAR:
+                if is_transfer:
+                    pass  # fondstransfer: geen belastbaar feit, draagt niets bij
+                elif snap_unit is not None and _year(lot["date"]) < REGIME_START_YEAR:
                     F = snap_unit * consumed
                     taxable_gl += fotomoment_taxable(portion_proceeds, portion_cost,
                                                      F, sell_year)
@@ -496,9 +505,15 @@ def _fifo_core(transactions: list[dict], snapshots: dict | None = None):
                 "sell_price": price_eur,
                 "sell_total": sell_total,
                 "cost_basis": cost_basis,
-                "gain_loss":  sell_total - cost_basis,   # economisch (kosten tellen NIET mee)
-                "taxable_gain_loss": taxable_gl,         # fiscale basis (fotomoment toegepast)
+                # Bij een fondstransfer bewust ALLEBEI op 0: geen verkoop, geen
+                # gerealiseerde (of fiscale) meer-/minwaarde. De 'ingebedde'
+                # meer-/minwaarde blijft gewoon verder leven als ongerealiseerd op
+                # het bestemmingsfonds (dezelfde kostbasis verhuisde mee) — ze hier
+                # toch tonen zou haar dubbel tellen in de 'totale W/V'-metrics.
+                "gain_loss":  0.0 if is_transfer else (sell_total - cost_basis),
+                "taxable_gain_loss": 0.0 if is_transfer else taxable_gl,
                 "fotomoment_applied": used_fotomoment,
+                "is_transfer": is_transfer,
             })
             pos["total_quantity"] = max(0.0, pos["total_quantity"] - sell_qty)
             pos["total_cost"]     = max(0.0, pos["total_cost"]     - cost_basis)
@@ -607,6 +622,66 @@ def open_position_tickers(epsilon: float = 1e-6) -> tuple[list[str], list[str]]:
         else:
             closed_t.append(tk)
     return open_t, closed_t
+
+
+def available_quantity(ticker: str, account: str, epsilon: float = 1e-6) -> float:
+    """Som van de resterende FIFO-hoeveelheid van (ticker, rekening) — hoeveel er
+    op dit moment beschikbaar is om te verkopen of te transfereren."""
+    txns = db.get_transactions(ticker=ticker, account=account)
+    by_acct = build_fifo_positions_by_account(txns)
+    pos = (by_acct.get(account) or {}).get(ticker)
+    if not pos:
+        return 0.0
+    return sum(l["remaining_quantity"] for l in pos["lots"]
+              if l["remaining_quantity"] > epsilon)
+
+
+def plan_transfer_lots(ticker: str, account: str, quantity: float,
+                       epsilon: float = 1e-6) -> dict:
+    """Bepaal — zonder iets te wijzigen — welke bestaande FIFO-loten van
+    (ticker, rekening) een transfer van 'quantity' stuks zou opeisen, oudste lot
+    eerst. Gebruikt door database.execute_fund_transfer() om de bestemmings-
+    transacties met de JUISTE oorspronkelijke datum en kostbasis per lot aan te
+    maken (zie ook de opmerking bij 'origin_date' in _fifo_core).
+
+    Returns bij succes: {"portions": [{"date","quantity","price_per_unit",
+    "lock_until"}, ...], "locked_quantity": .., "available": ..}
+    Bij te weinig stukken: {"error": "..."}.
+    """
+    from datetime import date as _date
+    txns = db.get_transactions(ticker=ticker, account=account)
+    by_acct = build_fifo_positions_by_account(txns)
+    pos = (by_acct.get(account) or {}).get(ticker)
+    lots = list(pos["lots"]) if pos else []
+    available = sum(l["remaining_quantity"] for l in lots
+                    if l["remaining_quantity"] > epsilon)
+    if quantity <= epsilon:
+        return {"error": "Transfer moet een positief aantal stuks zijn.", "available": available}
+    if quantity > available + epsilon:
+        return {"error": f"Onvoldoende stukken: {available:g} beschikbaar op "
+                          f"({ticker}, {account}), {quantity:g} gevraagd.",
+                "available": available}
+
+    remaining, portions, locked_used = quantity, [], 0.0
+    today = _date.today().isoformat()
+    for lot in lots:
+        if remaining <= epsilon:
+            break
+        rem_lot = lot.get("remaining_quantity") or 0.0
+        if rem_lot <= epsilon:
+            continue
+        take = min(rem_lot, remaining)
+        portions.append({
+            "date":            lot["date"],           # oorspronkelijke aankoopdatum
+            "quantity":        take,
+            "price_per_unit":  lot["price_per_unit"],  # EUR
+            "lock_until":      lot.get("lock_until"),
+        })
+        lu = (lot.get("lock_until") or "")[:10]
+        if lu and lu > today:
+            locked_used += take
+        remaining -= take
+    return {"portions": portions, "locked_quantity": locked_used, "available": available}
 
 
 # ── Portefeuillewaarde (EUR) ─────────────────────────────────────────────────

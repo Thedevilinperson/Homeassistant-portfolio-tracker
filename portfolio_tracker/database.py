@@ -12,6 +12,7 @@ import os
 import json
 import logging
 import shutil
+import uuid
 from datetime import datetime, date as _date, timedelta
 from pathlib import Path
 
@@ -312,6 +313,17 @@ def _migrate(conn):
         # vlag naast is_performance_share, zodat de vesting-zienswijzen (personen-
         # belasting als kost/investering) er niet door vervuild raken.
         ("is_stock_dividend",    "INTEGER DEFAULT 0"),
+        # Fondstransfer/-fusie (bv. FCPE-klasse-omzetting): economisch dezelfde
+        # belegging, geen verkoop. is_transfer markeert BEIDE benen (de 'sell' op
+        # het bronfonds en de 'buy' op het bestemmingsfonds) zodat cashberekening,
+        # TOB en meerwaardebelasting ze overslaan. transfer_group koppelt alle
+        # benen van EEN transfer. origin_date bewaart de ECHTE oorspronkelijke
+        # aankoopdatum van het lot (voor de fotomoment-grens van het fiscale
+        # regime); de gewone 'date' blijft de transferdatum zelf, zodat FIFO-
+        # volgorde en de portefeuille-evolutie chronologisch correct blijven.
+        ("is_transfer",          "INTEGER DEFAULT 0"),
+        ("transfer_group",       "TEXT"),
+        ("origin_date",          "TEXT"),
     ]
     for col, ddl in txn_cols:
         if not _column_exists(cur, "transactions", col):
@@ -1057,6 +1069,8 @@ def compute_cash_positions(accounts=None) -> dict:
     Performance shares (toekenningen) kosten geen brokergeld: hun aankoop telt voor €0.
     De personenbelasting erop is geen brokerbeweging (doorgaans via loon) en zit hier
     dus niet in — betaalde je ze tóch vanaf de rekening, boek ze dan als een opname.
+    Een fondstransfer (is_transfer) kost evenmin brokergeld: er verhuist geen cash,
+    enkel het fonds waarin je al zat verandert van naam/ISIN.
     """
     accs = set(accounts) if accounts else None
 
@@ -1084,6 +1098,8 @@ def compute_cash_positions(accounts=None) -> dict:
         r = _row(t.get("account"))
         tot = t.get("total_amount_eur") or 0.0
         fees = (t.get("costs_eur") or 0.0) + (t.get("tob_tax") or 0.0)
+        if t.get("is_transfer"):
+            continue                         # fondstransfer: geen cashbeweging
         if t["transaction_type"] == "buy":
             if t.get("is_performance_share") or t.get("is_stock_dividend"):
                 continue                     # toekenning/stockdividend: geen cash-uitgave
@@ -1138,7 +1154,12 @@ def cash_ledger(accounts=None) -> list[dict]:
         fees = (t.get("costs_eur") or 0.0) + (t.get("tob_tax") or 0.0)
         acc  = t.get("account") or DEFAULT_ACCOUNT
         desc = f"{t['quantity']:g} × {t['ticker']}"
-        if t["transaction_type"] == "buy":
+        if t.get("is_transfer"):
+            label = "Transfer uit" if t["transaction_type"] == "sell" else "Transfer naar"
+            items.append({"date": t["date"][:10], "account": acc, "label": label,
+                          "delta": 0.0, "desc": desc + " (fondstransfer, geen cash)",
+                          "source": "txn", "ref": t["id"]})
+        elif t["transaction_type"] == "buy":
             if t.get("is_performance_share"):
                 items.append({"date": t["date"][:10], "account": acc, "label": "Toekenning",
                               "delta": 0.0, "desc": desc + " (geen cash)", "source": "txn", "ref": t["id"]})
@@ -2633,6 +2654,119 @@ def delete_asset(ticker: str):
     conn.close()
 
 
+def execute_fund_transfer(source_ticker: str, dest_ticker: str, account: str,
+                          quantity: float, transfer_date: str,
+                          dest_account: str | None = None,
+                          notes: str | None = None) -> dict:
+    """Voer een fondstransfer/-fusie uit: 'quantity' stuks van source_ticker
+    verhuizen naar dest_ticker, MET BEHOUD van de FIFO-kostbasis én de
+    oorspronkelijke aankoopdatum per lot. Fiscaal GEEN belastbaar feit: geen
+    beurstaks, geen gerealiseerde meer-/minwaarde, en GEEN cashbeweging (net als
+    een toekenning of stockdividend — zie is_transfer in compute_cash_positions()
+    en cash_ledger()).
+
+    Werkwijze:
+      1. Bepaal — zonder iets te schrijven — welke bestaande loten van
+         (source_ticker, account) door deze hoeveelheid worden opgeëist, oudste
+         eerst (belgian_tax.plan_transfer_lots()).
+      2. Eén 'sell'-transactie op source_ticker (is_transfer=1, tob_tax=0) GEDATEERD
+         op de transferdatum, voor de volledige hoeveelheid. Het bedrag is de som
+         van de opgeëiste kostbasis (geen marktwaarde nodig): de fiscale motor
+         negeert dit bedrag toch voor is_transfer-transacties en boekt altijd 0
+         winst/verlies (zie belgian_tax._fifo_core).
+      3. Eén 'buy'-transactie PER opgeëist lot op dest_ticker (is_transfer=1,
+         tob_tax=0), telkens GEDATEERD op de transferdatum (voor de juiste FIFO-
+         volgorde t.o.v. eventuele andere transacties op dest_ticker en voor een
+         correcte portefeuille-evolutie) maar met 'origin_date' op de ECHTE
+         oorspronkelijke aankoopdatum van dat lot — die telt voor de kostbasis-
+         continuïteit en de fotomoment-grens van het regime. Prijs (EUR) en een
+         eventuele lock_until worden exact van het bronlot overgenomen.
+
+    dest_account: rekening voor de bestemming; standaard dezelfde rekening als de
+    bron (het is dezelfde bewaarplaats, enkel het fonds verandert van naam/ISIN).
+
+    Geeft {"ok": False, "error": ...} bij een probleem (bv. onvoldoende stukken),
+    anders {"ok": True, "group", "out_id", "in_ids", "portions", "locked_quantity"}.
+    """
+    import belgian_tax as _bt
+    source_ticker = (source_ticker or "").upper()
+    dest_ticker   = (dest_ticker or "").upper()
+    account       = account or DEFAULT_ACCOUNT
+    dest_account  = dest_account or account
+    transfer_date = str(transfer_date)[:10]
+
+    if source_ticker == dest_ticker and account == dest_account:
+        return {"ok": False, "error": "Bron en bestemming zijn identiek (zelfde "
+                                      "activum, zelfde rekening) — er is niets te transfereren."}
+    if not get_asset(dest_ticker):
+        return {"ok": False, "error": f"Bestemmingsactivum {dest_ticker} bestaat nog "
+                                      "niet — voeg het eerst toe via 🏢 Activa."}
+
+    plan = _bt.plan_transfer_lots(source_ticker, account, quantity)
+    if plan.get("error"):
+        return {"ok": False, "error": plan["error"]}
+    portions = plan["portions"]
+    if not portions:
+        return {"ok": False, "error": "Geen stukken gevonden om te transfereren."}
+
+    group     = "xfer_" + uuid.uuid4().hex[:10]
+    dest_name = (get_asset(dest_ticker) or {}).get("name") or dest_ticker
+    src_name  = (get_asset(source_ticker) or {}).get("name") or source_ticker
+    total_cost = sum(p["quantity"] * p["price_per_unit"] for p in portions)
+
+    out_id = add_transaction(
+        ticker=source_ticker, transaction_type="sell", date=transfer_date,
+        quantity=quantity, price_per_unit=(total_cost / quantity if quantity else 0.0),
+        total_amount=total_cost, currency="EUR", tob_tax=0.0,
+        notes=(notes or f"Transfer naar {dest_name} ({dest_ticker}) — "
+                       f"{quantity:g} stuks · groep {group}"),
+        account=account, costs=0.0, costs_currency="EUR", fx_rate=1.0,
+        total_amount_eur=total_cost, costs_eur=0.0,
+        is_transfer=1, transfer_group=group)
+
+    in_ids = []
+    for p in portions:
+        amt = p["quantity"] * p["price_per_unit"]
+        tid = add_transaction(
+            ticker=dest_ticker, transaction_type="buy", date=transfer_date,
+            quantity=p["quantity"], price_per_unit=p["price_per_unit"],
+            total_amount=amt, currency="EUR", tob_tax=0.0,
+            notes=(f"Transfer vanuit {src_name} ({source_ticker}) — oorspronkelijk "
+                  f"lot van {p['date']} · groep {group}"),
+            account=dest_account, costs=0.0, costs_currency="EUR", fx_rate=1.0,
+            total_amount_eur=amt, costs_eur=0.0,
+            lock_until=p.get("lock_until"),
+            is_transfer=1, transfer_group=group, origin_date=p["date"])
+        in_ids.append(tid)
+
+    return {"ok": True, "group": group, "out_id": out_id, "in_ids": in_ids,
+            "portions": portions, "locked_quantity": plan.get("locked_quantity", 0.0)}
+
+
+def get_fund_transfers() -> list[dict]:
+    """Alle geregistreerde fondstransfers, gegroepeerd per transfer_group.
+    Nieuwste eerst. Elke groep bevat de 'out'-transactie (bron) en de 'in'-
+    transacties (bestemming, één per meegenomen lot)."""
+    conn = get_connection()
+    rows = conn.execute(
+        "SELECT * FROM transactions WHERE is_transfer=1 AND transfer_group IS NOT NULL "
+        "ORDER BY transfer_group, transaction_type DESC, date ASC"
+    ).fetchall()
+    conn.close()
+    groups: dict[str, dict] = {}
+    for r in rows:
+        t = dict(r)
+        g = groups.setdefault(t["transfer_group"], {"group": t["transfer_group"],
+                                                     "out": None, "ins": []})
+        if t["transaction_type"] == "sell":
+            g["out"] = t
+        else:
+            g["ins"].append(t)
+    out = list(groups.values())
+    out.sort(key=lambda g: (g["out"]["date"] if g["out"] else "", g["group"]), reverse=True)
+    return out
+
+
 # ── Transactions ─────────────────────────────────────────────────────────────
 
 def add_transaction(ticker, transaction_type, date, quantity, price_per_unit,
@@ -2640,7 +2774,8 @@ def add_transaction(ticker, transaction_type, date, quantity, price_per_unit,
                     account=DEFAULT_ACCOUNT, costs=0.0, costs_currency="EUR",
                     fx_rate=1.0, total_amount_eur=None, costs_eur=None,
                     price_target=None, is_performance_share=0, income_tax_eur=0.0,
-                    fx_manual=0, tob_manual=0, lock_until=None, is_stock_dividend=0):
+                    fx_manual=0, tob_manual=0, lock_until=None, is_stock_dividend=0,
+                    is_transfer=0, transfer_group=None, origin_date=None):
     if total_amount_eur is None:
         total_amount_eur = total_amount * (fx_rate or 1.0)
     if costs_eur is None:
@@ -2651,14 +2786,17 @@ def add_transaction(ticker, transaction_type, date, quantity, price_per_unit,
            (ticker,transaction_type,date,quantity,price_per_unit,total_amount,
             currency,tob_tax,notes,account,costs,costs_currency,costs_eur,
             total_amount_eur,fx_rate,price_target,is_performance_share,income_tax_eur,
-            fx_manual,tob_manual,lock_until,is_stock_dividend)
-           VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+            fx_manual,tob_manual,lock_until,is_stock_dividend,is_transfer,
+            transfer_group,origin_date)
+           VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
         (ticker.upper(), transaction_type, date, quantity, price_per_unit,
          total_amount, currency, tob_tax, notes, account, costs, costs_currency,
          costs_eur, total_amount_eur, fx_rate, price_target,
          int(is_performance_share or 0), income_tax_eur or 0.0,
          int(fx_manual or 0), int(tob_manual or 0),
-         (str(lock_until)[:10] if lock_until else None), int(is_stock_dividend or 0))
+         (str(lock_until)[:10] if lock_until else None), int(is_stock_dividend or 0),
+         int(is_transfer or 0), transfer_group,
+         (str(origin_date)[:10] if origin_date else None))
     )
     new_id = cur.lastrowid
     conn.commit()
@@ -2675,7 +2813,8 @@ def update_transaction(txn_id: int, **fields):
                "total_amount", "currency", "tob_tax", "notes", "account", "costs",
                "costs_currency", "costs_eur", "total_amount_eur", "fx_rate",
                "price_target", "is_performance_share", "income_tax_eur",
-               "fx_manual", "tob_manual", "lock_until", "is_stock_dividend"}
+               "fx_manual", "tob_manual", "lock_until", "is_stock_dividend",
+               "is_transfer", "transfer_group", "origin_date"}
     sets, vals = [], []
     for k, v in fields.items():
         if k in allowed:

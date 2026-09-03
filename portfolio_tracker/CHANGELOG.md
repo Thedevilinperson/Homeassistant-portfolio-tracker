@@ -2,6 +2,51 @@
 
 Alle noemenswaardige wijzigingen aan de Portfolio Tracker add-on.
 
+## 1.8.17
+### 🔀 Fonds transfereren (fondsfusie / klasse-omzetting)
+
+Een nieuwe sectie **➕ Transacties → 🔀 Fonds transfereren** voor een fondsfusie of
+klasse-omzetting (bv. kapitalisatie → distributie van hetzelfde fonds, of een
+ISIN-wijziging bij een fusie — zoals bij het ENGIE-FCPE-fonds). Economisch blijft
+dat dezelfde belegging: **geen verkoop**, geen beurstaks, geen gerealiseerde
+meer- of minwaarde.
+
+**Wat er verhuist**
+
+- De **kostbasis** én de **oorspronkelijke aankoopdatum per lot** verhuizen exact
+  mee naar het bestemmingsfonds — cruciaal voor de fotomoment-grens van het
+  meerwaarderegime (van kracht sinds 2026): een lot van vóór 2026 blijft ook ná een
+  transfer zijn fotomoment-bescherming behouden.
+- Een eventuele **blokkering** (bv. een werkgeversplan/FCPE dat nog niet vrij is)
+  verhuist mee, met een duidelijke waarschuwing als dat het geval is.
+- Een gedeeltelijke transfer wordt FIFO verwerkt: de oudste stukken verhuizen
+  eerst, net als bij een gewone verkoop.
+
+**Hoe het technisch werkt**
+
+- Eén 'verkoop' op het bronfonds en één 'aankoop' per meegenomen lot op het
+  bestemmingsfonds, allebei gemarkeerd als transfer (`is_transfer`) en gekoppeld
+  via een gedeelde `transfer_group`.
+- **Geen cashbeweging**: een transfer telt voor €0 in de cashpositie en het
+  cash-grootboek, net als een toekenning of stockdividend.
+- **Geen beurstaks, geen belastbare winst**: de fiscale motor (FIFO-kern) boekt
+  voor een transfer altijd 0 gerealiseerde én 0 fiscale winst/verlies, ongeacht de
+  ingebedde meerwaarde — die blijft gewoon verder leven als ongerealiseerd op het
+  bestemmingsfonds, zodat ze nergens dubbel geteld wordt.
+- De transferdatum (niet de oorspronkelijke datum) bepaalt de FIFO-volgorde en de
+  plaats in de portefeuille-evolutie; de oorspronkelijke datum (`origin_date`) telt
+  apart voor de fotomoment-grens. Zo blijven chronologie én fiscaliteit allebei
+  correct, ook als het bestemmingsfonds al langer eigen transacties had.
+- Een logboek met alle transfers, en "ongedaan maken" via de bestaande
+  prullenbak/undo-mechaniek (verwijdert beide benen samen, in één klik terug te
+  zetten).
+- Transferregels zijn herkenbaar in 📋 Overzicht (🔀 Transfer-uit/-in) en in de
+  jaaroverzichten op 🧮 Belasting (🔀 Transfer i.p.v. Verkoop, altijd €0 W/V).
+
+Bedoeld voor een **gedwongen fondsgebeurtenis**, niet voor een bewuste switch naar
+een ander fonds — boek die laatste gewoon als een normale verkoop + aankoop, zodat
+de meerwaarde wél correct belast wordt.
+
 ## 1.8.16
 ### 📈 Golden cross / death cross
 

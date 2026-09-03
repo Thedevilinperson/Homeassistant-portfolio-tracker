@@ -39,7 +39,7 @@ def page_transactions():
     fmt           = lambda t: asset_label(t, names)
 
     _tsec = _section_radio("txn_section",
-        ["📝 Nieuwe transactie", "📋 Overzicht", "🏦 Rekeningkosten"])
+        ["📝 Nieuwe transactie", "📋 Overzicht", "🔀 Fonds transfereren", "🏦 Rekeningkosten"])
 
     CUR = ["EUR", "USD", "GBP", "CHF"]
 
@@ -504,14 +504,20 @@ def page_transactions():
         accounts = db.get_accounts()
         TYPE_LBL = {"buy": "🟢 Aankoop", "sell": "🔴 Verkoop"}
         TYPE_KEY = {v: k for k, v in TYPE_LBL.items()}
+        TYPE_KEY["🔀 Transfer-uit"] = "sell"
+        TYPE_KEY["🔀 Transfer-in"]  = "buy"
+        TYPE_OPTIONS = list(TYPE_LBL.values()) + ["🔀 Transfer-uit", "🔀 Transfer-in"]
         TCUR = ["EUR", "USD", "GBP", "CHF"]
         rows = []
         for t in ordered:
             cur = t["currency"] if t["currency"] in TCUR else "EUR"
+            _type_disp = TYPE_LBL.get(t["transaction_type"], t["transaction_type"])
+            if t.get("is_transfer"):
+                _type_disp = "🔀 Transfer-uit" if t["transaction_type"] == "sell" else "🔀 Transfer-in"
             rows.append({
                 "ID":       t["id"],
                 "Datum":    t["date"][:10],
-                "Type":     TYPE_LBL.get(t["transaction_type"], t["transaction_type"]),
+                "Type":     _type_disp,
                 "Activum":  asset_label(t["ticker"], names),
                 "Aantal":   round(t["quantity"], 4),
                 "Prijs":    round(t["price_per_unit"], 4),
@@ -536,7 +542,7 @@ def page_transactions():
             column_config={
                 "ID":        cc.NumberColumn(disabled=True, width="small"),
                 "Datum":     cc.TextColumn(help="JJJJ-MM-DD"),
-                "Type":      cc.SelectboxColumn(options=list(TYPE_LBL.values())),
+                "Type":      cc.SelectboxColumn(options=TYPE_OPTIONS),
                 "Activum":   cc.TextColumn(disabled=True,
                                            help="Ticker wijzigen doe je via 🏢 Activa (ticker corrigeren)."),
                 "Aantal":    cc.NumberColumn(min_value=0.0, format="%.10g"),
@@ -573,6 +579,11 @@ def page_transactions():
         st.caption("✏️ Bewerk rechtstreeks in de tabel (datum, type, aantal, prijs, munt, rekening, "
                    "kosten, koersdoel, performance shares, notities) en klik op 'Wijzigingen opslaan'. "
                    "Totaal, EUR-tegenwaarde en TOB worden bij het opslaan herberekend.")
+        if any(t.get("is_transfer") for t in ordered):
+            st.caption("🔀 = onderdeel van een fondstransfer (zie 🔀 Fonds transfereren). Aantal of "
+                       "prijs hier aanpassen verandert NIET automatisch de gekoppelde tegenhanger — "
+                       "gebruik voor een correctie liever 'ongedaan maken' in het transferlogboek en "
+                       "voer de transfer opnieuw uit.")
 
         if st.button("💾 Wijzigingen opslaan", type="primary", key="txn_save_inline"):
             n_upd, problems = 0, []
@@ -746,6 +757,151 @@ def page_transactions():
         multiselect_delete("confirm_del_txn", tdel_opts,
                            lambda i, group=None: db.delete_transaction(i, group=group),
                            noun="transactie")
+
+    if _tsec == "🔀 Fonds transfereren":
+        st.subheader("🔀 Fonds transfereren")
+        st.caption(
+            "Voor een fondsfusie of klasse-omzetting (bv. kapitalisatie → distributie "
+            "van hetzelfde fonds, of een ISIN-wijziging bij een fusie zoals bij het "
+            "ENGIE-FCPE-fonds): economisch blijft het dezelfde belegging, dus **geen "
+            "verkoop**. De kostbasis **en** de oorspronkelijke aankoopdatum per lot "
+            "verhuizen automatisch mee naar het bestemmingsfonds — geen beurstaks, geen "
+            "gerealiseerde meer- of minwaarde. Bedoeld voor een **gedwongen "
+            "fondsgebeurtenis**, niet voor een bewuste switch naar een ander fonds — "
+            "boek die laatste als een gewone verkoop + aankoop, zodat de meerwaarde wél "
+            "correct belast wordt.")
+
+        _open_t, _ = tax_mod.open_position_tickers()
+        _open_t = [t for t in _open_t if t in assets_map]
+        if not _open_t:
+            st.info("Geen open posities om te transfereren.")
+        else:
+            _accounts = db.get_accounts()
+            tc1, tc2 = st.columns(2)
+            with tc1:
+                src_ticker = st.selectbox("Van (bronfonds)", sorted(_open_t),
+                                          format_func=fmt, key="xfer_src")
+                src_acct = st.selectbox("Rekening (bron)", _accounts, key="xfer_src_acct")
+            with tc2:
+                _dest_candidates = [t for t in asset_tickers if t != src_ticker]
+                if not _dest_candidates:
+                    st.warning("Voeg eerst het bestemmingsfonds toe via 🏢 Activa.")
+                    dest_ticker = None
+                else:
+                    dest_ticker = st.selectbox("Naar (bestemmingsfonds)",
+                                               sorted(_dest_candidates), format_func=fmt,
+                                               key="xfer_dst")
+                _acct_idx = _accounts.index(src_acct) if src_acct in _accounts else 0
+                dest_acct = st.selectbox("Rekening (bestemming)", _accounts,
+                                         index=_acct_idx, key="xfer_dst_acct")
+
+            _available = tax_mod.available_quantity(src_ticker, src_acct) if src_ticker else 0.0
+            st.caption(f"Beschikbaar op ({fmt(src_ticker)}, {src_acct}): **{_available:g}** stuks.")
+
+            qc1, qc2, qc3 = st.columns([2, 1, 2])
+            with qc1:
+                xfer_qty = st.number_input("Aantal te transfereren", min_value=0.0,
+                                           step=0.0001, format="%.10g", key="xfer_qty")
+            with qc2:
+                st.write("")
+                st.write("")
+                if st.button("Alles", key="xfer_all_btn", width="stretch"):
+                    st.session_state["xfer_qty"] = float(_available)
+                    st.rerun()
+            with qc3:
+                xfer_date = st.date_input("Transferdatum", value=date.today(),
+                                          min_value=date(2000, 1, 1), max_value=date.today(),
+                                          key="xfer_date")
+            xfer_notes = st.text_input(
+                "Notities (optioneel)", key="xfer_notes",
+                placeholder="bv. fusie Link Multiple BEL 2022 naar opvolgerfonds")
+
+            if src_ticker and dest_ticker and xfer_qty and xfer_qty > 0:
+                _plan = tax_mod.plan_transfer_lots(src_ticker, src_acct, xfer_qty)
+                if _plan.get("error"):
+                    st.error(_plan["error"])
+                else:
+                    st.markdown("**Voorbeeld: welke loten meeverhuizen**")
+                    _prev_rows = [{
+                        "Oorspronkelijke datum": p["date"],
+                        "Aantal": p["quantity"],
+                        "Kostbasis/stuk (EUR)": p["price_per_unit"],
+                        "Vrij vanaf": (p.get("lock_until") or "")[:10] or "—",
+                    } for p in _plan["portions"]]
+                    show_df(pd.DataFrame(_prev_rows), width="stretch", hide_index=True,
+                           column_config={
+                               "Aantal": st.column_config.NumberColumn(format="%.10g"),
+                               "Kostbasis/stuk (EUR)": st.column_config.NumberColumn(format="€ %.10g"),
+                           })
+                    if _plan.get("locked_quantity", 0.0) > 1e-9:
+                        st.warning(f"⚠️ **{_plan['locked_quantity']:g}** van deze stukken zijn nog "
+                                  "geblokkeerd (bv. werkgeversplan/FCPE nog niet vrij). De "
+                                  "blokkering verhuist gewoon mee naar het bestemmingsfonds.")
+                    if st.button("🔀 Transfer uitvoeren", type="primary", key="xfer_execute"):
+                        res = db.execute_fund_transfer(
+                            src_ticker, dest_ticker, src_acct, xfer_qty, str(xfer_date),
+                            dest_account=dest_acct, notes=(xfer_notes or None))
+                        if res.get("ok"):
+                            clear_cache()
+                            st.session_state["xfer_qty"] = 0.0
+                            st.success(
+                                f"✅ {xfer_qty:g} stuks van {fmt(src_ticker)} getransfereerd naar "
+                                f"{fmt(dest_ticker)} — {len(res['in_ids'])} lot(en), kostbasis en "
+                                "oorspronkelijke aankoopdatums behouden, geen belastbaar feit.")
+                            st.rerun()
+                        else:
+                            st.error(res.get("error") or "Transfer mislukt.")
+
+        # ── Logboek ──────────────────────────────────────────────────────────
+        st.divider()
+        st.markdown("**Logboek fondstransfers**")
+        transfers = db.get_fund_transfers()
+        if not transfers:
+            st.caption("Nog geen fondstransfers geregistreerd.")
+        else:
+            trows = []
+            for g in transfers:
+                o = g["out"]
+                if not o:
+                    continue
+                dest_tks = sorted({i["ticker"] for i in g["ins"]})
+                trows.append({
+                    "Datum": o["date"][:10],
+                    "Van": asset_label(o["ticker"], names),
+                    "Naar": ", ".join(asset_label(tk, names) for tk in dest_tks),
+                    "Aantal": o["quantity"],
+                    "Kostbasis (EUR)": o["total_amount_eur"],
+                    "Loten": len(g["ins"]),
+                    "Rekening": o.get("account") or db.DEFAULT_ACCOUNT,
+                })
+            show_df(pd.DataFrame(trows), width="stretch", hide_index=True, column_config={
+                "Aantal": st.column_config.NumberColumn(format="%.10g"),
+                "Kostbasis (EUR)": st.column_config.NumberColumn(format="€ %.10g"),
+            })
+            st.caption("Elke transfer bestaat uit één 'verkoop' op het bronfonds en één 'aankoop' "
+                      "per meegenomen lot op het bestemmingsfonds (zichtbaar in 📋 Overzicht met "
+                      "🔀). Beide zijn fiscaal neutraal: 0 beurstaks, 0 gerealiseerde meer- of "
+                      "minwaarde.")
+
+            st.divider()
+            _xfer_del_opts = {
+                g["group"]: (f"{g['out']['date'][:10]} · {asset_label(g['out']['ticker'], names)} "
+                            f"→ {', '.join(asset_label(tk, names) for tk in sorted({i['ticker'] for i in g['ins']}))} "
+                            f"· {g['out']['quantity']:g} stuks")
+                for g in transfers if g.get("out")
+            }
+
+            def _undo_transfer(group_id, group=None):
+                grp = next((g for g in transfers if g["group"] == group_id), None)
+                if not grp:
+                    return
+                for tid in [grp["out"]["id"]] + [i["id"] for i in grp["ins"]]:
+                    db.delete_transaction(tid, group=group)
+
+            multiselect_delete(
+                "confirm_del_xfer", _xfer_del_opts, _undo_transfer, noun="fondstransfer",
+                extra_warning="Dit verwijdert ZOWEL de 'verkoop' op het bronfonds ALS alle "
+                              "bijhorende 'aankopen' op het bestemmingsfonds.")
 
     if _tsec == "🏦 Rekeningkosten":
         st.subheader("🏦 Algemene rekeningkosten")

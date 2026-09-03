@@ -128,6 +128,7 @@ def page_tax():
         rows = [{
             sign_icon(g["gain_loss"]): sign_icon(g["gain_loss"]),
             "Ticker":      g["ticker"],
+            "Type":        "🔀 Transfer" if g.get("is_transfer") else "Verkoop",
             "Verkoopdatum": g["date"],
             "Aantal":      g["quantity"],
             "Kostbasis":   g["cost_basis"],
@@ -140,6 +141,10 @@ def page_tax():
             "Verkoopwaarde": st.column_config.NumberColumn(format="€ %.10g"),
             "Winst/Verlies": st.column_config.NumberColumn(format="€ %.10g"),
         })
+        if any(g.get("is_transfer") for g in year_gains):
+            st.caption("🔀 **Transfer** = fondstransfer/-fusie (➕ Transacties → 🔀 Fonds "
+                       "transfereren): geen verkoop, dus altijd €0 winst/verlies. De "
+                       "kostbasis bleef gewoon behouden op het bestemmingsfonds.")
     else:
         st.info(f"Geen gerealiseerde transacties in {sel_year}.")
 

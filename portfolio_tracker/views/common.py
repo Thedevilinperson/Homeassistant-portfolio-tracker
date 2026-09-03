@@ -220,8 +220,8 @@ def daily_pl(pv: dict, accounts=None) -> dict:
                 continue
             if accounts is not None and (t.get("account") or db.DEFAULT_ACCOUNT) not in accounts:
                 continue
-            if t.get("is_performance_share") or t.get("is_stock_dividend"):
-                continue      # toekenning/stockdividend: geen aan- of verkoop op de markt
+            if t.get("is_performance_share") or t.get("is_stock_dividend") or t.get("is_transfer"):
+                continue      # toekenning/stockdividend/transfer: geen aan- of verkoop op de markt
             todays.setdefault(t["ticker"].upper(), []).append(t)
     except Exception as exc:
         logger.warning(f"daily_pl: transacties van vandaag niet opgehaald ({exc})")
