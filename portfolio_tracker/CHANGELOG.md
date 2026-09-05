@@ -2,6 +2,88 @@
 
 Alle noemenswaardige wijzigingen aan de Portfolio Tracker add-on.
 
+## 1.8.19
+### 🧾 Aangifte: alleen nog de WERKELIJK ingehouden roerende voorheffing
+
+**De fout**
+
+De aangifte gaf dividenden op als terug te vorderen roerende voorheffing waar er
+in werkelijkheid nooit voorheffing was ingehouden. Concreet: de vier
+Amundi-lijnen (Frans FCPE) stonden samen voor zo'n €474 aan "ingehouden" RV,
+terwijl het volledige bedrag na Franse bronbelasting gewoon op de rekening kwam.
+
+De oorzaak zit in de dividendketen. Ontbreekt het netto (④), dan vult de app het
+rekenkundig aan met `④ = ③ × (1 − 30%)` en leidt daaruit een Belgische RV af. Dat
+is een BEREKENING, geen vaststelling: bij een buitenlandse betaler zonder
+Belgische tussenpersoon houdt niemand iets in. De kolom `belgian_rv_withheld`
+bestond wel al, maar werd overal gezet als `1 if berekende_RV > 0` — dus als "de
+keten rekende een RV", niet als "er is er een ingehouden".
+
+Gevolg: twee fouten in één. De voorheffing werd teruggevorderd terwijl er niets
+terug te vorderen viel, én de dividenden ontbraken bij de ZELF aan te geven
+inkomsten waarop nog 30% verschuldigd is.
+
+**Wat dit betekent voor de vaststelling van 1.8.18**
+
+De verificatie van vorige versie klopte op zichzelf — de berekening plafonneert
+terecht op 30% × €1.666 = €499,80 — maar keek naar de verkeerde vraag. Het bedrag
+leek "bevroren" op dat plafond juist ómdat de spookvoorheffing de grondslag
+kunstmatig ver boven de korf duwde. Verwacht dus een LAGER terug te vorderen
+bedrag na deze plaatsing; dat is de correctie, geen nieuwe fout.
+
+**De cash-boeking beslist**
+
+Wat er werkelijk gebeurd is, staat in de cash-boeking van de lijn: werd de
+rekening gecrediteerd met ③ (of ①) in plaats van ④, dan is er geen Belgische RV
+ingehouden. Die regel staat nu op één plaats (`database.rv_withheld_from_cash`)
+en wordt overal gebruikt: bij het toevoegen, bij het bewerken, bij de
+bulkimport — die zette de vlag vroeger altijd op 0 — en bij de knop 'keten
+herberekenen'.
+
+**Zelf te overschrijven**
+
+Nieuwe kolom **🇧🇪 RV ingeh.** in de dividendtabel (💰 Dividenden). Keert je broker
+bruto uit en houdt hij de voorheffing pas later apart af, zet het vinkje dan zelf
+aan; de lijn wordt daarmee als handmatig gecorrigeerd (🔒) gemarkeerd zodat een
+herberekening ze met rust laat. Zonder RV in de keten kan het vinkje niet aan
+staan — er is dan niets om in te houden.
+
+**Namen in de aangiftetabellen**
+
+De onderliggende lijnen op de 🧾 Aangifte-pagina tonen nu de **naam** van het
+activum naast de ticker, plus een kolom **RV ingeh.**. Bij 38 lijnen onder elkaar
+zegt `QS0009103829` niets; `Amundi Label Actions ENGIE` wel.
+
+**Uitwerking en waarschuwingen**
+
+- De vrijstellingskorf wordt gevuld met de dividenden waarop er ECHT voorheffing
+  staat: `qualifying_gross_rv`. Alleen daar valt iets terug te vorderen.
+- De opbouw onder de aangifteregel toont nu apart: in aanmerking mét ingehouden
+  RV, aandelendividend zonder ingehouden RV, en de ongebruikte
+  vrijstellingsruimte.
+- Een notitie benoemt hoeveel lijnen bruto zijn uitbetaald, op welke rekeningen,
+  en welk bedrag de keten ten onrechte als RV rekende.
+- Blijft er vrijstellingsruimte over omdat er niets is ingehouden, dan zegt de app
+  dat expliciet. Code 1437/2437 geeft *ingehouden* voorheffing terug; of de
+  vrijstelling ook toepasbaar is op dividenden die je zelf aangeeft, is betwiste
+  materie — de app rekent conservatief en verwijst naar je boekhouder.
+
+**Migratie**
+
+Een eenmalige herijking zet `belgian_rv_withheld` voor alle bestaande
+dividendlijnen gelijk aan hun cash-boeking. Ze draait één keer (gemarkeerd in
+`settings`) zodat een latere handmatige correctie niet bij elke start opnieuw
+platgeslagen wordt.
+
+**Technisch**
+
+- `database.rv_withheld_from_cash()` — de canonieke regel, één plaats.
+- `database.add_dividend(belgian_rv_withheld=None)` leidt de vlag standaard af.
+- `belgian_tax.dividend_rv_split()` — onderscheidt `chain_rv_eur` (wat de keten
+  rekende) van `be_rv_eur` (wat er effectief is ingehouden).
+- `dividend_tax_benefit()` geeft er `qualifying_gross_rv`,
+  `qualifying_gross_no_rv` en `unused_exemption` bij.
+
 ## 1.8.18
 ### 📅 Dividendkalender: rekeningen, uitsluitingen en handmatig markeren
 

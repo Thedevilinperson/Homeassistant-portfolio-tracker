@@ -246,6 +246,51 @@ def counts_as_dividend_stock(asset: dict) -> bool:
     return bool(asset.get("dividend_as_stock"))
 
 
+def dividend_rv_split(d: dict) -> dict:
+    """Zet één dividendlijn om naar EUR-bedragen en bepaal hoeveel Belgische
+    roerende voorheffing er WERKELIJK is ingehouden.
+
+    Het verschil is fiscaal beslissend, want het bepaalt in welk vak het dividend
+    terechtkomt:
+      • wél ingehouden  -> de RV kan binnen de vrijstelling teruggevorderd worden;
+      • niet ingehouden -> het dividend moet ZELF aangegeven worden en er is nog
+        30% op verschuldigd.
+
+    De keten vult een ontbrekend netto (④) rekenkundig aan met het RV-tarief. Dat
+    zegt niets over wat er echt gebeurd is: bij een buitenlandse betaler zonder
+    Belgische tussenpersoon (bv. een Frans FCPE via Amundi) houdt niemand RV in.
+    De vlag 'belgian_rv_withheld' op de dividendlijn is hier de bron van waarheid;
+    ze wordt standaard uit de cash-boeking afgeleid (zie
+    database.rv_withheld_from_cash) en kan per lijn overschreven worden.
+
+    Retourneert gross_eur, foreign_wht_eur, after_foreign_eur, chain_rv_eur (wat de
+    keten rekende), be_rv_eur (wat er effectief is ingehouden) en rv_withheld.
+    """
+    fx = d.get("fx_rate") or 1.0
+    gross = (d.get("gross_eur") if d.get("gross_eur") is not None
+             else (d.get("gross_amount") or 0.0))
+    foreign = (d.get("foreign_wht_amt") or 0.0) * fx
+    wh = d.get("withholding_eur")
+    if wh is None:
+        wh = (d.get("withholding_tax") or 0.0) * fx
+    chain_rv = max(0.0, (wh or 0.0) - foreign)
+    flag = d.get("belgian_rv_withheld")
+    if flag is None:
+        # Rij van vóór de kolom bestond: terugvallen op dezelfde regel als elders.
+        withheld = bool(db.rv_withheld_from_cash(d.get("cash_basis"), chain_rv))
+    else:
+        withheld = bool(int(flag or 0)) and chain_rv > 0.005
+    return {
+        "gross_eur":         gross,
+        "foreign_wht_eur":   foreign,
+        "after_foreign_eur": max(0.0, gross - foreign),
+        "chain_rv_eur":      chain_rv,
+        "be_rv_eur":         chain_rv if withheld else 0.0,
+        "rv_withheld":       withheld,
+        "cash_basis":        d.get("cash_basis") or "net",
+    }
+
+
 def dividend_tax_benefit(year: int | None = None, accounts=None) -> dict:
     """Bereken het fiscale voordeel op dividenden voor de Belgische personenbelasting:
 
@@ -282,17 +327,14 @@ def dividend_tax_benefit(year: int | None = None, accounts=None) -> dict:
             continue
         a = assets.get(d["ticker"], {})
         country = (a.get("country") or "BE").upper()
-        fx = d.get("fx_rate") or 1.0
-        gross_eur = d.get("gross_eur") if d.get("gross_eur") is not None else (d.get("gross_amount") or 0.0)
-        foreign_wht_eur = (d.get("foreign_wht_amt") or 0.0) * fx
-        wh_eur = d.get("withholding_eur")
-        if wh_eur is None:
-            wh_eur = (d.get("withholding_tax") or 0.0) * fx
-        be_rv_eur = max(0.0, wh_eur - foreign_wht_eur)
-        net_after_foreign = max(0.0, gross_eur - foreign_wht_eur)   # ~ C (grondslag BE RV / FBB)
+        sp = dividend_rv_split(d)
+        gross_eur = sp["gross_eur"]
+        be_rv_eur = sp["be_rv_eur"]                # effectief ingehouden, niet berekend
+        net_after_foreign = sp["after_foreign_eur"]   # ~ C (grondslag BE RV / FBB)
 
         yd = per_year.setdefault(yr, {
-            "qualifying_gross": 0.0, "be_rv_qualifying": 0.0,
+            "qualifying_gross": 0.0, "qualifying_gross_rv": 0.0,
+            "qualifying_gross_no_rv": 0.0, "be_rv_qualifying": 0.0,
             "fbb_base_fr": 0.0, "excluded_gross": 0.0})
         # Enkel individuele aandelen (geen fondsen/ETF's, tenzij expliciet
         # gemarkeerd met 'Dividend telt als aandeel') én echte dividenden
@@ -300,7 +342,15 @@ def dividend_tax_benefit(year: int | None = None, accounts=None) -> dict:
         # 833-vrijstelling
         if counts_as_dividend_stock(a) and (d.get("kind") or "dividend") == "dividend":
             yd["qualifying_gross"] += net_after_foreign
-            yd["be_rv_qualifying"] += be_rv_eur
+            # Enkel dividenden waarop ECHT Belgische RV is ingehouden kunnen iets
+            # opleveren: de vrijstelling geeft ingehouden voorheffing terug. Bij een
+            # bruto uitbetaald dividend valt er niets terug te vorderen — dat hoort
+            # bij de zelf aan te geven inkomsten (30% verschuldigd).
+            if sp["rv_withheld"]:
+                yd["qualifying_gross_rv"] += net_after_foreign
+                yd["be_rv_qualifying"] += be_rv_eur
+            else:
+                yd["qualifying_gross_no_rv"] += net_after_foreign
             if country == "FR":
                 yd["fbb_base_fr"] += net_after_foreign
         else:
@@ -310,13 +360,19 @@ def dividend_tax_benefit(year: int | None = None, accounts=None) -> dict:
     out_years = {}
     tot_reclaim = tot_fbb = 0.0
     for yr, yd in per_year.items():
-        eligible_gross = min(yd["qualifying_gross"], cap_amount)
+        # De korf wordt gevuld met de dividenden waarop RV is ingehouden: enkel
+        # daar staat voorheffing tegenover die teruggegeven kan worden.
+        eligible_gross = min(yd["qualifying_gross_rv"], cap_amount)
         reclaim = min(yd["be_rv_qualifying"], eligible_gross * rv_rate)
         fbb = (yd["fbb_base_fr"] * fbb_rate) if fbb_enabled else 0.0
         out_years[yr] = {
             **yd,
             "cap_amount": cap_amount,
             "eligible_gross": eligible_gross,
+            # Ruimte in de korf die ongebruikt blijft omdat er geen voorheffing
+            # tegenover staat. Informatief: dit is precies het bedrag waarover je
+            # met je boekhouder kunt kijken of er nog iets mee te doen valt.
+            "unused_exemption": max(0.0, cap_amount - eligible_gross),
             "reclaimable_rv": reclaim,
             "fbb": fbb,
             "total_benefit": reclaim + fbb,
@@ -1231,28 +1287,31 @@ def declaration_lines(year: int, accounts=None) -> dict:
     for d in db.get_dividends(year=year):
         if accset is not None and (d.get("account") or db.DEFAULT_ACCOUNT) not in accset:
             continue
-        fx = d.get("fx_rate") or 1.0
-        gross = d.get("gross_eur") if d.get("gross_eur") is not None else (d.get("gross_amount") or 0.0)
-        foreign = (d.get("foreign_wht_amt") or 0.0) * fx
-        wh = d.get("withholding_eur")
-        if wh is None:
-            wh = (d.get("withholding_tax") or 0.0) * fx
-        be_rv = max(0.0, wh - foreign)
+        _a = assets.get(d.get("ticker"), {})
+        sp = dividend_rv_split(d)
         row = {
             "date": str(d["date"])[:10], "ticker": d.get("ticker") or "—",
+            # De naam erbij: een ISIN als QS0009103829 zegt niets bij het nakijken van
+            # een aangifte, zeker niet met tientallen lijnen onder elkaar.
+            "name": (_a.get("name") or d.get("ticker") or "—"),
             "account": d.get("account") or db.DEFAULT_ACCOUNT,
-            "gross_eur": gross, "foreign_wht_eur": foreign,
-            "after_foreign_eur": max(0.0, gross - foreign),
-            "be_rv_eur": be_rv,
-            "country": (assets.get(d.get("ticker"), {}).get("country") or "BE").upper(),
-            "asset_type": assets.get(d.get("ticker"), {}).get("asset_type", "stock"),
-            "counts_stock": counts_as_dividend_stock(assets.get(d.get("ticker"), {})),
+            "gross_eur": sp["gross_eur"], "foreign_wht_eur": sp["foreign_wht_eur"],
+            "after_foreign_eur": sp["after_foreign_eur"],
+            "be_rv_eur": sp["be_rv_eur"],
+            "chain_rv_eur": sp["chain_rv_eur"],
+            "rv_withheld": sp["rv_withheld"],
+            "cash_basis": sp["cash_basis"],
+            "country": (_a.get("country") or "BE").upper(),
+            "asset_type": _a.get("asset_type", "stock"),
+            "counts_stock": counts_as_dividend_stock(_a),
             "kind": d.get("kind") or "dividend",
         }
-        (div_with_rv if be_rv > 0.005 else div_no_rv).append(row)
+        # Doorslaggevend is of er ECHT is ingehouden, niet wat de keten rekende.
+        (div_with_rv if sp["rv_withheld"] else div_no_rv).append(row)
 
     ben = dividend_tax_benefit(year=year, accounts=accounts)
     byear = ben["per_year"].get(year, {})
+    ben_rv_rate = ben.get("rv_rate", 0.30)
     overview = calculate_tax_overview(year=year, account=accounts)
 
     lines = []
@@ -1267,8 +1326,17 @@ def declaration_lines(year: int, accounts=None) -> dict:
             "Dividenden die je rechtstreeks bij een buitenlandse bank of broker ontving, "
             "zonder Belgische tussenpersoon die de roerende voorheffing inhield. Die moet "
             "je ZELF aangeven en er is 30% op verschuldigd. Het bedrag is het brutodividend "
-            "NA de buitenlandse bronbelasting."),
+            "NA de buitenlandse bronbelasting. Of er ingehouden werd, leidt de app af uit "
+            "de CASH-boeking van de lijn: kwam het bruto (③ of ①) op je rekening, dan hield "
+            "niemand iets in. Klopt dat niet voor een lijn, corrigeer dan de kolom "
+            "'🇧🇪 RV ingeh.' bij 💰 Dividenden."),
         "rows": sorted(div_no_rv, key=lambda r: r["date"]),
+        "extra": ({
+            "Bruto vóór buitenlandse bronbelasting": sum(r["gross_eur"] for r in div_no_rv),
+            "Buitenlandse bronbelasting":            sum(r["foreign_wht_eur"] for r in div_no_rv),
+            "Aan te geven (na bronbelasting)":       amt_no_rv,
+            "Verschuldigd bij 30%":                  amt_no_rv * ben_rv_rate,
+        } if div_no_rv else None),
     })
 
     # 2. Terug te vorderen RV binnen de vrijstelling
@@ -1282,14 +1350,18 @@ def declaration_lines(year: int, accounts=None) -> dict:
             "belastingplichtige(n)). Je vult hier de INGEHOUDEN VOORHEFFING in, niet het "
             "dividend zelf. Dividenden van fondsen, ETF's en beveks tellen niet mee, "
             "tenzij je het activum onder 🏢 Activa expliciet markeerde met 'Dividend "
-            "telt als aandeel'."),
+            "telt als aandeel'. Enkel dividenden waarop er ECHT Belgische voorheffing "
+            "is ingehouden staan hieronder: waar niets werd ingehouden, valt er ook "
+            "niets terug te vorderen — die horen bij de aan te geven inkomsten."),
         "rows": sorted([r for r in div_with_rv
                         if r["counts_stock"] and r["kind"] == "dividend"],
                        key=lambda r: -r["be_rv_eur"]),
         "extra": {
-            "In aanmerking komend brutobedrag": byear.get("qualifying_gross", 0.0),
+            "In aanmerking, met ingehouden RV": byear.get("qualifying_gross_rv", 0.0),
             "Waarvan binnen de vrijstelling":   byear.get("eligible_gross", 0.0),
             "Ingehouden Belgische voorheffing": byear.get("be_rv_qualifying", 0.0),
+            "Aandelendividend zonder ingehouden RV": byear.get("qualifying_gross_no_rv", 0.0),
+            "Ongebruikte vrijstellingsruimte":  byear.get("unused_exemption", 0.0),
             "Niet in aanmerking (fondsen/ETF)": byear.get("excluded_gross", 0.0),
         },
     })
@@ -1344,6 +1416,25 @@ def declaration_lines(year: int, accounts=None) -> dict:
     if any(r["country"] not in ("BE", "") for r in div_no_rv + div_with_rv):
         notes.append("Je ontving buitenlandse dividenden. Houd je rekeninguittreksels bij "
                      "de hand: de fiscus kan de ingehouden bronbelasting laten bewijzen.")
+    # Lijnen waar de keten wél een RV rekende maar er niets werd ingehouden: precies
+    # het geval dat de aangifte vroeger fout deed. Benoem het expliciet, met de
+    # rekeningen erbij, zodat je in één oogopslag ziet of de app het juist heeft.
+    _phantom = [r for r in div_no_rv if r["chain_rv_eur"] > 0.005]
+    if _phantom:
+        _accs = sorted({r["account"] for r in _phantom})
+        notes.append(
+            f"{len(_phantom)} dividendlijn(en) op {', '.join(_accs)} kregen bruto uitbetaald: "
+            f"de keten rekende {sum(r['chain_rv_eur'] for r in _phantom):,.2f} EUR aan "
+            "Belgische voorheffing, maar volgens de cash-boeking is die nooit ingehouden. "
+            "Ze staan dus bij de ZELF aan te geven dividenden en niet bij de terug te "
+            "vorderen voorheffing. Klopt dat niet, pas de kolom '🇧🇪 RV ingeh.' aan bij "
+            "💰 Dividenden.")
+    if byear.get("unused_exemption", 0.0) > 0.005 and byear.get("qualifying_gross_no_rv", 0.0) > 0.005:
+        notes.append(
+            f"Er blijft {byear['unused_exemption']:,.2f} EUR vrijstellingsruimte ongebruikt: "
+            "de vrijstelling geeft ingehouden voorheffing terug, en op je bruto uitbetaalde "
+            "aandelendividenden is er niets ingehouden. Of daar via de aangifte nog iets mee "
+            "te doen valt, is betwiste materie — leg het voor aan je boekhouder.")
     return {"year": year, "lines": lines, "notes": notes, "codes": codes,
             "benefit": ben, "overview": overview}
 

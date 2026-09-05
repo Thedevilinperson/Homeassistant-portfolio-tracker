@@ -754,7 +754,11 @@ def _recompute_dividend_chain(divs, rv_rate: float, include_manual: bool = False
             d["id"], gross_amount=prim, withholding_tax=round(wh_eur / fx_prim, 2),
             fx_rate=fx_prim, gross_eur=gross_eur, withholding_eur=wh_eur, net_eur=net_eur,
             foreign_wht_withheld=1 if (rB and rB > 0) else 0,
-            belgian_rv_withheld=1 if (rRV and rRV > 0) else 0,
+            # Niet "de keten rekende een RV", maar "er is er een ingehouden": dat
+            # laatste volgt uit de cash-boeking. Deze lijnen zijn per definitie niet
+            # handmatig gecorrigeerd (die worden overgeslagen), dus er gaat hier geen
+            # eigen keuze verloren.
+            belgian_rv_withheld=db.rv_withheld_from_cash(cbk, rRV),
             gross_before_wht=rA, gross_before_wht_cur=cur if rA is not None else None,
             foreign_wht_amt=rB, foreign_wht_cur=cur if rB is not None else None,
             gross_after_wht=rC, gross_after_wht_cur=cur if rC is not None else None,

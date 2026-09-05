@@ -590,8 +590,51 @@ def _migrate(conn):
         pass
 
     _backfill_price_targets(conn, cur)
+    _backfill_rv_withheld(conn, cur)
 
     conn.commit()
+
+
+def _backfill_rv_withheld(conn, cur):
+    """Eenmalige herijking van 'dividends.belgian_rv_withheld' (t.e.m. 1.8.18).
+
+    Tot nu toe werd die vlag gezet als "de keten BEREKENDE een RV" — en de keten
+    berekent er altijd een zodra het netto ontbreekt, ook voor een dividend waar
+    nooit een Belgische instelling aan te pas kwam. Daardoor stond er bij een
+    Frans FCPE (Amundi) 30% 'ingehouden' voorheffing die in werkelijkheid nooit
+    is afgehouden: het volledige bedrag na Franse bronbelasting kwam op de
+    rekening. Gevolg: de aangifte gaf die dividenden op als terug te vorderen
+    voorheffing i.p.v. als ZELF aan te geven inkomen — twee fouten in één.
+
+    De cash-boeking is de enige harde aanwijzing die de app heeft: wat werd er
+    effectief gecrediteerd? Deze herijking zet de vlag daarop gelijk. Ze draait
+    één keer (gemarkeerd in 'settings') zodat een latere handmatige correctie op
+    een lijn niet bij elke start opnieuw platgeslagen wordt.
+    """
+    row = cur.execute("SELECT value FROM settings WHERE key=?",
+                      ("migr_rv_withheld_from_cash",)).fetchone()
+    if row and str(row["value"]) == "1":
+        return
+    try:
+        cur.execute(f"""
+            UPDATE dividends
+               SET belgian_rv_withheld = CASE
+                     WHEN COALESCE(belgian_rv_amt,
+                                   COALESCE(withholding_tax, 0)
+                                   - COALESCE(foreign_wht_amt, 0)) <= 0.005 THEN 0
+                     WHEN COALESCE(cash_basis, 'net') IN
+                          ({','.join('?' * len(GROSS_CASH_BASES))}) THEN 0
+                     ELSE 1
+                   END
+        """, GROSS_CASH_BASES)
+        n = cur.rowcount
+    except Exception as exc:            # nooit de opstart blokkeren op een migratie
+        logger.warning("Herijking belgian_rv_withheld overgeslagen: %s", exc)
+        return
+    cur.execute(
+        "INSERT OR REPLACE INTO settings (key,value,updated_at) "
+        "VALUES (?,?,datetime('now'))", ("migr_rv_withheld_from_cash", "1"))
+    logger.info("belgian_rv_withheld herijkt op de cash-boeking voor %s dividendlijn(en).", n)
 
 
 def _backfill_price_targets(conn, cur):
@@ -1078,6 +1121,37 @@ def dividend_cash_eur(d: dict) -> float:
     if d.get("cash_eur") is not None:
         return d["cash_eur"] or 0.0
     return dividend_net_eur(d)
+
+
+# Cash-boekingen waarbij het BRUTO bedrag op de rekening komt. Kwam er bruto binnen,
+# dan is er geen Belgische tussenpersoon geweest die roerende voorheffing inhield.
+GROSS_CASH_BASES = ("gross_after", "gross_before")
+
+
+def rv_withheld_from_cash(cash_basis: str | None, chain_rv) -> int:
+    """Is er WERKELIJK Belgische roerende voorheffing ingehouden? (1/0)
+
+    De dividendketen (① bruto → ② bronbelasting → ③ na bronbelasting → 🇧🇪 RV →
+    ④ netto) vult een ontbrekend netto aan met het RV-tarief uit de instellingen.
+    Dat is een REKENKUNDIGE aanvulling, geen vaststelling: bij een buitenlandse
+    betaler zonder Belgische tussenpersoon (bv. een Frans FCPE via Amundi) houdt
+    niemand RV in en komt het volledige bedrag na bronbelasting op de rekening.
+
+    Wat er echt gebeurd is, staat in de CASH-boeking. Werd de rekening gecrediteerd
+    met ③ of ① in plaats van ④, dan is er geen RV ingehouden — en valt er dus ook
+    niets terug te vorderen; het dividend moet integendeel zélf aangegeven worden.
+
+    Dit is de STANDAARDWAARDE. Ze staat als kolom 'belgian_rv_withheld' op de
+    dividendlijn en kan daar overschreven worden — bv. voor een broker die bruto
+    uitkeert en de voorheffing pas later apart afhoudt.
+    """
+    try:
+        rv = float(chain_rv or 0.0)
+    except (TypeError, ValueError):
+        rv = 0.0
+    if rv <= 0.005:
+        return 0
+    return 0 if (cash_basis or "net") in GROSS_CASH_BASES else 1
 
 
 def dividends_net_eur(divs, accounts=None) -> float:
@@ -2996,10 +3070,15 @@ def delete_transaction(txn_id: int, group: str | None = None):
 def add_dividend(ticker, date, gross_amount, withholding_tax=0.0,
                  currency="EUR", notes=None, fx_rate=1.0,
                  gross_eur=None, withholding_eur=None,
-                 foreign_wht_withheld=0, belgian_rv_withheld=0,
+                 foreign_wht_withheld=0, belgian_rv_withheld=None,
                  account=None, details=None, fx_manual=0):
     """ticker mag None zijn voor interest/securities lending die niet aan een
-    specifiek activum gekoppeld zijn (bv. cash-rekeninginterest)."""
+    specifiek activum gekoppeld zijn (bv. cash-rekeninginterest).
+
+    belgian_rv_withheld=None (standaard) leidt de vlag af uit de CASH-boeking
+    (zie rv_withheld_from_cash). Zo hoeft geen enkele oproeper — invoerformulier,
+    bulkimport, herberekening — die regel te herhalen, en kan een oproeper ze nog
+    altijd expliciet overschrijven."""
     if gross_eur is None:
         gross_eur = gross_amount * (fx_rate or 1.0)
     if withholding_eur is None:
@@ -3015,6 +3094,13 @@ def add_dividend(ticker, date, gross_amount, withholding_tax=0.0,
         d["cash_eur"] = d["net_eur"]
     if d.get("kind") is None:
         d["kind"] = "dividend"
+    if belgian_rv_withheld is None:
+        _chain_rv = d.get("belgian_rv_amt")
+        if _chain_rv is None:
+            # Geen expliciete keten meegegeven: leid de RV af uit de totalen.
+            _fx = fx_rate or 1.0
+            _chain_rv = withholding_eur - (d.get("foreign_wht_amt") or 0.0) * _fx
+        belgian_rv_withheld = rv_withheld_from_cash(d.get("cash_basis"), _chain_rv)
     cols = ["ticker", "date", "gross_amount", "withholding_tax", "currency", "notes",
             "fx_rate", "gross_eur", "withholding_eur",
             "foreign_wht_withheld", "belgian_rv_withheld", "account",

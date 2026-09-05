@@ -183,8 +183,10 @@ def page_tax():
                    f"RV-tarief {ben['rv_rate']*100:.0f}%. Enkel individuele aandelen tellen mee "
                    "(fondsen/ETF's niet).")
         m1, m2, m3 = st.columns(3)
-        m1.metric("In aanmerking komende dividenden", eur(yd["qualifying_gross"]),
-                  help="Bruto (na eventuele buitenlandse bronheffing) van individuele aandelen.")
+        m1.metric("In aanmerking komende dividenden", eur(yd.get("qualifying_gross_rv", 0.0)),
+                  help="Bruto (na eventuele buitenlandse bronheffing) van individuele aandelen "
+                       "WAAROP ER ECHT BELGISCHE VOORHEFFING IS INGEHOUDEN. Alleen daar valt "
+                       "iets terug te vorderen; bruto uitbetaalde dividenden geef je zelf aan.")
         m2.metric("Recupereerbare roerende voorheffing", eur(yd["reclaimable_rv"]),
                   help=f"Via codes 1437/2437. Max €{ben['exemption_per_person']*0.30*persons:,.2f} "
                        f"({persons}× €{ben['exemption_per_person']*0.30:,.2f}).")
@@ -195,15 +197,26 @@ def page_tax():
         st.markdown(f"**Totaal fiscaal voordeel {sel_year}: {eur(yd['total_benefit'])}**")
         # Uitwerking / optimalisatie
         lines = []
-        if yd["qualifying_gross"] > yd["cap_amount"]:
-            lines.append(f"Je in aanmerking komende dividenden ({eur(yd['qualifying_gross'])}) overschrijden "
+        _q_rv    = yd.get("qualifying_gross_rv", 0.0)
+        _q_no_rv = yd.get("qualifying_gross_no_rv", 0.0)
+        if _q_rv > yd["cap_amount"]:
+            lines.append(f"Je in aanmerking komende dividenden ({eur(_q_rv)}) overschrijden "
                          f"de vrijstellingskorf ({eur(yd['cap_amount'])}). Vraag de vrijstelling aan voor de "
                          "dividenden met het **hoogste** RV-tarief eerst; je recupereert dan het maximum "
                          f"van {eur(yd['reclaimable_rv'])}.")
         else:
-            lines.append(f"Al je in aanmerking komende dividenden ({eur(yd['qualifying_gross'])}) passen binnen "
+            lines.append(f"Al je in aanmerking komende dividenden ({eur(_q_rv)}) passen binnen "
                          f"de korf ({eur(yd['cap_amount'])}); de volledige ingehouden RV van "
                          f"{eur(yd['reclaimable_rv'])} is recupereerbaar.")
+        if _q_no_rv > 0:
+            lines.append(
+                f"**{eur(_q_no_rv)}** aan aandelendividenden kwam **bruto** binnen — daar is geen "
+                "Belgische voorheffing op ingehouden, dus valt er ook niets terug te vorderen. Die "
+                "bedragen geef je ZELF aan (30% verschuldigd); je vindt ze terug op de "
+                "**🧾 Aangifte**-pagina. Klopt dat niet voor een lijn, zet dan de kolom "
+                "**🇧🇪 RV ingeh.** aan bij 💰 Dividenden."
+                + (f" Daardoor blijft er {eur(yd.get('unused_exemption', 0.0))} vrijstellingsruimte "
+                   "ongebruikt." if yd.get("unused_exemption", 0.0) > 0.005 else ""))
         if yd["excluded_gross"] > 0:
             lines.append(f"€{yd['excluded_gross']:,.2f} aan fonds-/ETF-dividenden komt **niet** in aanmerking "
                          "voor deze vrijstelling.")

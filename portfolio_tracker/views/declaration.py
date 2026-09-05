@@ -22,16 +22,25 @@ logger = logging.getLogger("app.declaration")
 
 
 def _rows_df(rows: list[dict]) -> pd.DataFrame:
-    """Brondetails van een aangifteregel als tabel."""
+    """Brondetails van een aangifteregel als tabel.
+
+    De NAAM staat naast de ticker: bij een lijst van tientallen lijnen zegt een
+    ISIN als QS0009103829 niets, en net dat overzicht heb je nodig om een aangifte
+    na te kijken. 'RV ingeh.' toont of er ECHT Belgische voorheffing is ingehouden
+    (afgeleid uit de cash-boeking) — het onderscheid dat bepaalt in welk vak de
+    lijn thuishoort.
+    """
     return pd.DataFrame([{
         "Datum":            r["date"],
         "Activum":          r["ticker"],
+        "Naam":             r.get("name") or r["ticker"],
         "Rekening":         r["account"],
         "Land":             r["country"],
         "Bruto €":          round(r["gross_eur"], 2),
         "Buitenl. bronb. €": round(r["foreign_wht_eur"], 2),
         "Na bronbel. €":    round(r["after_foreign_eur"], 2),
         "Belg. RV €":       round(r["be_rv_eur"], 2),
+        "RV ingeh.":        bool(r.get("rv_withheld")),
     } for r in rows])
 
 
@@ -114,6 +123,13 @@ def page_declaration():
             if l["rows"]:
                 st.markdown(f"**Onderliggende lijnen ({len(l['rows'])})**")
                 show_df(_rows_df(l["rows"]), width="stretch", hide_index=True)
+                if any(r.get("chain_rv_eur", 0.0) > 0.005 and not r.get("rv_withheld")
+                       for r in l["rows"]):
+                    st.caption(
+                        "🇧🇪 **RV ingeh.** = er is werkelijk Belgische roerende voorheffing "
+                        "afgehouden. Staat dat uit terwijl je broker toch inhield, zet het "
+                        "vinkje dan aan bij 💰 Dividenden — de app leidt het af uit de "
+                        "cash-boeking van de lijn.")
             elif not l.get("extra"):
                 st.caption("Geen onderliggende lijnen.")
         st.divider()

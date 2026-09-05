@@ -761,7 +761,7 @@ def page_dividends():
                         withholding_tax=wh_native, currency=prim_cur, notes=notes or None,
                         fx_rate=fx_prim, gross_eur=gross_eur, withholding_eur=wh_eur,
                         foreign_wht_withheld=1 if (rB and rB > 0) else 0,
-                        belgian_rv_withheld=1 if (rRV and rRV > 0) else 0,
+                        belgian_rv_withheld=db.rv_withheld_from_cash(cash_basis, rRV),
                         account=d_account, details=details,
                         fx_manual=int(bool(_ov)))
                     if d_stock:
@@ -863,6 +863,7 @@ def page_dividends():
                 "FX-koers": round(float(d.get("fx_rate") or 1.0), 6),
                 "FX eigen": bool(d.get("fx_manual")),
                 "Cash":     CASH_LBL.get(d.get("cash_basis") or "net", "④ Netto"),
+                "🇧🇪 RV ingeh.": bool(d.get("belgian_rv_withheld")),
                 "Netto €":  round(_neur(d), 2),
                 "🔒 Handmatig": bool(d.get("manual_override")),
                 "Notities": d.get("notes") or "",
@@ -903,6 +904,15 @@ def page_dividends():
                          "Vink af om weer met de historische marktkoers te rekenen."),
                 "Cash":          cc.SelectboxColumn(options=list(CASH_LBL.values()),
                                                     help="Welk veld naar het cash-grootboek gaat."),
+                "🇧🇪 RV ingeh.": cc.CheckboxColumn(
+                    help="Is er WERKELIJK Belgische roerende voorheffing afgehouden? "
+                         "Standaard afgeleid uit de cash-boeking hiernaast: kwam het bruto "
+                         "(③ of ①) op je rekening, dan hield niemand iets in — zoals bij een "
+                         "Frans FCPE via Amundi. Dit bepaalt of het dividend in de aangifte "
+                         "bij de TERUG TE VORDEREN voorheffing komt of bij de ZELF AAN TE "
+                         "GEVEN inkomsten (30% verschuldigd). Vink zelf aan wanneer je broker "
+                         "bruto uitkeert en de voorheffing pas later apart afhoudt; de lijn "
+                         "wordt dan als handmatig gecorrigeerd (🔒) gemarkeerd."),
                 "Netto €":       cc.NumberColumn(disabled=True, format="%.10g"),
                 "🔒 Handmatig":  cc.CheckboxColumn(
                     help="Deze lijn is door jou handmatig gecorrigeerd. De knop 'keten "
@@ -924,8 +934,8 @@ def page_dividends():
                     orig = rows[i]
                     if all(r[k] == orig[k] or (pd.isna(r[k]) and orig[k] is None)
                            for k in ("Datum", "Soort", "Rekening", "① Bruto", "② Bronbel.", "③ Na bronbel.",
-                                     "④ Netto", "Munt", "Cash", "Notities", "🔒 Handmatig",
-                                     "FX-koers", "FX eigen")):
+                                     "④ Netto", "Munt", "Cash", "🇧🇪 RV ingeh.", "Notities",
+                                     "🔒 Handmatig", "FX-koers", "FX eigen")):
                         continue
                     nd = _date_or_none(str(r["Datum"]))
                     if nd is None:
@@ -987,6 +997,17 @@ def page_dividends():
                         if cash_eur_v is None:
                             cash_eur_v = net_eur
                     wh_eur = max(0.0, gross_eur - net_eur)
+                    # Is er ECHT Belgische RV ingehouden? Standaard uit de cash-boeking;
+                    # heb je het vinkje zelf omgezet, dan telt jouw keuze. Zonder RV in
+                    # de keten kan het vinkje niet aan staan — er is dan niets om in te
+                    # houden, en een 'ja' zou een onbestaand bedrag terugvorderbaar maken.
+                    _rv_flag_edited = not _cell_eq(bool(r["🇧🇪 RV ingeh."]),
+                                                   bool(orig["🇧🇪 RV ingeh."]))
+                    if _rv_flag_edited:
+                        rv_flag = (1 if (bool(r["🇧🇪 RV ingeh."]) and rRV and rRV > 0.005)
+                                   else 0)
+                    else:
+                        rv_flag = db.rv_withheld_from_cash(cbk, rRV)
                     prim_v = rA if rA is not None else (rC if rC is not None else rD)
                     fx_prim = fx_ov or (compute_eur(prim_v, ncur, nd)[0] or 1.0)
                     db.update_dividend(
@@ -997,7 +1018,7 @@ def page_dividends():
                         fx_manual=fx_man,
                         gross_eur=gross_eur, withholding_eur=wh_eur, net_eur=net_eur,
                         foreign_wht_withheld=1 if (rB and rB > 0) else 0,
-                        belgian_rv_withheld=1 if (rRV and rRV > 0) else 0,
+                        belgian_rv_withheld=rv_flag,
                         gross_before_wht=rA, gross_before_wht_cur=ncur if rA is not None else None,
                         foreign_wht_amt=rB, foreign_wht_cur=ncur if rB is not None else None,
                         gross_after_wht=rC, gross_after_wht_cur=ncur if rC is not None else None,
@@ -1007,10 +1028,10 @@ def page_dividends():
                         # Bedragen zelf aangepast? Dan is dit een HANDMATIGE CORRECTIE en
                         # laat de knop 'keten herberekenen' deze lijn voortaan met rust.
                         # (Enkel de datum/rekening/notities wijzigen telt niet als correctie.)
-                        manual_override=1 if any(
+                        manual_override=1 if (_rv_flag_edited or any(
                             not _cell_eq(r[k], orig[k])
                             for k in ("① Bruto", "② Bronbel.", "③ Na bronbel.", "④ Netto")
-                        ) else (1 if bool(r["🔒 Handmatig"]) else 0))
+                        )) else (1 if bool(r["🔒 Handmatig"]) else 0))
                     n_upd += 1
             except Exception as exc:
                 problems.append(f"Onverwachte fout: {exc}")
