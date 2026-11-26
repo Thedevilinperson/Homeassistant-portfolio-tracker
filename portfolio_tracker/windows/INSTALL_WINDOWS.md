@@ -19,9 +19,9 @@ zitten in de database en niet in de HA-configuratie.
 
 ## Installatie
 
-**1. Python installeren.** Versie **3.11 of 3.12** van [https://www.python.org/downloads/](https://www.python.org/downloads/).
-Vink tijdens de installatie *Add python.exe to PATH* aan. Gebruik nog geen 3.13:
-de app draait op numpy 1.x en daarvan bestaan voor 3.13 geen kant-en-klare pakketten.
+**1. Python installeren.** Versie **3.11 of nieuwer** (aanbevolen: de nieuwste, getest
+tot en met 3.14) van [https://www.python.org/downloads/](https://www.python.org/downloads/).
+Vink tijdens de installatie *Add python.exe to PATH* aan.
 
 **2. De repo op je PC zetten**, bijvoorbeeld met `git clone`, of als ZIP downloaden
 en uitpakken. Zet ze op een pad zonder rare tekens, bijvoorbeeld `C:\\\\PortfolioTracker`.
@@ -82,9 +82,9 @@ optie *Add python.exe to PATH*, of open het Python-installatieprogramma opnieuw
 en kies *Modify*.
 
 **Installeren van de pakketten faalt met een compileerfout** - dan wordt er
-geprobeerd iets vanaf broncode te bouwen. Bijna altijd een teken dat je Python-versie
-te nieuw is voor de vastgelegde pakketversies. Controleer met `python --version`
-dat je op 3.11 of 3.12 zit.
+geprobeerd iets vanaf broncode te bouwen. Meestal een teken dat je Python-versie
+nieuwer is dan de pakketten al ondersteunen (bv. een bètaversie van Python). Controleer
+met `python --version` dat je op een stabiele versie vanaf 3.11 zit.
 
 **`ZoneInfoNotFoundError: Europe/Brussels`** - het pakket `tzdata` ontbreekt.
 Windows heeft, anders dan Linux, geen tijdzonedatabank in het systeem zelf.

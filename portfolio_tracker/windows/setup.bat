@@ -21,7 +21,7 @@ if not defined LAUNCHER if %ERRORLEVEL% EQU 0 set "LAUNCHER=python"
 
 if defined LAUNCHER goto :python_gevonden
 echo [FOUT] Python is niet gevonden.
-echo        Installeer Python 3.11 of 3.12 van https://www.python.org/downloads/
+echo        Installeer Python 3.11 of nieuwer (aanbevolen: de nieuwste) van https://www.python.org/downloads/
 echo        en vink tijdens de installatie "Add python.exe to PATH" aan.
 goto :fail
 :python_gevonden
@@ -43,19 +43,12 @@ echo [FOUT] Python 3 is vereist, gevonden versie %PYVER%.
 goto :fail
 :major_ok
 
-if %PYMINOR% GEQ 10 goto :minor_ok
-echo [FOUT] Python 3.10 of hoger is vereist, gevonden %PYVER%.
+rem  Minimum 3.11: recente versies van pandas en NumPy ondersteunen 3.10 niet meer.
+rem  Geen maximum: alle pakketten bestaan als kant-en-klaar pakket tot en met 3.14.
+if %PYMINOR% GEQ 11 goto :minor_ok
+echo [FOUT] Python 3.11 of hoger is vereist, gevonden %PYVER%.
 goto :fail
 :minor_ok
-
-if %PYMINOR% LSS 13 goto :versie_ok
-echo [FOUT] Python %PYVER% wordt nog niet ondersteund.
-echo        De app draait op numpy 1.x en daarvan bestaan geen kant-en-klare
-echo        pakketten voor 3.13 of hoger. De installatie zou proberen te
-echo        compileren en dat mislukt zonder Visual Studio Build Tools.
-echo        Installeer Python 3.11 of 3.12 naast je huidige versie.
-goto :fail
-:versie_ok
 
 rem --- 3. Virtuele omgeving ---------------------------------------------------
 if not exist "%PYTHON%" goto :venv_maken
@@ -72,7 +65,7 @@ echo.
 echo Pakketten installeren. De eerste keer duurt dit enkele minuten ...
 "%PYTHON%" -m pip install --upgrade pip --quiet
 if !ERRORLEVEL! NEQ 0 goto :fail
-"%PYTHON%" -m pip install -r "%WIN_DIR%requirements-windows.txt"
+"%PYTHON%" -m pip install --upgrade -r "%WIN_DIR%requirements-windows.txt"
 if !ERRORLEVEL! NEQ 0 goto :fail
 
 rem --- 5. Streamlit-thema -----------------------------------------------------

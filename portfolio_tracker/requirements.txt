@@ -1,17 +1,23 @@
-streamlit>=1.30.0
-yfinance>=0.2.35
-pandas>=2.0.0
-plotly>=5.15.0
+# Ondergrenzen bewaken enkel een minimum; er staan bewust GEEN bovengrenzen, tenzij
+# er een concrete reden is (die staat dan bij het pakket). Zo krijgt elke herbouw de
+# nieuwste versies in plaats van langzaam achterop te raken.
+streamlit>=1.50.0
+yfinance>=0.2.60
+# pandas 2.2.2 en pyarrow 16 zijn de eerste versies die met NumPy 2 werken. Een
+# oudere versie in een bestaande (Windows-)omgeving zou anders crashen zodra NumPy
+# naar 2.x opschuift. pyarrow komt ook via Streamlit mee, maar zonder ondergrens.
+pandas>=2.2.2
+numpy>=2.0.0
+pyarrow>=16.0.0
+plotly>=6.0.0
 openai>=1.30.0
+# APScheduler 4 is een volledig nieuwe API (geen BlockingScheduler meer) en bestaat
+# enkel als alfaversie. Overstappen vergt een herschrijving van scheduler.py.
 apscheduler>=3.10.0,<4.0
-tzlocal>=4.0
+tzlocal>=5.0
 python-dotenv>=1.0.0
-numpy>=1.24.0,<2.0.0
-# pyarrow 26+ eist NumPy 2 (ImportError bij elke st.dataframe). Streamlit trekt
-# pyarrow ongepind mee, dus vastzetten zolang numpy op 1.x blijft.
-pyarrow>=14.0.0,<26.0.0
-pytz>=2023.3
-requests>=2.30.0
+pytz>=2024.1
+requests>=2.32.0
 openpyxl>=3.1.0
 cryptography>=42.0.0
 pypdf>=4.0.0

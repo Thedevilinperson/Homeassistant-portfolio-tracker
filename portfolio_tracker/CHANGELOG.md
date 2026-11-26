@@ -3,12 +3,43 @@
 Alle noemenswaardige wijzigingen aan de Portfolio Tracker add-on.
 
 ## 1.8.20
-### 🛠️ Herbouw: pyarrow vastgezet op < 26
+### 🛠️ NumPy 2, Python 3.14 en geen onnodige vastzettingen meer
 
-Bij het herbouwen haalde pip pyarrow 26 binnen (komt ongepind mee met Streamlit). Die
-versie eist NumPy 2, terwijl de add-on numpy op 1.x houdt. Gevolg: elke tabel gaf
-`ImportError: pyarrow requires NumPy 2.0 or newer` (o.a. het dashboard). pyarrow staat
-nu vast op `>=14,<26` in requirements.txt.
+**Aanleiding.** Bij het herbouwen haalde pip pyarrow 26 binnen (komt mee met
+Streamlit). Die versie eist NumPy 2, terwijl de add-on NumPy op `<2.0` hield. Gevolg:
+elke tabel crashte met `ImportError: pyarrow requires NumPy 2.0 or newer`. Voor die
+vastzetting was nergens een reden gedocumenteerd; ze dateert uit de tijd dat NumPy 2
+nieuw was en veel pakketten er nog niet mee overweg konden. Dat is voorbij, en de
+vastzetting werkte nu net omgekeerd: ze hield de app weg van de nieuwste versies.
+
+**Wat er veranderd is**
+
+- `numpy>=2.0.0`, zonder bovengrens.
+- Ondergrenzen voor `pandas` (2.2.2) en `pyarrow` (16), de eerste versies die met
+  NumPy 2 werken. Zo kan een bestaande (Windows-)omgeving niet blijven hangen op een
+  oude versie die crasht zodra NumPy opschuift.
+- Docker-image van **Python 3.11 naar 3.14**. Op 3.11 bleef NumPy vastzitten op 2.4,
+  want NumPy 2.5 vereist minstens 3.12. Alle pakketten bestaan voor 3.14 als
+  kant-en-klaar pakket op amd64 én aarch64.
+- Dockerfile: `pip install tzlocal>=4.0` zonder aanhalingstekens werd door de shell
+  gelezen als "installeer tzlocal, schrijf de uitvoer naar een bestand `=4.0`" en
+  installeerde dus eender welke versie. Nu `"tzlocal>=5.0"`.
+- Windows: de blokkade op Python 3.13 en hoger is weg (ze bestond enkel wegens
+  NumPy 1.x). Minimum is nu 3.11, want recente pandas en NumPy ondersteunen 3.10 niet
+  meer. `setup.bat` installeert met `--upgrade`, zodat ook een bestaande installatie
+  naar de nieuwste versies opschuift.
+- Ondergrenzen van de andere pakketten opgetrokken naar versies die de code
+  werkelijk nodig heeft (bv. `width="stretch"` in Streamlit).
+
+**Bewust behouden:** `apscheduler<4.0`. APScheduler 4 bestaat enkel als alfaversie
+en is een volledig nieuwe API zonder `BlockingScheduler`; overstappen vergt een
+herschrijving van `scheduler.py`. De reden staat nu in `requirements.txt`.
+
+**Getest** op Python 3.11, 3.13 en 3.14 met de nieuwste versies (NumPy 2.5.5,
+pandas 3.1.1, pyarrow 26.0.1, Streamlit 1.67): alle 14 pagina's renderen zonder fout
+met een testdatabase, de koerstests van 1.8.20 slagen, de scheduler start zijn jobs,
+en geen enkele module geeft een verouderingswaarschuwing. Ook een oude omgeving
+(NumPy 1.26, pandas 2.1, pyarrow 15) die met `--upgrade` bijgewerkt wordt, werkt.
 
 ### 💱 Koers altijd in de munt van het activum
 

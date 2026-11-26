@@ -1,5 +1,7 @@
-# Officieel Python 3.11 slim — ondersteunt ARM64 (Raspberry Pi 4 / aarch64)
-FROM python:3.11-slim
+# Officieel Python 3.14 slim — ondersteunt ARM64 (Raspberry Pi 4 / aarch64) en amd64.
+# Alle pakketten uit requirements.txt bestaan voor 3.14 als kant-en-klaar wiel op
+# beide architecturen (gecontroleerd bij 1.8.20), dus er wordt niets gecompileerd.
+FROM python:3.14-slim
 
 WORKDIR /app
 
@@ -16,7 +18,9 @@ RUN pip install --no-cache-dir --upgrade pip
 
 # tzlocal apart installeren — directe dependency van apscheduler
 # (apart laag zodat caching dit niet kan overslaan)
-RUN pip install --no-cache-dir tzlocal>=4.0
+# Let op de aanhalingstekens: zonder zou de shell '>=5.0' lezen als een omleiding
+# naar een bestand '=5.0' en zomaar eender welke versie installeren.
+RUN pip install --no-cache-dir "tzlocal>=5.0"
 
 # Overige pakketten installeren
 COPY requirements.txt .
