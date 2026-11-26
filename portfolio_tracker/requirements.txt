@@ -7,6 +7,9 @@ apscheduler>=3.10.0,<4.0
 tzlocal>=4.0
 python-dotenv>=1.0.0
 numpy>=1.24.0,<2.0.0
+# pyarrow 26+ eist NumPy 2 (ImportError bij elke st.dataframe). Streamlit trekt
+# pyarrow ongepind mee, dus vastzetten zolang numpy op 1.x blijft.
+pyarrow>=14.0.0,<26.0.0
 pytz>=2023.3
 requests>=2.30.0
 openpyxl>=3.1.0

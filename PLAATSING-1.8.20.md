@@ -6,6 +6,7 @@
 | `portfolio_tracker/market_data.py` | Notering kiezen volgens de munt van het activum (koers, historiek, fotomoment, dividenden, marktstatus) |
 | `portfolio_tracker/views/assets.py` | Bronnen diagnose toont munt per notering en de keuze van de app |
 | `portfolio_tracker/config.yaml` | Versie 1.8.20 |
+| `portfolio_tracker/requirements.txt` | pyarrow < 26 (anders crasht elke tabel met numpy 1.x) |
 | `portfolio_tracker/CHANGELOG.md` | Changelog |
 
 Geen databasemigratie nodig.

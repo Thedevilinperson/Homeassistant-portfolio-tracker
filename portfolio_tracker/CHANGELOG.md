@@ -3,6 +3,13 @@
 Alle noemenswaardige wijzigingen aan de Portfolio Tracker add-on.
 
 ## 1.8.20
+### 🛠️ Herbouw: pyarrow vastgezet op < 26
+
+Bij het herbouwen haalde pip pyarrow 26 binnen (komt ongepind mee met Streamlit). Die
+versie eist NumPy 2, terwijl de add-on numpy op 1.x houdt. Gevolg: elke tabel gaf
+`ImportError: pyarrow requires NumPy 2.0 or newer` (o.a. het dashboard). pyarrow staat
+nu vast op `>=14,<26` in requirements.txt.
+
 ### 💱 Koers altijd in de munt van het activum
 
 **De fout**
