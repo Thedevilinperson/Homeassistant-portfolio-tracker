@@ -654,7 +654,8 @@ def page_assets():
             st.caption("Vraagt élke koersbron apart wat ze van deze ISIN weet en toont het "
                        "antwoord. Zo zie je of een effect ergens gekend is, in plaats van enkel "
                        "'alle bronnen faalden'.")
-            _isins = [(a["ticker"], a.get("isin") or "") for a in assets if (a.get("isin") or "")]
+            _isins = [(a["ticker"], a.get("isin") or "", (a.get("currency") or "").strip())
+                      for a in assets if (a.get("isin") or "")]
             if not _isins:
                 st.info("Geen enkel activum heeft een ISIN ingevuld.")
             else:
@@ -663,7 +664,12 @@ def page_assets():
                                      key="diag_sel")
                 if st.button("🔬 Diagnose uitvoeren", key="diag_run"):
                     with st.spinner("Alle koersbronnen bevragen..."):
-                        res = md.diagnose_isin(_dsel[1])
+                        res = md.diagnose_isin(_dsel[1], want_currency=_dsel[2] or None)
+                    if _dsel[2]:
+                        st.caption(f"Het activum staat in **{_dsel[2]}**. De app volgt de "
+                                   f"notering in die munt (👉) en valt pas op een bron in "
+                                   "een andere munt terug (⚠️) als er geen enkele in "
+                                   f"{_dsel[2]} is.")
                     show_df(pd.DataFrame([{
                         "": "✅" if r["ok"] else "❌",
                         "Bron": r["bron"],
