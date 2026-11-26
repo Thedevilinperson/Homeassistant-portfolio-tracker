@@ -47,7 +47,7 @@ Voor het opzetten van een lege portefeuille: hoofdstuk 2 van de handleiding.
 
 ## Techniek
 
-Python 3.11, Streamlit, SQLite, APScheduler, Plotly, OpenAI API. Koersen komen van
+Python 3.14, Streamlit, SQLite, APScheduler, Plotly, OpenAI API. Koersen komen van
 Yahoo Finance, onvista, Euronext, Tradegate en Deutsche Börse, met de ISIN als sleutel.
 
 ## Voorbehoud
