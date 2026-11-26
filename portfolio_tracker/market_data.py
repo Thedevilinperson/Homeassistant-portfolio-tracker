@@ -320,12 +320,29 @@ def _yahoo_isin_candidates(isin: str) -> list[dict]:
     return out
 
 
-def _yahoo_symbol_activity(symbol: str) -> tuple[float | None, float | None]:
-    """(koers, epoch van de laatste noteringstijd) voor een Yahoo-symbool, of (None,None).
-    De noteringstijd (regularMarketTime) onderscheidt een nog-verhandeld symbool van een
-    'bevroren' oud symbool dat wel nog een (oude) slotkoers teruggeeft."""
+# Munt per Yahoo-symbool. De munt van een notering verandert niet, dus één keer per
+# proces opvragen volstaat (scheelt een netwerkcall bij elke koersverversing).
+_SYMBOL_CURRENCY: dict[str, str] = {}
+
+
+def _norm_currency(cur) -> str:
+    """Muntcode om te vergelijken. 'GBp'/'GBX' (pence) blijft BEWUST verschillend van
+    'GBP' (pond): het is een factor 100, geen synoniem."""
+    c = (cur or "").strip()
+    if c in ("GBp", "GBX", "GBx"):
+        return "GBX"
+    return c.upper()
+
+
+def _currency_eq(a, b) -> bool:
+    return bool(_norm_currency(a)) and _norm_currency(a) == _norm_currency(b)
+
+
+def _yahoo_symbol_meta(symbol: str) -> tuple[float | None, float | None, str | None]:
+    """(koers, epoch laatste noteringstijd, munt) voor een Yahoo-symbool via het lichte
+    chart-endpoint, of (None, None, None)."""
     if not symbol:
-        return None, None
+        return None, None, None
     try:
         import requests
         resp = requests.get(
@@ -338,31 +355,72 @@ def _yahoo_symbol_activity(symbol: str) -> tuple[float | None, float | None]:
                 meta = results[0].get("meta", {}) or {}
                 price = _to_float(meta.get("regularMarketPrice"))
                 t = meta.get("regularMarketTime")
-                return price, (float(t) if t else None)
+                cur = (meta.get("currency") or "").strip() or None
+                if cur:
+                    _SYMBOL_CURRENCY[symbol.upper()] = cur
+                return price, (float(t) if t else None), cur
     except Exception as e:
-        logger.info(f"_yahoo_symbol_activity({symbol}): {e}")
-    return None, None
+        logger.info(f"_yahoo_symbol_meta({symbol}): {e}")
+    return None, None, None
 
 
-def resolve_active_symbol(isin: str) -> dict:
+def _yahoo_symbol_activity(symbol: str) -> tuple[float | None, float | None]:
+    """(koers, epoch van de laatste noteringstijd) voor een Yahoo-symbool, of (None,None).
+    De noteringstijd (regularMarketTime) onderscheidt een nog-verhandeld symbool van een
+    'bevroren' oud symbool dat wel nog een (oude) slotkoers teruggeeft."""
+    price, t, _cur = _yahoo_symbol_meta(symbol)
+    return price, t
+
+
+def _yahoo_symbol_currency(symbol: str) -> str | None:
+    """Munt waarin Yahoo dit symbool noteert (gecachet per proces)."""
+    if not symbol:
+        return None
+    key = symbol.upper()
+    if key not in _SYMBOL_CURRENCY:
+        _yahoo_symbol_meta(symbol)
+    return _SYMBOL_CURRENCY.get(key)
+
+
+def resolve_active_symbol(isin: str, want_currency: str | None = None) -> dict:
     """Kies uit de Yahoo-kandidaten voor een ISIN het symbool dat het RECENTST verhandeld
     werd (hoogste regularMarketTime). Zo wint bij een tickerwijziging het nieuwe, actieve
-    symbool van het oude, bevroren symbool. Geeft {'symbol','candidates','multiple'}."""
+    symbool van het oude, bevroren symbool.
+
+    Met want_currency (de munt van het activum) tellen EERST enkel de noteringen in die
+    munt mee. Eén ISIN noteert vaak op meerdere beurzen in verschillende munten (bv. een
+    UCITS-ETF op Londen in USD én op Milaan/Xetra in EUR); Yahoo's eerste zoekresultaat is
+    dan willekeurig de verkeerde. Bestaat er geen notering in die munt, dan valt de keuze
+    terug op alle kandidaten en is currency_match False.
+    Geeft {'symbol','candidates','multiple','currency_match'}."""
     cands = _yahoo_isin_candidates(isin)
     if not cands:
-        return {"symbol": None, "candidates": [], "multiple": False}
-    best_sym, best_t = None, -1.0
-    for c in cands[:6]:   # begrens netwerkcalls; Yahoo sorteert op relevantie
-        price, t = _yahoo_symbol_activity(c["symbol"])
+        return {"symbol": None, "candidates": [], "multiple": False, "currency_match": False}
+    for c in cands[:8]:   # begrens netwerkcalls; Yahoo sorteert op relevantie
+        price, t, cur = _yahoo_symbol_meta(c["symbol"])
         c["price"] = price
         c["market_time"] = t
-        if t is not None and t > best_t:
-            best_t, best_sym = t, c["symbol"]
-    if best_sym is None:
-        with_price = [c for c in cands if c.get("price") is not None]
-        best_sym = (with_price[0]["symbol"] if with_price else cands[0]["symbol"])
-    return {"symbol": best_sym, "candidates": cands,
-            "multiple": len({c["symbol"].upper() for c in cands}) > 1}
+        c["currency"] = cur
+
+    def _best(pool):
+        best_sym, best_t = None, -1.0
+        for c in pool:
+            t = c.get("market_time")
+            if t is not None and t > best_t:
+                best_t, best_sym = t, c["symbol"]
+        if best_sym is None:
+            with_price = [c for c in pool if c.get("price") is not None]
+            best_sym = (with_price[0]["symbol"] if with_price else
+                        (pool[0]["symbol"] if pool else None))
+        return best_sym
+
+    checked = [c for c in cands if "market_time" in c]
+    matching = ([c for c in checked if _currency_eq(c.get("currency"), want_currency)]
+                if want_currency else [])
+    sym = _best(matching) if matching else _best(cands)
+    return {"symbol": sym, "candidates": cands,
+            "multiple": len({c["symbol"].upper() for c in cands}) > 1,
+            "currency_match": bool(matching) if want_currency else True}
 
 
 _NAME_NOISE = ("inc", "inc.", "incorporated", "corp", "corp.", "corporation", "co",
@@ -413,10 +471,28 @@ def asset_status_probe(asset: dict, online: bool = True) -> dict:
     # 1) Tickerwijziging / meerdere producten onder dezelfde ISIN
     if _isin_valid(isin):
         try:
-            res = resolve_active_symbol(isin)
+            want = (asset.get("currency") or "").strip() or None
+            res = resolve_active_symbol(isin, want_currency=want)
             new_sym = (res.get("symbol") or "").upper() or None
+            if want and not res.get("currency_match"):
+                # Geen notering in de munt van het activum: het onthouden symbool niet
+                # vervangen door een notering in een andere munt (de koersketen valt dan
+                # terug op andere bronnen in de juiste munt).
+                new_sym = stored_sym
             cand_syms = sorted({c["symbol"].upper() for c in res.get("candidates", [])})
-            if new_sym and stored_sym and new_sym != stored_sym:
+            old_cur = next((c.get("currency") for c in res.get("candidates", [])
+                            if c["symbol"].upper() == (stored_sym or "")), None)
+            if (new_sym and stored_sym and new_sym != stored_sym and want
+                    and old_cur and not _currency_eq(old_cur, want)):
+                # Geen tickerwijziging: het oude symbool noteerde in een andere munt dan
+                # het activum en wordt vervangen door de notering in de juiste munt.
+                events.append({
+                    "kind": "ticker_change", "severity": "info",
+                    "message": (f"Notering aangepast aan de munt van het activum ({want}): "
+                                f"{stored_sym} ({old_cur}) → {new_sym}."),
+                    "detail": {"old": stored_sym, "new": new_sym, "candidates": cand_syms},
+                })
+            elif new_sym and stored_sym and new_sym != stored_sym:
                 events.append({
                     "kind": "ticker_change", "severity": "warning",
                     "message": f"Actief Yahoo-symbool gewijzigd: {stored_sym} → {new_sym}.",
@@ -1322,6 +1398,7 @@ def _euronext_table(html: str) -> dict[str, str]:
 # Labels waarin een bruikbare koers kan staan, in volgorde van voorkeur. Voor een illiquide
 # product (warrant zonder trade vandaag) is de laatste koers vaak leeg en moeten we terugvallen
 # op de waarderings-/slotkoers of op bied/laat.
+_EURONEXT_LIVE_LABELS = ("last traded price", "last price", "laatste koers", "dernier cours")
 _EURONEXT_PRICE_LABELS = [
     "last traded price", "last price", "laatste koers", "dernier cours",
     "valuation price", "valuation close", "closing price", "previous close",
@@ -1859,29 +1936,60 @@ def probe_isin(isin: str) -> tuple[float | None, str | None, str | None]:
     return None, None, None
 
 
-def diagnose_isin(isin: str) -> list[dict]:
+def diagnose_isin(isin: str, want_currency: str | None = None) -> list[dict]:
     """Diagnose per koersbron voor één ISIN: wat antwoordt elke bron precies?
 
     Geeft een lijst van {bron, ok, koers, munt, detail} terug. Bedoeld voor de knop
     'Bronnen diagnose' in het activaoverzicht: zo zie je zwart op wit of een effect
     ergens gekend is, in plaats van enkel 'alle bronnen faalden'. Vindt GEEN ENKELE
     bron het instrument (ook Euronext niet), dan is het vrijwel zeker niet publiek
-    genoteerd en is een handmatige koers het juiste antwoord — geen codeprobleem."""
+    genoteerd en is een handmatige koers het juiste antwoord — geen codeprobleem.
+
+    Met want_currency (munt van het activum) worden ALLE Yahoo-noteringen getoond met
+    hun munt, en wordt aangeduid welke de app kiest en welke bronnen in een andere munt
+    noteren dan het activum."""
     out: list[dict] = []
     if not _isin_valid(isin):
         return [{"bron": "—", "ok": False, "koers": None, "munt": None,
                  "detail": "Geen geldige ISIN (12 tekens, begint met 2 letters)."}]
 
-    # 1) Yahoo via de ISIN
-    sym = _yahoo_symbol_for_isin(isin)
-    if sym:
-        p, c = _price_from_yahoo_symbol(sym)
-        out.append({"bron": f"Yahoo ({sym})", "ok": p is not None, "koers": p, "munt": c,
-                    "detail": ("Symbool gevonden en koers opgehaald." if p is not None
-                               else "Symbool gevonden, maar Yahoo geeft geen koers.")})
+    def _cur_note(c) -> str:
+        if want_currency and c and not _currency_eq(c, want_currency):
+            return f" ⚠️ Andere munt dan het activum ({want_currency}) — enkel noodoplossing."
+        return ""
+
+    # 1) Yahoo via de ISIN — alle noteringen, met munt
+    if want_currency:
+        res = resolve_active_symbol(isin, want_currency=want_currency)
+        chosen = (res.get("symbol") or "").upper() if res.get("currency_match") else ""
+        for c in res.get("candidates", [])[:8]:
+            p, cur = c.get("price"), c.get("currency")
+            is_chosen = c["symbol"].upper() == chosen
+            out.append({"bron": f"Yahoo ({c['symbol']})", "ok": p is not None,
+                        "koers": p, "munt": cur,
+                        "detail": (("👉 Gekozen door de app (notering in de munt van het "
+                                    "activum, recentst verhandeld)." if is_chosen else
+                                    f"Notering op {c.get('exchange') or '?'}.")
+                                   if p is not None else
+                                   "Symbool gevonden, maar Yahoo geeft geen koers.")
+                                  + ("" if is_chosen else _cur_note(cur))})
+        if not res.get("candidates"):
+            out.append({"bron": "Yahoo", "ok": False, "koers": None, "munt": None,
+                        "detail": "Yahoo kent deze ISIN niet (geen verhandelbaar symbool)."})
+        elif not chosen:
+            out.append({"bron": "Yahoo", "ok": False, "koers": None, "munt": None,
+                        "detail": f"Geen Yahoo-notering in {want_currency}: de app gebruikt "
+                                  "eerst de andere bronnen in die munt."})
     else:
-        out.append({"bron": "Yahoo", "ok": False, "koers": None, "munt": None,
-                    "detail": "Yahoo kent deze ISIN niet (geen verhandelbaar symbool)."})
+        sym = _yahoo_symbol_for_isin(isin)
+        if sym:
+            p, c = _price_from_yahoo_symbol(sym)
+            out.append({"bron": f"Yahoo ({sym})", "ok": p is not None, "koers": p, "munt": c,
+                        "detail": ("Symbool gevonden en koers opgehaald." if p is not None
+                                   else "Symbool gevonden, maar Yahoo geeft geen koers.")})
+        else:
+            out.append({"bron": "Yahoo", "ok": False, "koers": None, "munt": None,
+                        "detail": "Yahoo kent deze ISIN niet (geen verhandelbaar symbool)."})
 
     # 2) Euronext — met de handelsplaats erbij, want die is het kernprobleem bij warrants
     mic = _euronext_resolve(isin)
@@ -1892,7 +2000,13 @@ def diagnose_isin(isin: str) -> list[dict]:
             detail = (f"Instrument gekend op {mic} (HTTP {status}, {len(tbl)} velden), maar geen "
                       f"koersveld met een waarde. Velden: {keys}")
         else:
-            detail = f"Instrument gekend op {mic} (HTTP {status}); koers gevonden."
+            _p2, _c2, lbl = _euronext_price_from_table(tbl)
+            detail = f"Instrument gekend op {mic} (HTTP {status}); koers uit veld '{lbl}'."
+            if lbl and lbl not in _EURONEXT_LIVE_LABELS:
+                detail += (" ⚠️ Dat is GEEN live koers maar een slot-/referentiekoers. "
+                           "Velden van Euronext: " + "; ".join(
+                               f"{k}={v}" for k, v in list(tbl.items())[:16]))
+            detail += _cur_note(c)
         out.append({"bron": f"Euronext ({mic})", "ok": p is not None, "koers": p, "munt": c,
                     "detail": detail})
     else:
@@ -1910,7 +2024,7 @@ def diagnose_isin(isin: str) -> list[dict]:
         p, c = provider(isin)
         out.append({"bron": names.get(provider.__name__, provider.__name__),
                     "ok": p is not None, "koers": p, "munt": c,
-                    "detail": ("Koers gevonden." if p is not None
+                    "detail": ("Koers gevonden." + _cur_note(c) if p is not None
                                else "Instrument niet gekend of geen koers (zie de log voor detail).")})
     return out
 
@@ -1943,10 +2057,104 @@ def _remember_resolved_symbol(ticker: str, symbol: str) -> None:
         logger.warning(f"_remember_resolved_symbol({ticker},{symbol}): {e}")
 
 
+def _asset_currency(ticker: str) -> str:
+    """Munt van het activum zoals ingesteld in de app ('' als onbekend / geen activum).
+    Dat is de munt waarin je het effect gekocht hebt en waarin de app het waardeert —
+    en dus de munt waarin de koers opgehaald moet worden."""
+    try:
+        import database as _db
+        a = _db.get_asset(ticker) or {}
+        return (a.get("currency") or "").strip()
+    except Exception:
+        return ""
+
+
+# (isin, munt) -> (epoch, symbool of '') — uitkomst van de zoektocht naar een Yahoo-
+# notering in de munt van het activum. Ook een NEGATIEF resultaat wordt even onthouden,
+# anders zou elke koersverversing (om de 5 min) alle kandidaten opnieuw aftasten voor
+# een effect dat in die munt gewoon niet op Yahoo staat.
+_ASSET_SYMBOL_CACHE: dict[tuple[str, str], tuple[float, str]] = {}
+ASSET_SYMBOL_TTL = 6 * 3600
+
+
+def _asset_yahoo_symbol(ticker: str) -> tuple[str | None, bool]:
+    """HET Yahoo-symbool voor een activum, voor koers, historiek, fotomoment, dividenden
+    en marktstatus. Eén keuze voor de hele app, zodat koers en historiek nooit van een
+    andere notering (en munt) komen.
+
+    Geeft (symbool, munt_klopt). Regels:
+      • De ISIN is de bron van waarheid voor WELK effect het is; de MUNT van het activum
+        bepaalt WELKE notering ervan. Een UCITS-ETF als Global X Genomics (IE00BM8R0N95)
+        staat op Londen in USD (GNOM.L) én op Milaan in EUR (GNOM.MI); wie in EUR kocht,
+        moet de EUR-notering volgen, niet Yahoo's toevallig eerste zoekresultaat.
+      • Eerst het onthouden symbool (resolved_symbol) — maar enkel als het in de juiste
+        munt noteert. Een eerder (verkeerd) gekozen symbool corrigeert zich zo vanzelf.
+      • Geen Yahoo-notering in die munt: (oud symbool, False). De oproeper beslist dan:
+        eerst andere bronnen in de juiste munt, anders omrekenen — nooit stilzwijgend
+        een koers in een andere munt als koers in de activamunt behandelen.
+      • Geen activum/ISIN: het ticker zelf (gedrag zoals vroeger)."""
+    cand = (ticker or "").strip().upper()
+    isin = _asset_isin(ticker)
+    if not _isin_valid(isin) and _isin_valid(cand):
+        isin = cand
+    explicit = None if _isin_valid(cand) else (ticker or None)
+    if not _isin_valid(isin):
+        return explicit, True
+
+    want = _asset_currency(ticker)
+    cached = _resolved_symbol(ticker)
+    legacy = cached or _yahoo_symbol_for_isin(isin) or explicit
+    if not want:
+        return legacy, True
+
+    if cached and _currency_eq(_yahoo_symbol_currency(cached), want):
+        return cached, True
+
+    key = (isin, _norm_currency(want))
+    hit = _ASSET_SYMBOL_CACHE.get(key)
+    if hit and (time.time() - hit[0]) < ASSET_SYMBOL_TTL:
+        sym = hit[1] or None
+    else:
+        sym, informed = None, False
+        try:
+            res = resolve_active_symbol(isin, want_currency=want)
+            if res.get("currency_match"):
+                sym = res.get("symbol")
+            # Enkel onthouden als we de munten echt konden vaststellen. Bij een
+            # netwerkhapering kennen we geen enkele munt — dat is geen bewijs dat er
+            # geen notering in de juiste munt bestaat.
+            informed = any(c.get("currency") for c in res.get("candidates", []))
+        except Exception as e:
+            logger.info(f"_asset_yahoo_symbol({ticker}): {e}")
+        # Expliciet ingevulde Yahoo-ticker in de juiste munt als laatste kans (de ISIN-
+        # zoeker van Yahoo geeft niet altijd elke beurs terug).
+        if not sym and explicit and _currency_eq(_yahoo_symbol_currency(explicit), want):
+            sym = explicit
+        if sym or informed:
+            _ASSET_SYMBOL_CACHE[key] = (time.time(), sym or "")
+        if sym:
+            if cached and cached != sym.upper():
+                logger.info(f"_asset_yahoo_symbol({ticker}): {cached} noteert in "
+                            f"{_yahoo_symbol_currency(cached)}, activum in {want} — "
+                            f"overgeschakeld naar {sym}.")
+        else:
+            logger.info(f"_asset_yahoo_symbol({ticker}): geen Yahoo-notering in {want} "
+                        f"voor {isin} — andere bronnen of omrekening nodig.")
+    if sym:
+        if not cached or cached != sym.upper():
+            _remember_resolved_symbol(ticker, sym.upper())
+        return sym, True
+    return legacy, False
+
+
 def _yf_symbol(ticker: str) -> str | None:
-    """Yahoo-veilig symbool voor een ticker. Is het ticker een ISIN, dan wordt
-    eerst een verhandelbaar symbool opgezocht (rauwe ISIN's laten yfinance een
-    exception gooien zodra Yahoo ze niet kent). Geen symbool -> None."""
+    """Yahoo-veilig symbool voor een ticker. Is het een activum met ISIN, dan de notering
+    in de munt van het activum (zie _asset_yahoo_symbol). Is het ticker een ISIN, dan wordt
+    eerst een verhandelbaar symbool opgezocht (rauwe ISIN's laten yfinance een exception
+    gooien zodra Yahoo ze niet kent). Geen symbool -> None."""
+    sym, _ok = _asset_yahoo_symbol(ticker)
+    if sym:
+        return sym
     cand = (ticker or "").strip().upper()
     if _isin_valid(cand):
         return _yahoo_symbol_for_isin(cand)
@@ -1957,6 +2165,7 @@ def _yf_symbol(ticker: str) -> str | None:
 # Vijf bronnen die tien keer na elkaar niets vinden = geen tijdelijke storing.
 MAX_PRICE_FAILURES = 10
 _GIVEN_UP_LOGGED: set[str] = set()   # één waarschuwing per proces, geen logspam
+_CURRENCY_MISMATCH_LOGGED: set[str] = set()
 
 _FAIL_CACHE: dict[str, float] = {}   # ticker -> epoch van laatste volledige mislukking
 FAIL_CACHE_TTL = 1800  # 30 min — genoeg om herhaling elke 5 min te vermijden,
@@ -2276,39 +2485,73 @@ def get_current_price(ticker: str, _depth: int = 0) -> tuple[float | None, str |
         isin = ticker.strip().upper()
 
     price, currency = None, None
+    want = _asset_currency(ticker)
+    # Een koers in een ANDERE munt dan die van het activum is enkel een noodoplossing:
+    # ze wordt bijgehouden en pas gebruikt als geen enkele bron de juiste munt levert.
+    # (Ze blijft dan wel correct gelabeld met haar eigen munt, zodat de omrekening
+    # naar EUR klopt — maar je ziet dan bv. de Londense USD-notering i.p.v. de
+    # EUR-notering waarop je kocht.)
+    fallback: tuple[float, str, str] | None = None
+
+    def _fits(cur) -> bool:
+        return (not want) or _currency_eq(cur or "EUR", want)
 
     if not recently_failed:
-        # 1) ISIN → Yahoo-symbool (eerst het laatst gevonden/gecachete symbool
-        #    proberen, dat is sneller dan een nieuwe zoekopdracht en meestal nog
-        #    steeds correct)
+        # 1) ISIN → Yahoo-notering in de munt van het activum (onthouden symbool
+        #    eerst, zie _asset_yahoo_symbol)
+        yahoo_ok = False
         if _isin_valid(isin):
-            cached_sym = _resolved_symbol(ticker)
-            for sym in ([cached_sym] if cached_sym else []) + [None]:
-                if sym is None:
-                    sym = _yahoo_symbol_for_isin(isin)
-                if not sym:
-                    continue
+            sym, yahoo_ok = _asset_yahoo_symbol(ticker)
+            if sym and yahoo_ok:
                 p, c = _price_from_yahoo_symbol(sym)
                 if p is not None:
-                    price, currency = p, c
-                    if sym != cached_sym:
-                        _remember_resolved_symbol(ticker, sym)
-                    break
+                    if _fits(c):
+                        price, currency = p, c
+                    else:
+                        fallback = (p, c, f"Yahoo {sym}")
 
-        # 2) Externe (niet-Yahoo) bronnen op basis van de ISIN
+        # 2) Externe (niet-Yahoo) bronnen op basis van de ISIN — de eerste die in de
+        #    juiste munt antwoordt, wint
         if price is None and _isin_valid(isin):
             for provider in _ISIN_PROVIDERS:
                 p, c = provider(isin)
-                if p is not None:
+                if p is None:
+                    continue
+                if _fits(c):
                     price, currency = p, c
                     break
+                if fallback is None:
+                    fallback = (p, c, provider.__name__)
 
         # 3) De opgeslagen ticker rechtstreeks op Yahoo — enkel als terugval (geen
         #    ISIN, of de ISIN leverde niets op). Niet bij een ISIN-als-ticker:
         #    yfinance gooit dan een exception zodra Yahoo de ISIN niet kent
         #    ("Invalid ISIN number").
         if price is None and not ticker_is_isin:
-            price, currency = _price_from_yahoo_symbol(ticker)
+            p, c = _price_from_yahoo_symbol(ticker)
+            if p is not None:
+                if _fits(c):
+                    price, currency = p, c
+                elif fallback is None:
+                    fallback = (p, c, f"Yahoo {ticker}")
+
+        # 3b) Yahoo-notering in een andere munt (vroeger gedrag) — enkel als er nog
+        #     helemaal niets gevonden is
+        if price is None and fallback is None and _isin_valid(isin) and not yahoo_ok:
+            legacy = _resolved_symbol(ticker) or _yahoo_symbol_for_isin(isin)
+            if legacy:
+                p, c = _price_from_yahoo_symbol(legacy)
+                if p is not None:
+                    fallback = (p, c, f"Yahoo {legacy}")
+
+        if price is None and fallback is not None:
+            price, currency, src = fallback
+            if ticker not in _CURRENCY_MISMATCH_LOGGED:
+                _CURRENCY_MISMATCH_LOGGED.add(ticker)
+                logger.warning(
+                    f"get_current_price({ticker}): geen enkele bron levert een koers in "
+                    f"{want} (de munt van het activum) — koers in {currency} via {src} "
+                    "gebruikt en omgerekend. Controleer de munt van het activum.")
 
     # 4) Handmatige koers — laatste redmiddel
     if price is None:
@@ -2445,7 +2688,7 @@ def convert_to_eur(amount: float, currency: str) -> float | None:
 # ── Historische data ─────────────────────────────────────────────────────────
 
 def get_close_on_date(ticker: str, on_date: str, _depth: int = 0) -> float | None:
-    """Slotkoers (native valuta) op of vlak vóór 'YYYY-MM-DD'. Voor het fotomoment
+    """Slotkoers (in de munt van het activum) op of vlak vóór 'YYYY-MM-DD'. Voor het fotomoment
     (31/12/2025). auto_adjust=False zodat de koers de werkelijke slotkoers van die
     dag is (zonder latere split-/dividendcorrectie). Is het ticker een ISIN zonder
     Yahoo-notering (bv. een warrant), dan wordt eerst een Yahoo-symbool opgezocht,
@@ -2474,32 +2717,51 @@ def get_close_on_date(ticker: str, on_date: str, _depth: int = 0) -> float | Non
             return None
         up = get_close_on_date(dcfg["underlying_ticker"], on_date, _depth=_depth + 1)
         return derived_value(up, dcfg) if up is not None else None
+    def _yahoo_close(sym: str) -> float | None:
+        try:
+            d = datetime.strptime(on_date[:10], "%Y-%m-%d")
+            start = (d - timedelta(days=10)).strftime("%Y-%m-%d")
+            end = (d + timedelta(days=1)).strftime("%Y-%m-%d")
+            hist = yf.Ticker(sym).history(start=start, end=end, auto_adjust=False)
+            if not hist.empty:
+                return round(float(hist["Close"].iloc[-1]), 4)
+        except Exception as e:
+            logger.warning(f"get_close_on_date({ticker},{on_date}) via {sym}: {e}")
+        return None
+
     cand = (ticker or "").strip().upper()
-    if _isin_valid(cand):
-        sym = _yahoo_symbol_for_isin(cand)
-        if sym:
-            try:
-                d = datetime.strptime(on_date[:10], "%Y-%m-%d")
-                start = (d - timedelta(days=10)).strftime("%Y-%m-%d")
-                end = (d + timedelta(days=1)).strftime("%Y-%m-%d")
-                hist = yf.Ticker(sym).history(start=start, end=end, auto_adjust=False)
-                if not hist.empty:
-                    return round(float(hist["Close"].iloc[-1]), 4)
-            except Exception as e:
-                logger.warning(f"get_close_on_date({ticker},{on_date}) via {sym}: {e}")
-        price = _onvista_close_on_date(cand, on_date)
+    isin = _asset_isin(ticker) or (cand if _isin_valid(cand) else "")
+    want = _asset_currency(ticker)
+    # Zelfde notering als de actuele koers: die in de munt van het activum.
+    sym, cur_ok = _asset_yahoo_symbol(ticker)
+    if sym and cur_ok:
+        p = _yahoo_close(sym)
+        if p is not None:
+            return p
+    # Geen Yahoo-notering in de juiste munt: onvista / Börse Frankfurt noteren de
+    # Europese plaatsen in EUR — enkel bruikbaar als het activum in EUR staat.
+    if _isin_valid(isin) and (not want or want == "EUR"):
+        price = _onvista_close_on_date(isin, on_date)
         if price is not None:
             return price
-        return _dbg_close_on_date(cand, on_date)
-    try:
-        d = datetime.strptime(on_date[:10], "%Y-%m-%d")
-        start = (d - timedelta(days=10)).strftime("%Y-%m-%d")
-        end = (d + timedelta(days=1)).strftime("%Y-%m-%d")
-        hist = yf.Ticker(ticker).history(start=start, end=end, auto_adjust=False)
-        if not hist.empty:
-            return round(float(hist["Close"].iloc[-1]), 4)
-    except Exception as e:
-        logger.warning(f"get_close_on_date({ticker},{on_date}): {e}")
+        price = _dbg_close_on_date(isin, on_date)
+        if price is not None:
+            return price
+    # Laatste mogelijkheid: de notering in een andere munt, omgerekend met de
+    # wisselkoers van DIE dag (nooit 1,0).
+    if sym and not cur_ok:
+        p = _yahoo_close(sym)
+        src = _yahoo_symbol_currency(sym)
+        if p is not None and want:
+            if _iso_currency(src) and _iso_currency(want):
+                r_from = get_historical_exchange_rate(src, on_date[:10]) if src != "EUR" else 1.0
+                r_to = get_historical_exchange_rate(want, on_date[:10]) if want != "EUR" else 1.0
+                if r_from and r_to:
+                    return round(p * r_from / r_to, 4)
+            logger.warning(f"get_close_on_date({ticker},{on_date}): enkel een koers in {src} "
+                           f"via {sym}, niet om te rekenen naar {want}.")
+            return None
+        return p
     return None
 
 
@@ -3033,17 +3295,14 @@ def get_price_series(ticker: str, start: str, end: str | None = None,
             return None
         return und.map(lambda p: derived_value(p, dcfg))
 
-    key = f"series:{ticker}:{start}:{end}:{int(bool(auto_adjust))}"
+    # Zelfde notering als de actuele koers (munt van het activum), zie _asset_yahoo_symbol.
+    yf_ticker, cur_ok = _asset_yahoo_symbol(ticker)
+    if not yf_ticker:
+        return None  # geen Yahoo-notering voor deze ISIN; geen historische reeks beschikbaar
+    key = f"series:{ticker}:{yf_ticker}:{start}:{end}:{int(bool(auto_adjust))}"
     entry = _HIST_CACHE.get(key)
     if entry and (time.time() - entry[0]) < HIST_TTL:
         return entry[1]
-    cand = (ticker or "").strip().upper()
-    yf_ticker = ticker
-    if _isin_valid(cand):
-        sym = _yahoo_symbol_for_isin(cand)
-        if not sym:
-            return None  # geen Yahoo-notering voor deze ISIN; geen historische reeks beschikbaar
-        yf_ticker = sym
     try:
         end = end or (datetime.now() + timedelta(days=1)).strftime("%Y-%m-%d")
         hist = yf.Ticker(yf_ticker).history(start=start, end=end, auto_adjust=auto_adjust)
@@ -3051,10 +3310,51 @@ def get_price_series(ticker: str, start: str, end: str | None = None,
             return None
         series = hist["Close"].copy()
         series.index = series.index.tz_localize(None).normalize()
+        if not cur_ok:
+            # Enkel een notering in een andere munt beschikbaar: omrekenen naar de munt
+            # van het activum. De rest van de app (📈 Evolutie, MA200, fotomoment) gaat
+            # er immers van uit dat de reeks in de munt van het activum staat.
+            series = _convert_series(series, _yahoo_symbol_currency(yf_ticker),
+                                     _asset_currency(ticker), start, end)
+            if series is None:
+                return None
         _HIST_CACHE[key] = (time.time(), series)
         return series
     except Exception as e:
         logger.warning(f"get_price_series({ticker}): {e}")
+        return None
+
+
+def _iso_currency(cur) -> bool:
+    c = (cur or "").strip()
+    return len(c) == 3 and c.isalpha() and c.isupper() and c != "GBX"
+
+
+def _convert_series(series, from_cur, to_cur, start: str, end: str | None = None):
+    """Reeks van from_cur naar to_cur omrekenen met de DAGELIJKSE wisselkoers (via EUR).
+    Geen bruikbare wisselkoers -> None: liever geen reeks dan een reeks in de verkeerde
+    munt (nooit een stilzwijgende koers van 1,0)."""
+    if _currency_eq(from_cur, to_cur):
+        return series
+    if not (_iso_currency(from_cur) and _iso_currency(to_cur)):
+        logger.warning(f"_convert_series: kan {from_cur!r} → {to_cur!r} niet omrekenen.")
+        return None
+    try:
+        factor = None
+        idx = series.index
+        for cur, sign in ((from_cur, 1), (to_cur, -1)):
+            if cur == "EUR":
+                continue
+            fx = get_fx_series(cur, start, end)
+            if fx is None or not len(fx):
+                logger.warning(f"_convert_series: geen wisselkoersreeks {cur}/EUR.")
+                return None
+            fx = fx.reindex(fx.index.union(idx)).sort_index().ffill().bfill().reindex(idx)
+            factor = (fx if sign > 0 else 1.0 / fx) if factor is None else \
+                     (factor * fx if sign > 0 else factor / fx)
+        return series if factor is None else (series * factor).dropna()
+    except Exception as e:
+        logger.warning(f"_convert_series({from_cur}->{to_cur}): {e}")
         return None
 
 

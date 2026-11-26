@@ -2,6 +2,40 @@
 
 Alle noemenswaardige wijzigingen aan de Portfolio Tracker add-on.
 
+## 1.8.20
+### 💱 Koers altijd in de munt van het activum
+
+**De fout**
+
+Eén ISIN noteert vaak op meerdere beurzen in verschillende munten. Global X Genomics
+& Biotechnology (IE00BM8R0N95) staat op Londen in USD (GNOM.L) én op Euronext Milan in
+EUR (GNOM.MI). De app nam blind Yahoo's EERSTE zoekresultaat voor de ISIN — hier dus de
+Londense USD-notering — ook al stond het activum in EUR en was het in EUR gekocht. Dat
+symbool werd bovendien onthouden (`resolved_symbol`), zodat de fout bleef plakken.
+
+Gevolgen: een koers in USD op het dashboard i.p.v. de EUR-koers van je beurs, en erger,
+op 📈 Evolutie, de MA200 en het fotomoment werd de USD-reeks behandeld alsof ze in de
+munt van het activum stond.
+
+**De correctie**
+
+- Eén centrale keuze van de Yahoo-notering per activum (`_asset_yahoo_symbol`), gebruikt
+  door actuele koers, historiek, fotomoment, dividenden en marktstatus: de ISIN bepaalt
+  WELK effect, de **munt van het activum** bepaalt WELKE notering. Bij meerdere
+  noteringen in die munt wint de recentst verhandelde.
+- Een eerder onthouden symbool in een andere munt wordt automatisch vervangen.
+- Geen Yahoo-notering in de juiste munt: eerst de andere bronnen (onvista, Euronext,
+  Tradegate, Deutsche Börse) die in die munt antwoorden. Pas als geen enkele bron de
+  juiste munt levert, wordt een koers in een andere munt gebruikt — correct gelabeld en
+  dus correct omgerekend, met één waarschuwing in de log.
+- Historische reeksen en het fotomoment worden in dat noodgeval omgerekend met de
+  wisselkoers van elke dag (nooit 1,0).
+- De dagelijkse statuscontrole zet het symbool niet meer terug naar een notering in een
+  andere munt, en meldt de overschakeling als info i.p.v. als "tickerwijziging".
+- 🔬 Bronnen diagnose toont nu alle Yahoo-noteringen met hun munt, welke de app kiest
+  (👉), welke bronnen in een andere munt noteren (⚠️), en bij Euronext uit welk veld de
+  koers komt — een slot-/referentiekoers wordt als zodanig gemarkeerd.
+
 ## 1.8.19
 ### 🧾 Aangifte: alleen nog de WERKELIJK ingehouden roerende voorheffing
 
