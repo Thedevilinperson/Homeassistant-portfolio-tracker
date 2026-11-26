@@ -1,0 +1,3 @@
+# Python-bytecode: wordt bij elke run opnieuw aangemaakt, hoort niet in de repo.
+__pycache__/
+*.py[cod]
