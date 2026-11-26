@@ -2,7 +2,7 @@
 
 Alle noemenswaardige wijzigingen aan de Portfolio Tracker add-on.
 
-## 1.8.20
+## 1.8.21
 ### 🛠️ NumPy 2, Python 3.14 en geen onnodige vastzettingen meer
 
 **Aanleiding.** Bij het herbouwen haalde pip pyarrow 26 binnen (komt mee met
@@ -41,6 +41,7 @@ met een testdatabase, de koerstests van 1.8.20 slagen, de scheduler start zijn j
 en geen enkele module geeft een verouderingswaarschuwing. Ook een oude omgeving
 (NumPy 1.26, pandas 2.1, pyarrow 15) die met `--upgrade` bijgewerkt wordt, werkt.
 
+## 1.8.20
 ### 💱 Koers altijd in de munt van het activum
 
 **De fout**
